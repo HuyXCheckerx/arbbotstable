@@ -44,18 +44,19 @@ The scanner does not assume that the largest available trade is the most profita
 3. Subtracts a conservative execution-cost estimate derived from recent observed SOL consumption.
 4. Requires at least `MIN_NET_PROFIT_USD` after that estimated cost.
 5. Revalidates the selected size twice before submitting the Stable.com leg.
+6. Chooses the eligible size with the highest absolute net dollar profit; profit does not scale with notional.
 
 Defaults:
 
 ```text
 MIN_TRADE_SIZE_USD=1000
-MIN_NET_PROFIT_USD=0.05
-MIN_NET_RETURN_BPS=0.5
+MIN_NET_PROFIT_USD=0.10
+MIN_NET_RETURN_BPS=0
 DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 ```
 
-With these defaults, a trade must retain at least $0.05 after estimated fees and at least 0.5 basis points on its notional. At $1,000, both conditions require $0.05 net; at $5,000, the return condition requires $0.25 net. When the estimated cost is $0.00625, a $1,000 Jupiter quote must therefore show at least $0.05625 gross difference.
+With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Among all candidates that pass, the bot selects the one with the highest absolute net profit, even if another candidate has a better percentage return.
 
 ## Local setup
 

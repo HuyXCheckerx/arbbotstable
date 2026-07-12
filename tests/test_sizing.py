@@ -33,12 +33,11 @@ class DynamicSizingTests(unittest.TestCase):
         self.assertAlmostEqual(insufficient["net_profit_usd"], 0.04)
         self.assertFalse(is_profitable_candidate(insufficient, 0.05))
 
-    def test_return_floor_scales_profit_requirement_for_larger_trades(self):
-        # A 0.5 bps floor requires $0.25 net profit on a $5,000 trade.
-        too_small = calculate_quote_metrics(5_000, 5_000.20, 0.0)
-        enough = calculate_quote_metrics(5_000, 5_000.25, 0.0)
-        self.assertFalse(is_profitable_candidate(too_small, 0.05, 0.5))
-        self.assertTrue(is_profitable_candidate(enough, 0.05, 0.5))
+    def test_absolute_profit_floor_does_not_scale_with_trade_size(self):
+        too_small = calculate_quote_metrics(5_000, 5_000.09, 0.0)
+        enough = calculate_quote_metrics(5_000, 5_000.10, 0.0)
+        self.assertFalse(is_profitable_candidate(too_small, 0.10, 0.0))
+        self.assertTrue(is_profitable_candidate(enough, 0.10, 0.0))
 
 
 if __name__ == "__main__":
