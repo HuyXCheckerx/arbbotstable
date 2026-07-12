@@ -15,101 +15,97 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
-  <title>Arb Control — Live Performance</title>
+  <title>Stable Execution — Portfolio &amp; P&amp;L</title>
   <style>
     :root {
-      --bg: #080b10;
-      --panel: #10151d;
-      --panel-soft: #0d1219;
-      --line: #222c39;
-      --line-soft: #18212c;
-      --text: #f3f7fb;
-      --muted: #8794a5;
-      --cyan: #5dd9e8;
-      --green: #68e0a0;
-      --red: #ff7a86;
-      --amber: #f5c76b;
-      --blue: #7ca8ff;
-      --radius: 16px;
+      --bg: #0b0b0b;
+      --panel: #11110f;
+      --panel-soft: #0e0e0d;
+      --line: #2c2b27;
+      --line-soft: #211f1c;
+      --text: #e9e5dc;
+      --muted: #8e8a81;
+      --accent: #b9a36a;
+      --green: #70a988;
+      --red: #c97871;
+      --amber: #c3a25f;
+      --radius: 3px;
     }
 
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
-      background:
-        radial-gradient(circle at 92% -10%, rgba(93, 217, 232, .11), transparent 30rem),
-        linear-gradient(180deg, #090d13 0%, var(--bg) 45%);
+      background: var(--bg);
       color: var(--text);
-      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
       font-variant-numeric: tabular-nums;
+      -webkit-font-smoothing: antialiased;
     }
 
-    .shell { width: min(1420px, calc(100% - 40px)); margin: 0 auto; padding: 30px 0 54px; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
-    .brand { display: flex; align-items: center; gap: 13px; }
-    .brand-mark { width: 34px; height: 34px; border: 1px solid var(--cyan); border-radius: 10px; display: grid; place-items: center; color: var(--cyan); font: 800 13px/1 ui-monospace, monospace; box-shadow: inset 0 0 16px rgba(93,217,232,.12); }
-    .brand h1 { margin: 0; font-size: 15px; letter-spacing: .16em; text-transform: uppercase; }
-    .brand p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
-    .live-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
-    .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 999px; background: rgba(16,21,29,.8); color: var(--text); }
-    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 4px rgba(135,148,165,.08); }
-    .dot.good { background: var(--green); box-shadow: 0 0 0 4px rgba(104,224,160,.09); }
-    .dot.warn { background: var(--amber); box-shadow: 0 0 0 4px rgba(245,199,107,.09); }
-    .dot.bad { background: var(--red); box-shadow: 0 0 0 4px rgba(255,122,134,.09); }
+    .shell { width: min(1380px, calc(100% - 64px)); margin: 0 auto; padding: 42px 0 56px; }
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+    .brand { display: flex; align-items: center; gap: 17px; }
+    .brand-mark { width: 28px; height: 28px; border: 1px solid var(--accent); border-radius: 0; display: grid; place-items: center; color: var(--accent); font: 600 9px/1 ui-monospace, "SFMono-Regular", monospace; }
+    .brand h1 { margin: 0; font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: 22px; font-weight: 400; letter-spacing: .025em; }
+    .brand p { margin: 5px 0 0; color: var(--muted); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+    .live-meta { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 11px; }
+    .status-pill { display: inline-flex; align-items: center; gap: 9px; padding: 0 16px 0 0; border: 0; border-right: 1px solid var(--line); border-radius: 0; background: none; color: var(--text); }
+    .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
+    .dot.good { background: var(--green); }
+    .dot.warn { background: var(--amber); }
+    .dot.bad { background: var(--red); }
 
-    .hero { display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(170px, .65fr)); border: 1px solid var(--line); background: rgba(16,21,29,.84); border-radius: 20px; overflow: hidden; margin-bottom: 18px; }
-    .hero > div { padding: 26px 28px; min-height: 150px; border-left: 1px solid var(--line); }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(170px, .62fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: transparent; overflow: hidden; margin-bottom: 24px; }
+    .hero > div { padding: 30px 26px 28px; min-height: 154px; border-left: 1px solid var(--line); }
     .hero > div:first-child { border-left: 0; }
-    .eyebrow { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .13em; margin-bottom: 17px; }
-    .pnl { font-size: clamp(36px, 4.4vw, 62px); line-height: .95; font-weight: 760; letter-spacing: -.055em; }
+    .eyebrow { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .12em; margin-bottom: 20px; }
+    .pnl { font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: clamp(40px, 4.5vw, 64px); line-height: .95; font-weight: 400; letter-spacing: -.035em; }
     .positive { color: var(--green) !important; }
     .negative { color: var(--red) !important; }
-    .subvalue { margin-top: 13px; color: var(--muted); font-size: 12px; }
-    .metric { font-size: 27px; font-weight: 680; letter-spacing: -.03em; }
+    .subvalue { margin-top: 14px; color: var(--muted); font-size: 11px; }
+    .metric { font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: 30px; font-weight: 400; letter-spacing: -.025em; color: var(--text); }
 
-    .grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(330px, .72fr); gap: 18px; }
-    .panel { border: 1px solid var(--line); background: rgba(16,21,29,.82); border-radius: var(--radius); overflow: hidden; }
-    .panel-head { padding: 18px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line-soft); }
-    .panel-title { margin: 0; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
-    .panel-note { color: var(--muted); font-size: 11px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(340px, .68fr); gap: 24px; }
+    .panel { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); overflow: hidden; }
+    .panel-head { min-height: 57px; padding: 17px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); }
+    .panel-title { margin: 0; font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: 16px; font-weight: 400; letter-spacing: .01em; }
+    .panel-note { color: var(--muted); font-size: 10px; letter-spacing: .04em; }
     .token-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
-    .token { padding: 22px 20px; border-right: 1px solid var(--line-soft); }
+    .token { padding: 24px 20px 26px; border-right: 1px solid var(--line); }
     .token:last-child { border-right: 0; }
-    .token-name { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 650; }
-    .token-icon { width: 8px; height: 8px; border-radius: 50%; background: var(--blue); }
-    .token:nth-child(2) .token-icon { background: var(--cyan); }
-    .token:nth-child(3) .token-icon { background: var(--amber); }
-    .token:nth-child(4) .token-icon { background: #9f8cff; }
-    .token-amount { margin-top: 14px; font-size: clamp(18px, 2.2vw, 25px); font-weight: 680; letter-spacing: -.035em; word-break: break-word; }
-    .token-usd { margin-top: 7px; color: var(--muted); font-size: 12px; }
-    .pool-list { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line-soft); }
-    .pool { padding: 17px 20px; border-right: 1px solid var(--line-soft); }
+    .token-name { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: .08em; }
+    .token-icon { width: 10px; height: 1px; border-radius: 0; background: var(--accent); }
+    .token:nth-child(n) .token-icon { background: var(--accent); }
+    .token-amount { margin-top: 17px; font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: clamp(20px, 2.2vw, 28px); font-weight: 400; letter-spacing: -.025em; word-break: break-word; }
+    .token-usd { margin-top: 8px; color: var(--muted); font-size: 11px; }
+    .pool-list { display: grid; grid-template-columns: repeat(3, 1fr); }
+    .pool { padding: 18px 20px 20px; border-right: 1px solid var(--line); }
     .pool:last-child { border-right: 0; }
-    .pool strong { display: block; margin-top: 7px; font-size: 16px; }
+    .pool strong { display: block; margin-top: 9px; font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: 18px; font-weight: 400; }
 
-    .execution { padding: 20px; }
-    .route { margin-bottom: 20px; padding: 16px; background: var(--panel-soft); border: 1px solid var(--line-soft); border-radius: 12px; }
-    .route-value { margin-top: 8px; font-size: 16px; font-weight: 650; color: var(--cyan); word-break: break-word; }
+    .execution { padding: 22px 20px 20px; }
+    .route { margin-bottom: 20px; padding: 0 0 20px; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+    .route-value { margin-top: 8px; font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: 18px; font-weight: 400; color: var(--accent); word-break: break-word; }
     .detail-list { display: grid; gap: 0; }
     .detail { display: flex; justify-content: space-between; align-items: baseline; gap: 18px; padding: 13px 0; border-bottom: 1px solid var(--line-soft); }
     .detail:last-child { border-bottom: 0; }
-    .detail span { color: var(--muted); font-size: 12px; }
-    .detail strong { font-size: 13px; text-align: right; }
-    .error { display: none; margin-top: 16px; padding: 12px 14px; border: 1px solid rgba(255,122,134,.24); border-radius: 10px; background: rgba(255,122,134,.06); color: #ffabb2; font-size: 12px; line-height: 1.5; }
+    .detail span { color: var(--muted); font-size: 11px; }
+    .detail strong { font-size: 12px; font-weight: 500; text-align: right; }
+    .error { display: none; margin-top: 16px; padding: 12px 14px; border-left: 2px solid var(--red); border-radius: 0; background: #17100f; color: #d9948e; font-size: 11px; line-height: 1.5; }
 
     .activity { grid-column: 1 / -1; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 880px; }
-    th { padding: 13px 20px; color: var(--muted); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; text-align: left; background: var(--panel-soft); }
-    td { padding: 15px 20px; border-top: 1px solid var(--line-soft); font-size: 12px; }
-    tbody tr:hover { background: rgba(255,255,255,.015); }
-    .badge { display: inline-flex; padding: 5px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; background: rgba(104,224,160,.08); color: var(--green); }
-    .badge.failed { color: var(--red); background: rgba(255,122,134,.08); }
-    .empty { padding: 30px 20px; color: var(--muted); font-size: 13px; text-align: center; }
-    footer { display: flex; justify-content: space-between; gap: 24px; margin-top: 18px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    th { padding: 14px 20px; color: var(--muted); font-size: 9px; font-weight: 500; letter-spacing: .1em; text-transform: uppercase; text-align: left; background: var(--panel-soft); border-bottom: 1px solid var(--line); }
+    td { padding: 16px 20px; border-top: 1px solid var(--line-soft); font-size: 11px; }
+    tbody tr:hover { background: #141310; }
+    .badge { display: inline-flex; align-items: center; padding: 0; border-radius: 0; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; background: none; color: var(--green); }
+    .badge.failed { color: var(--red); background: none; }
+    .empty { padding: 38px 20px; color: var(--muted); font-family: "Iowan Old Style", "Baskerville", Georgia, serif; font-size: 14px; text-align: center; }
+    footer { display: flex; justify-content: space-between; gap: 24px; padding-top: 20px; margin-top: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.65; }
     footer p { margin: 0; max-width: 760px; }
-    .offline-banner { display: none; margin-bottom: 18px; padding: 12px 16px; border: 1px solid rgba(255,122,134,.28); background: rgba(255,122,134,.07); color: #ffb2ba; border-radius: 12px; font-size: 12px; }
+    .offline-banner { display: none; margin-bottom: 24px; padding: 12px 0 12px 14px; border: 0; border-left: 2px solid var(--red); background: #17100f; color: #d9948e; border-radius: 0; font-size: 11px; }
 
     @media (max-width: 1040px) {
       .hero { grid-template-columns: repeat(3, 1fr); }
@@ -119,7 +115,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       .activity { grid-column: auto; }
     }
     @media (max-width: 720px) {
-      .shell { width: min(100% - 24px, 1420px); padding-top: 20px; }
+      .shell { width: min(100% - 28px, 1380px); padding-top: 24px; }
       header { align-items: flex-start; }
       .live-meta > span:last-child { display: none; }
       .hero { grid-template-columns: 1fr 1fr; }
@@ -128,9 +124,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       .hero > div:nth-child(4) { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); }
       .token-grid { grid-template-columns: 1fr 1fr; }
       .token:nth-child(2) { border-right: 0; }
-      .token:nth-child(-n+2) { border-bottom: 1px solid var(--line-soft); }
+      .token:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
       .pool-list { grid-template-columns: 1fr; }
-      .pool { border-right: 0; border-bottom: 1px solid var(--line-soft); }
+      .pool { border-right: 0; border-bottom: 1px solid var(--line); }
       footer { flex-direction: column; }
     }
   </style>
@@ -139,8 +135,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <main class="shell">
     <header>
       <div class="brand">
-        <div class="brand-mark">A//</div>
-        <div><h1>Arb Control</h1><p>Stablecoin execution telemetry</p></div>
+        <div class="brand-mark">S·E</div>
+        <div><h1>Stable Execution</h1><p>Private portfolio and execution ledger</p></div>
       </div>
       <div class="live-meta">
         <div class="status-pill"><span id="status-dot" class="dot"></span><span id="status-label">Connecting</span></div>
@@ -152,7 +148,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
     <section class="hero">
       <div class="hero-main">
-        <div class="eyebrow">Total realized net P&amp;L</div>
+        <div class="eyebrow">Realized net P&amp;L</div>
         <div id="total-pnl" class="pnl">$0.00</div>
         <div class="subvalue">Session <span id="session-pnl">$0.00</span> · prior-method estimate <span id="legacy-pnl">$0.00</span></div>
       </div>
@@ -185,7 +181,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </aside>
 
       <section class="panel activity">
-        <div class="panel-head"><h2 class="panel-title">Recent execution accounting</h2><span class="panel-note">Successful and failed attempts</span></div>
+        <div class="panel-head"><h2 class="panel-title">Execution ledger</h2><span class="panel-note">Successful and failed attempts</span></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Time</th><th>Status</th><th>Route</th><th>Size</th><th>Expected gross</th><th>Stable Δ</th><th>SOL spent</th><th>Net P&amp;L</th></tr></thead>
@@ -198,7 +194,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
     <footer>
       <p>Net P&amp;L = change in USDC + USDG + PYUSD balances, valued at $1 each, minus the USD estimate of the wallet's observed SOL decrease during each attempt. This avoids treating ordinary SOL price movement as arbitrage profit.</p>
-      <p>Auto-refresh: 2s</p>
+      <p>Live ledger · 2-second refresh</p>
     </footer>
   </main>
 
