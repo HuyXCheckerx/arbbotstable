@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 import os
 import threading
 import time
@@ -269,3 +270,16 @@ class BotStateStore:
             result = copy.deepcopy(self.state)
             result["bot"]["uptime_seconds"] = self._uptime_seconds()
             return result
+
+    def estimated_execution_cost_usd(self, default_cost=0.005, percentile=0.90):
+        """Estimate a conservative full-attempt SOL cost from recent records."""
+        with self.lock:
+            costs = sorted(
+                float(record.get("sol_cost_usd", 0.0))
+                for record in self.state.get("recent_arbs", [])
+                if float(record.get("sol_cost_usd", 0.0)) > 0
+            )
+            if not costs:
+                return float(default_cost)
+            rank = max(0, min(len(costs) - 1, math.ceil(len(costs) * float(percentile)) - 1))
+            return max(float(default_cost), costs[rank])

@@ -48,6 +48,10 @@ class BotStateStoreTests(unittest.TestCase):
         self.assertEqual(state["performance"]["total_arbs"], 1)
         self.assertEqual(state["performance"]["total_attempts"], 1)
         self.assertAlmostEqual(state["performance"]["total_sol_consumed"], 0.00001)
+        self.assertAlmostEqual(
+            self.store.estimated_execution_cost_usd(default_cost=0.0001),
+            0.001,
+        )
 
     def test_failed_attempt_counts_cost_but_not_arb(self):
         before = {"usdc": 10.0, "usdg": 0.0, "pyusd": 0.0, "sol_lamports": 50_000, "sol_price": 80.0}

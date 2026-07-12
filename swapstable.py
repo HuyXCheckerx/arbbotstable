@@ -28,6 +28,12 @@ from solders.compute_budget import set_compute_unit_limit, set_compute_unit_pric
 from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from state_store import BotStateStore
+from sizing import (
+    calculate_quote_metrics,
+    generate_candidate_sizes,
+    generate_refinement_sizes,
+    is_profitable_candidate,
+)
 
 load_dotenv()
 
@@ -56,8 +62,14 @@ sys.stderr = sys.stdout
 PRIVATE_KEY = os.environ["SOLANA_PRIVATE_KEY"]
 RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 JUP_API_KEY = os.environ.get("JUP_API_KEY", "")
-MIN_PROFIT_USD = float(os.environ.get("MIN_PROFIT_USD", "0.2"))
 MIN_ARB_LIQUIDITY = float(os.environ.get("MIN_ARB_LIQUIDITY", "10000"))
+MIN_TRADE_SIZE_USD = float(os.environ.get("MIN_TRADE_SIZE_USD", "1000"))
+MIN_NET_PROFIT_USD = float(os.environ.get("MIN_NET_PROFIT_USD", "0.05"))
+default_min_return_bps = (MIN_NET_PROFIT_USD / MIN_TRADE_SIZE_USD) * 10_000
+MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", str(default_min_return_bps)))
+DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", "0.005"))
+EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
+QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
 
 api_keys_str = os.environ.get("JUP_API_KEYS", "")
 if api_keys_str:
@@ -670,7 +682,11 @@ def main():
                 ("PYUSD", "USDG", pyusd_bal, pool_usdg, PYUSD_MINT, USDG_MINT),
             ]
             
-            best_profit = -99999.0
+            estimated_execution_cost_usd = (
+                state_store.estimated_execution_cost_usd(DEFAULT_EXECUTION_COST_USD)
+                * EXECUTION_COST_SAFETY_MULTIPLIER
+            )
+            best_net_profit = float("-inf")
             best_route = None
             rescue_asset = None
             
@@ -678,34 +694,115 @@ def main():
                 simulated_bal = bal_from
                 potential_rescue = None
                 
-                if asset_from == "USDC" and bal_from < MIN_ARB_LIQUIDITY:
+                if asset_from == "USDC" and bal_from < MIN_TRADE_SIZE_USD:
                     max_rescue_pyusd = min(pyusd_bal, pool_usdc - 1) if pool_usdc > 0 else 0
                     max_rescue_usdg = min(usdg_bal, pool_usdc - 1) if pool_usdc > 0 else 0
                     
-                    if max_rescue_pyusd >= MIN_ARB_LIQUIDITY and asset_to != "PYUSD":
+                    if max_rescue_pyusd >= MIN_TRADE_SIZE_USD and asset_to != "PYUSD":
                         simulated_bal = max_rescue_pyusd
                         potential_rescue = "PYUSD"
-                    elif max_rescue_usdg >= MIN_ARB_LIQUIDITY and asset_to != "USDG":
+                    elif max_rescue_usdg >= MIN_TRADE_SIZE_USD and asset_to != "USDG":
                         simulated_bal = max_rescue_usdg
                         potential_rescue = "USDG"
 
-                if simulated_bal >= MIN_ARB_LIQUIDITY and pool_to >= MIN_ARB_LIQUIDITY + 1:
-                    swap_size = min(simulated_bal, pool_to - 1)
-                    probe_amount_raw = swap_size * 10**DECIMALS
-                    print(f"[*] Checking Jupiter rates for {asset_to} -> {asset_from} ({swap_size} tokens)...")
-                    quote = get_jup_quote(session, mint_to, mint_from, probe_amount_raw)
-                    if quote:
-                        out_raw = int(quote.get("outAmount", 0))
-                        out_human = out_raw / 10**DECIMALS
-                        profit = out_human - swap_size
-                        if profit >= MIN_PROFIT_USD:
-                            print(f"    {swap_size} {asset_to} -> {out_human:.6f} {asset_from} (Profit: {profit:.6f})")
-                            if profit > best_profit:
-                                best_profit = profit
-                                best_route = (asset_from, asset_to, swap_size, mint_from, mint_to, quote)
-                                rescue_asset = potential_rescue
-                        else:
-                            print(f"    {swap_size} {asset_to} -> {out_human:.6f} {asset_from} (Not profitable)")
+                if simulated_bal >= MIN_TRADE_SIZE_USD and pool_to >= MIN_ARB_LIQUIDITY + 1:
+                    max_feasible_size = int(min(simulated_bal, pool_to - 1))
+                    coarse_sizes = generate_candidate_sizes(max_feasible_size, MIN_TRADE_SIZE_USD)
+                    if not coarse_sizes:
+                        continue
+
+                    # A rescue path contains an additional Stable.com transaction,
+                    # so reserve another half-cycle of observed execution cost.
+                    route_cost_estimate = estimated_execution_cost_usd * (1.5 if potential_rescue else 1.0)
+                    evaluated = {}
+                    print(
+                        f"[*] Dynamic sizing {asset_to} -> {asset_from}: "
+                        f"{coarse_sizes[0]}-{coarse_sizes[-1]} tokens | "
+                        f"estimated cost ${route_cost_estimate:.6f}"
+                    )
+
+                    def evaluate_size(size):
+                        if size in evaluated:
+                            return evaluated[size]
+                        probe_amount_raw = int(size) * 10**DECIMALS
+                        quote = get_jup_quote(session, mint_to, mint_from, probe_amount_raw)
+                        if not quote:
+                            evaluated[size] = None
+                            return None
+                        out_human = int(quote.get("outAmount", 0)) / 10**DECIMALS
+                        metrics = calculate_quote_metrics(size, out_human, route_cost_estimate)
+                        eligible = is_profitable_candidate(
+                            metrics,
+                            MIN_NET_PROFIT_USD,
+                            MIN_NET_RETURN_BPS,
+                        )
+                        marker = "eligible" if eligible else "skip"
+                        print(
+                            f"    {size:>8} {asset_to} -> {out_human:.6f} {asset_from} | "
+                            f"gross ${metrics['gross_profit_usd']:+.6f} | "
+                            f"net ${metrics['net_profit_usd']:+.6f} "
+                            f"({metrics['net_return_bps']:+.4f} bps) [{marker}]"
+                        )
+                        evaluated[size] = (quote, metrics)
+                        if QUOTE_SAMPLE_DELAY_SECONDS > 0:
+                            time.sleep(QUOTE_SAMPLE_DELAY_SECONDS)
+                        return evaluated[size]
+
+                    for size in coarse_sizes:
+                        evaluate_size(size)
+
+                    quoted_coarse = {
+                        size: result
+                        for size, result in evaluated.items()
+                        if result is not None
+                    }
+                    if not quoted_coarse:
+                        continue
+
+                    coarse_best_size = max(
+                        quoted_coarse,
+                        key=lambda size: quoted_coarse[size][1]["net_profit_usd"],
+                    )
+                    refinement_sizes = generate_refinement_sizes(
+                        coarse_best_size,
+                        coarse_sizes,
+                        MIN_TRADE_SIZE_USD,
+                        max_feasible_size,
+                    )
+                    for size in refinement_sizes:
+                        evaluate_size(size)
+
+                    eligible_results = [
+                        (size, quote, metrics)
+                        for size, result in evaluated.items()
+                        if result is not None
+                        for quote, metrics in [result]
+                        if is_profitable_candidate(
+                            metrics,
+                            MIN_NET_PROFIT_USD,
+                            MIN_NET_RETURN_BPS,
+                        )
+                    ]
+                    if not eligible_results:
+                        continue
+
+                    local_best = max(
+                        eligible_results,
+                        key=lambda item: item[2]["net_profit_usd"],
+                    )
+                    swap_size, quote, metrics = local_best
+                    if metrics["net_profit_usd"] > best_net_profit:
+                        best_net_profit = metrics["net_profit_usd"]
+                        best_route = (
+                            asset_from,
+                            asset_to,
+                            swap_size,
+                            mint_from,
+                            mint_to,
+                            metrics,
+                            route_cost_estimate,
+                        )
+                        rescue_asset = potential_rescue
 
             if not best_route:
                 print(f"[!] No profitable arb output found on Jup right now. Waiting for updates...")
@@ -713,8 +810,19 @@ def main():
                 monitor.update_event.clear()
                 continue
 
-            asset_from, asset_to, swap_size, mint_from, mint_to, best_quote = best_route
-            print(f"\n[*] Profitable direction found: {asset_from} -> {asset_to}")
+            (
+                asset_from,
+                asset_to,
+                swap_size,
+                mint_from,
+                mint_to,
+                selected_metrics,
+                selected_cost_estimate,
+            ) = best_route
+            print(
+                f"\n[*] Best dynamic route: {asset_from} -> {asset_to} | "
+                f"size {swap_size} | estimated net ${selected_metrics['net_profit_usd']:.6f}"
+            )
             route_label = f"{asset_from} -> {asset_to} -> {asset_from}"
 
             if swap_size < 1:
@@ -723,32 +831,43 @@ def main():
                 monitor.update_event.clear()
                 continue
 
-            if "PYUSD" in (asset_from, asset_to):
-                print("[*] PYUSD route detected. Verifying profitability 3 consecutive times...")
-                verify_failed = False
-                probe_amount_raw = swap_size * 10**DECIMALS
-                for i in range(2):
-                    time.sleep(1.5)
-                    v_quote = get_jup_quote(session, mint_to, mint_from, probe_amount_raw)
-                    if v_quote:
-                        out_raw = int(v_quote.get("outAmount", 0))
-                        out_human = out_raw / 10**DECIMALS
-                        profit = out_human - swap_size
-                        if profit >= MIN_PROFIT_USD:
-                            print(f"    Verify {i+1}/2: Profitable (Profit: {profit:.6f})")
-                        else:
-                            print(f"    Verify {i+1}/2: Not profitable (Profit: {profit:.6f})")
-                            verify_failed = True
-                            break
-                    else:
-                        print(f"    Verify {i+1}/2: Failed to get quote")
-                        verify_failed = True
-                        break
-                        
-                if verify_failed:
-                    print("[!] PYUSD route failed consecutive profitability check. Skipping...")
-                    time.sleep(1)
-                    continue
+            print("[*] Revalidating selected size twice before taking first-leg exposure...")
+            verify_failed = False
+            verification_metrics = [selected_metrics]
+            probe_amount_raw = int(swap_size) * 10**DECIMALS
+            for i in range(2):
+                time.sleep(0.5)
+                v_quote = get_jup_quote(session, mint_to, mint_from, probe_amount_raw)
+                if not v_quote:
+                    print(f"    Verify {i+1}/2: quote unavailable")
+                    verify_failed = True
+                    break
+                out_human = int(v_quote.get("outAmount", 0)) / 10**DECIMALS
+                metrics = calculate_quote_metrics(swap_size, out_human, selected_cost_estimate)
+                verification_metrics.append(metrics)
+                if is_profitable_candidate(metrics, MIN_NET_PROFIT_USD, MIN_NET_RETURN_BPS):
+                    print(
+                        f"    Verify {i+1}/2: net ${metrics['net_profit_usd']:.6f} "
+                        f"({metrics['net_return_bps']:.4f} bps)"
+                    )
+                else:
+                    print(
+                        f"    Verify {i+1}/2: below threshold | "
+                        f"net ${metrics['net_profit_usd']:.6f}"
+                    )
+                    verify_failed = True
+                    break
+
+            if verify_failed:
+                print("[!] Selected size failed net-profit revalidation. Skipping...")
+                time.sleep(1)
+                continue
+
+            # Record the least favorable verified quote as the expected result.
+            selected_metrics = min(
+                verification_metrics,
+                key=lambda metrics: metrics["net_profit_usd"],
+            )
 
             attempt_before = print_portfolio(
                 session,
@@ -768,7 +887,15 @@ def main():
                 if not execute_stable_swap(session, client, keypair, rescue_asset, "USDC", swap_size):
                     print(f"[!] Rescue swap failed. Aborting.")
                     failed_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] AFTER FAILED ATTEMPT", prev=attempt_before)
-                    state_store.record_attempt(route_label, swap_size, best_profit, attempt_before, failed_port, False, "Stable.com rescue swap failed")
+                    state_store.record_attempt(
+                        route_label,
+                        swap_size,
+                        selected_metrics["gross_profit_usd"],
+                        attempt_before,
+                        failed_port,
+                        False,
+                        "Stable.com rescue swap failed",
+                    )
                     state_store.update_snapshot(
                         {"USDC": failed_port["usdc_raw"], "USDG": failed_port["usdg_raw"], "PYUSD": failed_port["pyusd_raw"]},
                         {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw},
@@ -787,7 +914,15 @@ def main():
             if not execute_stable_swap(session, client, keypair, asset_from, asset_to, swap_size):
                 print("[!] Stable.com swap failed. Aborting.")
                 failed_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] AFTER FAILED ATTEMPT", prev=attempt_before)
-                state_store.record_attempt(route_label, swap_size, best_profit, attempt_before, failed_port, False, "Stable.com arbitrage leg failed")
+                state_store.record_attempt(
+                    route_label,
+                    swap_size,
+                    selected_metrics["gross_profit_usd"],
+                    attempt_before,
+                    failed_port,
+                    False,
+                    "Stable.com arbitrage leg failed",
+                )
                 state_store.update_snapshot(
                     {"USDC": failed_port["usdc_raw"], "USDG": failed_port["usdg_raw"], "PYUSD": failed_port["pyusd_raw"]},
                     {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw},
@@ -888,7 +1023,7 @@ def main():
             record = state_store.record_attempt(
                 route_label,
                 swap_size,
-                best_profit,
+                selected_metrics["gross_profit_usd"],
                 attempt_before,
                 new_port,
                 arb_successful,
