@@ -1,0 +1,26 @@
+# Secrets: never commit these files.
+.env
+.env.*
+!.env.example
+
+# Runtime state and logs remain on each server across git pulls.
+bot_state.json
+bot_state.json.tmp
+pnl.txt
+logs/
+
+# Local dependencies and Python artifacts.
+.local/
+.cache/
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and operating systems.
+.DS_Store
+.idea/
+.vscode/
+*.swp
