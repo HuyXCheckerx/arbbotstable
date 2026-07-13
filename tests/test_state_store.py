@@ -79,6 +79,20 @@ class BotStateStoreTests(unittest.TestCase):
         self.assertAlmostEqual(state["performance"]["current_portfolio_usd"], 66.234567)
         self.assertFalse(self.state_path.with_suffix(".json.tmp").exists())
 
+    def test_pending_submission_survives_restart_and_clears_by_signature(self):
+        self.store.set_pending_submission("sig-a", "blockhash-a", "Jupiter exit")
+
+        restarted = BotStateStore(self.state_path, self.pnl_path)
+        pending = restarted.get_pending_submission()
+        self.assertEqual(pending["signature"], "sig-a")
+        self.assertEqual(pending["blockhash"], "blockhash-a")
+        self.assertEqual(pending["label"], "Jupiter exit")
+        self.assertTrue(pending["saved_at"])
+        self.assertFalse(restarted.clear_pending_submission("different-sig"))
+        self.assertIsNotNone(restarted.get_pending_submission())
+        self.assertTrue(restarted.clear_pending_submission("sig-a"))
+        self.assertIsNone(BotStateStore(self.state_path, self.pnl_path).get_pending_submission())
+
     def test_legacy_pnl_is_kept_separate_from_new_net_accounting(self):
         root = Path(self.temp_dir.name) / "legacy"
         root.mkdir()

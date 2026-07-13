@@ -12,6 +12,7 @@ from sizing import (
     generate_refinement_sizes,
     is_profitable_candidate,
     normalize_drain_window_raw,
+    parse_stable_liquidity_constraint,
     parse_stable_reserve_constraint,
     stable_pool_can_settle,
     usdc_strategy_directions,
@@ -170,6 +171,35 @@ class DynamicSizingTests(unittest.TestCase):
         )
         self.assertEqual(constraint["required_raw"], 1_800_000)
         self.assertIsNone(parse_stable_reserve_constraint({"details": {}}))
+
+    def test_parses_reported_stable_backend_liquidity_constraint(self):
+        constraint = parse_stable_liquidity_constraint(
+            {
+                "message": "Service Unavailable",
+                "details": {
+                    "insufficient_pool_balance": (
+                        "insufficient reserves: amount=19998055000, "
+                        "available=1990000, sourcePrecision=6, destPrecision=6"
+                    )
+                },
+            }
+        )
+        self.assertEqual(
+            constraint,
+            {
+                "amount_raw": 19_998_055_000,
+                "available_raw": 1_990_000,
+            },
+        )
+        self.assertIsNone(
+            parse_stable_liquidity_constraint(
+                {
+                    "details": {
+                        "insufficient_pool_balance": "amount=1000, available=1000"
+                    }
+                }
+            )
+        )
 
     def test_reserve_rejection_raises_floor_or_reports_no_safe_window(self):
         self.assertEqual(

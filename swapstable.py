@@ -17,17 +17,30 @@ import requests
 import asyncio
 import websockets
 import threading
+from dataclasses import dataclass
 from dotenv import load_dotenv
+from solders.commitment_config import CommitmentLevel
+from solders.hash import Hash
 from solders.pubkey import Pubkey
 from solders.keypair import Keypair
+from solders.signature import Signature
 from solders.system_program import ID as SYSTEM_PROGRAM_ID
 from solders.instruction import Instruction, AccountMeta, CompiledInstruction
 from solders.transaction import VersionedTransaction
 from solders.message import Message, MessageV0
 from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
+from solders.rpc.config import RpcContextConfig
+from solders.rpc.requests import IsBlockhashValid
+from solders.rpc.responses import IsBlockhashValidResp
 from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
+from solana.rpc.types import TxOpts
 from state_store import BotStateStore
+from balance_tracker import (
+    BalanceTracker,
+    coherent_ws_match,
+    confirm_balances_ws_first,
+)
 from sizing import (
     absolute_profit_key,
     acquired_balance_delta,
@@ -40,6 +53,7 @@ from sizing import (
     generate_refinement_sizes,
     is_profitable_candidate,
     normalize_drain_window_raw,
+    parse_stable_liquidity_constraint,
     parse_stable_reserve_constraint,
     stable_pool_can_settle,
     usdc_strategy_directions,
@@ -109,6 +123,17 @@ USDG_MAX_REMAINDER_USD = USDG_MAX_REMAINDER_RAW / 1_000_000
 DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", "0.005"))
 EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
 QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
+WS_CONFIRM_TIMEOUT_SECONDS = float(os.environ.get("WS_CONFIRM_TIMEOUT_SECONDS", "12"))
+SIGNATURE_CHECK_INTERVAL_SECONDS = max(
+    1.0,
+    float(os.environ.get("SIGNATURE_CHECK_INTERVAL_SECONDS", "5")),
+)
+STABLE_POOL_REFILL_SYNC_SECONDS = float(
+    os.environ.get("STABLE_POOL_REFILL_SYNC_SECONDS", "15")
+)
+STABLE_BACKEND_LAG_RETRY_SECONDS = float(
+    os.environ.get("STABLE_BACKEND_LAG_RETRY_SECONDS", "5")
+)
 
 api_keys_str = os.environ.get("JUP_API_KEYS", "")
 if api_keys_str:
@@ -156,6 +181,11 @@ NATIVE_FEE_SEED = b"native_fee"
 SINGLE_CHAIN_SWAP_DISC = hashlib.sha256(b"global:single_chain_swap").digest()[:8]
 
 DECIMALS = 6
+POSITION_TOLERANCE_RAW = 100_000
+SUBMIT_ONLY_OPTS = TxOpts(
+    skip_confirmation=True,
+    preflight_commitment=Confirmed,
+)
 
 # ============================================================
 # WEBSOCKET & BALANCE MONITORING HELPERS
@@ -167,14 +197,14 @@ def parse_token_balance(data_b64):
             return struct.unpack("<Q", data[64:72])[0]
     except Exception as e:
         print(f"[!] Error parsing balance: {e}")
-    return 0
+    return None
 
-class BalanceMonitor:
+class BalanceMonitor(BalanceTracker):
     def __init__(self, rpc_url, accounts_to_sub):
+        super().__init__(accounts_to_sub.keys())
         self.rpc_url = rpc_url
         self.accounts_to_sub = accounts_to_sub
-        self.balances = {k: 0 for k in accounts_to_sub.keys()}
-        self.update_event = threading.Event()
+        self.ready_event = threading.Event()
         self.thread = threading.Thread(target=self._start_loop, daemon=True)
         
     def _start_loop(self):
@@ -184,6 +214,7 @@ class BalanceMonitor:
         ws_url = self.rpc_url.replace("https://", "wss://").replace("http://", "ws://")
         while True:
             try:
+                self.ready_event.clear()
                 async with websockets.connect(ws_url) as websocket:
                     id_to_key = {}
                     sub_to_key = {}
@@ -215,6 +246,8 @@ class BalanceMonitor:
                             if key:
                                 sub_to_key[sub_id] = key
                                 print(f"[+] Subscription confirmed: req_id {req_id} -> sub_id {sub_id} ({key})")
+                                if len(sub_to_key) == len(self.accounts_to_sub):
+                                    self.ready_event.set()
                         elif "method" in data and data["method"] == "accountNotification":
                             sub_id = data["params"]["subscription"]
                             key = sub_to_key.get(sub_id)
@@ -223,14 +256,26 @@ class BalanceMonitor:
                                 if val is not None:
                                     data_b64 = val["data"][0]
                                     amount_raw = parse_token_balance(data_b64)
+                                    if amount_raw is None:
+                                        print(f"[!] Ignoring malformed WS token data for {key}")
+                                        continue
+                                    slot = data["params"]["result"].get("context", {}).get("slot")
                                     print(f"[~] WS Update: {key} -> {amount_raw / 10**DECIMALS:.6f} tokens (raw: {amount_raw})")
-                                    self.balances[key] = amount_raw
-                                    self.update_event.set()
+                                    self.update(
+                                        key,
+                                        amount_raw,
+                                        slot=int(slot) if slot is not None else None,
+                                        timestamp=time.time(),
+                                    )
             except Exception:
+                self.ready_event.clear()
                 await asyncio.sleep(5)
                 
     def start(self):
         self.thread.start()
+
+    def is_ready(self):
+        return self.ready_event.is_set()
 
 # ============================================================
 # UTILS
@@ -251,29 +296,379 @@ def get_token_balance(client, ata):
     return int(resp.value.amount)
 
 
-def wait_for_token_balance(
+@dataclass(frozen=True)
+class SwapSubmissionResult:
+    submitted: bool
+    signature: str = ""
+    blockhash: str = ""
+    ambiguous: bool = False
+    error: str = ""
+
+    @property
+    def may_have_landed(self):
+        return bool(self.submitted or self.ambiguous)
+
+    def __bool__(self):
+        return bool(self.submitted)
+
+
+def get_submission_signature_status(client, signature_text):
+    """Return ``not_found``, ``processed``, ``confirmed``, etc."""
+
+    try:
+        response = client.get_signature_statuses(
+            [Signature.from_string(signature_text)],
+            search_transaction_history=True,
+        )
+        status = response.value[0]
+    except Exception as exc:
+        return "unknown", str(exc)
+
+    if status is None:
+        return "not_found", ""
+    if status.err is not None:
+        return "failed", str(status.err)
+
+    confirmation = str(status.confirmation_status or "").lower()
+    if (
+        "confirmed" in confirmation
+        or "finalized" in confirmation
+        or getattr(status, "confirmations", 0) is None
+    ):
+        return "confirmed", ""
+    return "processed", ""
+
+
+def is_submission_blockhash_valid(client, blockhash_text):
+    """Return whether a submitted transaction can still land, or ``None``."""
+
+    try:
+        body = IsBlockhashValid(
+            Hash.from_string(blockhash_text),
+            RpcContextConfig(CommitmentLevel.Confirmed),
+        )
+        response = client._provider.make_request(body, IsBlockhashValidResp)
+        return bool(response.value)
+    except Exception:
+        return None
+
+
+def reconcile_persisted_submission(client, pending_store):
+    """Resolve a pre-restart submission lock before scanning can resume."""
+
+    pending = pending_store.get_pending_submission()
+    if pending is None:
+        return
+
+    signature = str(pending.get("signature", ""))
+    blockhash = str(pending.get("blockhash", ""))
+    label = str(pending.get("label", "pending transaction"))
+    if not signature or not blockhash:
+        raise RuntimeError(
+            "Pending submission record is incomplete; refusing to trade until repaired"
+        )
+
+    pending_store.set_status(
+        "reconciling",
+        f"Reconciling {label} after restart",
+    )
+    print(
+        f"[~] Found persisted {label} submission {signature}; "
+        "scanning is locked until its chain state is conclusive."
+    )
+    last_log_at = 0.0
+    seen_on_chain = False
+    while True:
+        signature_state, signature_error = get_submission_signature_status(
+            client,
+            signature,
+        )
+        if signature_state in {"processed", "confirmed", "failed"}:
+            seen_on_chain = True
+        elif seen_on_chain and signature_state in {"not_found", "unknown"}:
+            signature_state = "processed"
+        if signature_state == "failed":
+            print(f"[!] Persisted {label} failed on-chain: {signature_error}")
+            pending_store.clear_pending_submission(signature)
+            return
+        if signature_state == "confirmed":
+            print(
+                f"[+] Persisted {label} is confirmed; refreshing wallet balances "
+                "before any new entry."
+            )
+            pending_store.clear_pending_submission(signature)
+            return
+        if signature_state == "not_found":
+            blockhash_valid = is_submission_blockhash_valid(client, blockhash)
+            if blockhash_valid is False:
+                repeat_state, repeat_error = get_submission_signature_status(
+                    client,
+                    signature,
+                )
+                if repeat_state == "failed":
+                    print(f"[!] Persisted {label} failed on-chain: {repeat_error}")
+                    pending_store.clear_pending_submission(signature)
+                    return
+                if repeat_state == "confirmed":
+                    print(
+                        f"[+] Persisted {label} is confirmed; refreshing wallet "
+                        "balances before any new entry."
+                    )
+                    pending_store.clear_pending_submission(signature)
+                    return
+                if repeat_state == "processed":
+                    seen_on_chain = True
+                    continue
+                if repeat_state == "unknown":
+                    continue
+                if repeat_state == "not_found":
+                    print(
+                        f"[+] Persisted {label} was never recorded and its blockhash expired."
+                    )
+                    pending_store.clear_pending_submission(signature)
+                    return
+
+        now = time.monotonic()
+        if now - last_log_at >= 30:
+            detail = f" ({signature_error})" if signature_error else ""
+            print(
+                f"[~] Startup reconciliation waiting: signature={signature_state}{detail}."
+            )
+            last_log_at = now
+        time.sleep(SIGNATURE_CHECK_INTERVAL_SECONDS)
+
+
+def confirm_transfer_ws_first(
     client,
-    ata,
-    predicate,
+    monitor,
+    watched_accounts,
+    after_revisions,
     label,
-    fallback_getter=None,
-    attempts=15,
-    delay_seconds=1.0,
+    timeout_seconds=WS_CONFIRM_TIMEOUT_SECONDS,
+    submission=None,
+    pending_store=None,
 ):
-    """Check immediately, then retain ``attempts`` delayed retry windows."""
-    latest = 0
-    total_checks = max(1, int(attempts) + 1)
-    for attempt in range(total_checks):
-        if attempt > 0 and delay_seconds > 0:
-            time.sleep(delay_seconds)
-        try:
-            latest = get_token_balance(client, ata)
-        except Exception:
-            latest = int(fallback_getter()) if fallback_getter else latest
-        print(f"    Balance check {attempt + 1}/{total_checks}: {label}={latest}")
-        if predicate(latest):
-            return latest
-    return latest
+    """Confirm a transfer from fresh WS revisions, then one RPC snapshot.
+
+    ``watched_accounts`` maps monitor keys to ``(token_account, predicate)``.
+    Every watched key must receive a post-submission WebSocket revision and all
+    predicates must match.  This prevents a stale cached zero from falsely
+    confirming an exit.  RPC is a one-shot fallback, never a polling loop.
+    """
+
+    watched_keys = tuple(watched_accounts)
+    ws_ready_at_start = monitor.is_ready()
+    predicates = {
+        key: predicate
+        for key, (_, predicate) in watched_accounts.items()
+    }
+    result = confirm_balances_ws_first(
+        monitor,
+        predicates,
+        {key: after_revisions[key] for key in watched_keys},
+        timeout_seconds,
+        rpc_reader=lambda key: get_token_balance(
+            client,
+            watched_accounts[key][0],
+        ),
+    )
+    values = dict(result.balances)
+    rendered = ", ".join(f"{key}={value}" for key, value in values.items())
+    if result.source == "ws":
+        print(f"[+] WS confirmed {label}: {rendered}")
+    elif result.source == "rpc_error":
+        print(f"[!] RPC confirmation snapshot failed for {label}: {result.error}")
+    else:
+        reason = (
+            f"no matching fresh WS state within {float(timeout_seconds):.1f}s"
+            if ws_ready_at_start
+            else "WebSocket monitor was reconnecting during the bounded wait"
+        )
+        print(f"[~] {reason}; took one RPC snapshot for {label}.")
+        print(
+            f"[{'+' if result.confirmed else '!'}] RPC confirmation snapshot for "
+            f"{label}: {rendered}"
+        )
+    if result.confirmed:
+        if pending_store is not None and submission is not None:
+            pending_store.clear_pending_submission(submission.signature)
+        return True, values, result.source
+
+    if submission is None or not submission.may_have_landed:
+        return False, values, result.source
+
+    if not submission.signature or not submission.blockhash:
+        raise RuntimeError(
+            f"Cannot safely reconcile ambiguous {label}: missing local signature/blockhash"
+        )
+
+    print(
+        f"[~] {label} submission {submission.signature} is unresolved; "
+        "blocking all new entries while WS/signature state is reconciled."
+    )
+    last_log_at = 0.0
+    seen_on_chain = False
+    confirmed_observed = False
+    while True:
+        if confirmed_observed:
+            signature_state, signature_error = "confirmed", ""
+        else:
+            signature_state, signature_error = get_submission_signature_status(
+                client,
+                submission.signature,
+            )
+            if signature_state in {"processed", "confirmed", "failed"}:
+                seen_on_chain = True
+            elif seen_on_chain and signature_state in {"not_found", "unknown"}:
+                # RPC nodes behind a load balancer can disagree temporarily.
+                # Once any node has seen the signature, it can never be
+                # treated as an unrecorded/expirable transaction again.
+                signature_state = "processed"
+        if signature_state == "failed":
+            print(
+                f"[!] {label} transaction failed on-chain: {signature_error or 'unknown error'}"
+            )
+            if pending_store is not None:
+                pending_store.clear_pending_submission(submission.signature)
+            return False, values, "signature_error"
+
+        if signature_state == "confirmed":
+            confirmed_result = confirm_balances_ws_first(
+                monitor,
+                predicates,
+                {key: after_revisions[key] for key in watched_keys},
+                0,
+                rpc_reader=lambda key: get_token_balance(
+                    client,
+                    watched_accounts[key][0],
+                ),
+            )
+            values = dict(confirmed_result.balances)
+            if confirmed_result.confirmed:
+                rendered = ", ".join(
+                    f"{key}={value}" for key, value in values.items()
+                )
+                print(f"[+] Confirmed {label} after signature reconciliation: {rendered}")
+                if pending_store is not None:
+                    pending_store.clear_pending_submission(submission.signature)
+                return True, values, confirmed_result.source
+            if confirmed_result.source != "rpc_error":
+                print(
+                    f"[halt] {label} signature is confirmed, but its expected token/USDC "
+                    "state does not match. Keeping the submission lock and waiting for "
+                    "operator review or a coherent WS update."
+                )
+                if pending_store is not None and hasattr(pending_store, "set_status"):
+                    pending_store.set_status(
+                        "exposed",
+                        "Confirmed transaction has unexpected balances",
+                        error=f"Manual review required for {label}",
+                    )
+                while True:
+                    mismatch_snapshot = monitor.wait_for(
+                        lambda current: coherent_ws_match(current, predicates),
+                        {key: after_revisions[key] for key in watched_keys},
+                        timeout=30,
+                    )
+                    if mismatch_snapshot is not None:
+                        values = {
+                            key: mismatch_snapshot[key] for key in watched_keys
+                        }
+                        if pending_store is not None:
+                            pending_store.clear_pending_submission(
+                                submission.signature
+                            )
+                        print(f"[+] WS resolved the balance mismatch for {label}.")
+                        return True, values, "ws_reconciled"
+                    print(
+                        f"[halt] Still waiting on the confirmed {label} balance mismatch; "
+                        "no balance polling or new submission is being performed."
+                    )
+
+        if signature_state == "not_found":
+            blockhash_valid = is_submission_blockhash_valid(
+                client,
+                submission.blockhash,
+            )
+            if blockhash_valid is False:
+                # Close the race where the transaction was recorded between
+                # the first status lookup and the blockhash-expiry check.
+                repeat_state, repeat_error = get_submission_signature_status(
+                    client,
+                    submission.signature,
+                )
+                if repeat_state == "failed":
+                    print(
+                        f"[!] {label} transaction failed on-chain: "
+                        f"{repeat_error or 'unknown error'}"
+                    )
+                    if pending_store is not None:
+                        pending_store.clear_pending_submission(
+                            submission.signature
+                        )
+                    return False, values, "signature_error"
+                if repeat_state == "confirmed":
+                    seen_on_chain = True
+                    confirmed_observed = True
+                    continue
+                if repeat_state == "processed":
+                    seen_on_chain = True
+                    continue
+                if repeat_state == "unknown":
+                    continue
+                final_result = confirm_balances_ws_first(
+                    monitor,
+                    predicates,
+                    {key: after_revisions[key] for key in watched_keys},
+                    0,
+                    rpc_reader=lambda key: get_token_balance(
+                        client,
+                        watched_accounts[key][0],
+                    ),
+                )
+                values = dict(final_result.balances)
+                if final_result.confirmed:
+                    print(f"[+] Final RPC snapshot confirmed {label}.")
+                    if pending_store is not None:
+                        pending_store.clear_pending_submission(submission.signature)
+                    return True, values, final_result.source
+                if final_result.source == "rpc_error":
+                    print(
+                        f"[!] Could not take the final balance snapshot for {label}; "
+                        "keeping the submission lock despite blockhash expiry."
+                    )
+                    continue
+                print(
+                    f"[!] {label} never landed and its blockhash has expired; "
+                    "the submission is now safe to abandon."
+                )
+                if pending_store is not None:
+                    pending_store.clear_pending_submission(submission.signature)
+                return False, values, "expired"
+
+        fresh_snapshot = monitor.wait_for(
+            lambda current: coherent_ws_match(current, predicates),
+            {key: after_revisions[key] for key in watched_keys},
+            timeout=SIGNATURE_CHECK_INTERVAL_SECONDS,
+        )
+        if fresh_snapshot is not None:
+            values = {key: fresh_snapshot[key] for key in watched_keys}
+            rendered = ", ".join(
+                f"{key}={value}" for key, value in values.items()
+            )
+            print(f"[+] WS eventually confirmed {label}: {rendered}")
+            if pending_store is not None:
+                pending_store.clear_pending_submission(submission.signature)
+            return True, values, "ws_reconciled"
+
+        now = time.monotonic()
+        if now - last_log_at >= 30:
+            detail = f" ({signature_error})" if signature_error else ""
+            print(
+                f"[~] Still reconciling {label}: signature={signature_state}{detail}; "
+                "no additional transaction will be submitted."
+            )
+            last_log_at = now
 
 def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, label="", prev=None):
     GREEN = "\033[92m"
@@ -423,7 +818,14 @@ def cap_jup_priority_fee(tx_bytes: bytes, max_fee_lamports: int = 30000) -> byte
         
     return tx_bytes
 
-def execute_jup_swap(session, client, keypair, quote):
+def execute_jup_swap(
+    session,
+    client,
+    keypair,
+    quote,
+    pending_store=None,
+    submission_label="Jupiter swap",
+):
     tx_b64 = quote.get("transaction")
     request_id = quote.get("requestId")
     
@@ -433,78 +835,187 @@ def execute_jup_swap(session, client, keypair, quote):
         tx = VersionedTransaction.from_bytes(tx_bytes)
         signed_tx = VersionedTransaction(tx.message, [keypair])
         signed_tx_b64 = base64.b64encode(bytes(signed_tx)).decode('utf-8')
+        local_signature = str(signed_tx.signatures[0])
+        blockhash = str(signed_tx.message.recent_blockhash)
         
         if request_id:
-            resp = session.post(f"{JUP_API}/execute", json={
-                "requestId": request_id,
-                "signedTransaction": signed_tx_b64
-            }, headers=get_jup_headers(), timeout=15)
+            if pending_store is not None:
+                pending_store.set_pending_submission(
+                    local_signature,
+                    blockhash,
+                    submission_label,
+                )
+            try:
+                resp = session.post(f"{JUP_API}/execute", json={
+                    "requestId": request_id,
+                    "signedTransaction": signed_tx_b64
+                }, headers=get_jup_headers(), timeout=15)
+            except requests.RequestException as exc:
+                print(
+                    "[!] Jupiter execute response was lost after submission; "
+                    f"reconciling local signature {local_signature}: {exc}"
+                )
+                return SwapSubmissionResult(
+                    False,
+                    local_signature,
+                    blockhash,
+                    ambiguous=True,
+                    error=str(exc),
+                )
             
             if resp.status_code == 200:
-                print(f"[+] Jup Swap Executed via API: {resp.json().get('txid', 'Unknown TX')}")
-                return True
-            else:
-                print(f"[!] Jup execute API error: {resp.text}")
-                return False
+                try:
+                    txid = resp.json().get("txid", local_signature)
+                except ValueError:
+                    txid = local_signature
+                print(f"[+] Jup Swap Executed via API: {txid}")
+                return SwapSubmissionResult(True, local_signature, blockhash)
+
+            print(f"[!] Jup execute API error: {resp.text}")
+            if resp.status_code >= 500:
+                return SwapSubmissionResult(
+                    False,
+                    local_signature,
+                    blockhash,
+                    ambiguous=True,
+                    error=resp.text,
+                )
+            if pending_store is not None:
+                pending_store.clear_pending_submission(local_signature)
+            return SwapSubmissionResult(False, error=resp.text)
         else:
+            if pending_store is not None:
+                pending_store.set_pending_submission(
+                    local_signature,
+                    blockhash,
+                    submission_label,
+                )
             try:
-                result = client.send_transaction(signed_tx)
+                result = client.send_transaction(signed_tx, opts=SUBMIT_ONLY_OPTS)
                 if result.value:
                     print(f"[+] Jup Swap Sent: {result.value}")
-                    client.confirm_transaction(result.value, commitment=Confirmed)
-                    return True
+                    return SwapSubmissionResult(
+                        True,
+                        str(result.value),
+                        blockhash,
+                    )
             except Exception as e:
-                print(f"[!] RPC Error during Jup swap: {e}")
-            return False
+                print(
+                    "[!] RPC response was ambiguous during Jup swap; "
+                    f"reconciling local signature {local_signature}: {e}"
+                )
+                return SwapSubmissionResult(
+                    False,
+                    local_signature,
+                    blockhash,
+                    ambiguous=True,
+                    error=str(e),
+                )
+            return SwapSubmissionResult(
+                False,
+                local_signature,
+                blockhash,
+                ambiguous=True,
+                error="RPC returned no transaction signature",
+            )
 
-    resp = session.post(f"{JUP_API}/swap", json={
-        "quoteResponse": quote,
-        "taker": str(keypair.pubkey()),
-        "wrapAndUnwrapSol": False,
-        "prioritizationFeeLamports": {
-            "priorityLevelWithMaxLamports": {
-                "maxLamports": PRIORITY_FEE,
-                "priorityLevel": "medium",
-            }
-        },
-        "jitoTipLamports": JITO_TIP,
-    }, headers=get_jup_headers(), timeout=15)
+    try:
+        resp = session.post(f"{JUP_API}/swap", json={
+            "quoteResponse": quote,
+            "taker": str(keypair.pubkey()),
+            "wrapAndUnwrapSol": False,
+            "prioritizationFeeLamports": {
+                "priorityLevelWithMaxLamports": {
+                    "maxLamports": PRIORITY_FEE,
+                    "priorityLevel": "medium",
+                }
+            },
+            "jitoTipLamports": JITO_TIP,
+        }, headers=get_jup_headers(), timeout=15)
+    except requests.RequestException as exc:
+        print(f"[!] Jupiter swap transaction request failed before submission: {exc}")
+        return SwapSubmissionResult(False, error=str(exc))
     
     if resp.status_code != 200:
         print(f"[!] Jup swap error: {resp.text}")
-        return False
+        return SwapSubmissionResult(False, error=resp.text)
         
     tx_b64 = resp.json().get("swapTransaction", "")
     if not tx_b64:
-        return False
+        return SwapSubmissionResult(False, error="missing swapTransaction")
         
     tx_bytes = base64.b64decode(tx_b64)
     tx_bytes = cap_jup_priority_fee(tx_bytes, PRIORITY_FEE)
     tx = VersionedTransaction.from_bytes(tx_bytes)
     
-    recent_blockhash = client.get_latest_blockhash().value.blockhash
     signed_tx = VersionedTransaction(tx.message, [keypair])
+    local_signature = str(signed_tx.signatures[0])
+    blockhash = str(signed_tx.message.recent_blockhash)
+    if pending_store is not None:
+        pending_store.set_pending_submission(
+            local_signature,
+            blockhash,
+            submission_label,
+        )
     
     try:
-        result = client.send_transaction(signed_tx)
+        result = client.send_transaction(signed_tx, opts=SUBMIT_ONLY_OPTS)
         if result.value:
             print(f"[+] Jup Swap Sent: {result.value}")
-            client.confirm_transaction(result.value, commitment=Confirmed)
-            return True
+            return SwapSubmissionResult(True, str(result.value), blockhash)
     except Exception as e:
-        print(f"[!] RPC Error during Jup swap: {e}")
-    return False
+        print(
+            "[!] RPC response was ambiguous during Jup swap; "
+            f"reconciling local signature {local_signature}: {e}"
+        )
+        return SwapSubmissionResult(
+            False,
+            local_signature,
+            blockhash,
+            ambiguous=True,
+            error=str(e),
+        )
+    return SwapSubmissionResult(
+        False,
+        local_signature,
+        blockhash,
+        ambiguous=True,
+        error="RPC returned no transaction signature",
+    )
 
 class StableSwapResult:
-    def __init__(self, ok, reserve_constraint=None):
+    def __init__(
+        self,
+        ok,
+        reserve_constraint=None,
+        liquidity_constraint=None,
+        submission=None,
+    ):
         self.ok = bool(ok)
         self.reserve_constraint = reserve_constraint
+        self.liquidity_constraint = liquidity_constraint
+        self.submission = (
+            submission if submission is not None else SwapSubmissionResult(False)
+        )
+
+    @property
+    def may_have_landed(self):
+        return self.submission.may_have_landed
 
     def __bool__(self):
         return self.ok
 
 
-def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_human):
+def execute_stable_swap(
+    session,
+    client,
+    keypair,
+    asset_from,
+    asset_to,
+    amount_human,
+    pending_store=None,
+    submission_label="Stable.com swap",
+):
     wallet = keypair.pubkey()
     amount_raw = int(round(float(amount_human) * 10**DECIMALS))
     if amount_raw <= 0:
@@ -528,9 +1039,11 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
     
     if resp.status_code != 200:
         reserve_constraint = None
+        liquidity_constraint = None
         try:
             error_payload = resp.json()
             reserve_constraint = parse_stable_reserve_constraint(error_payload)
+            liquidity_constraint = parse_stable_liquidity_constraint(error_payload)
             if reserve_constraint:
                 required_raw = reserve_constraint["required_raw"]
                 remaining_raw = reserve_constraint["remaining_raw"]
@@ -544,10 +1057,21 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
                     f"would leave {remaining_text} {asset_to}, requires at least "
                     f"{required_raw / 10**DECIMALS:.6f}. Rescanning without retrying."
                 )
+            elif liquidity_constraint:
+                print(
+                    "[!] Stable.com order service is behind the chain: "
+                    f"requested {liquidity_constraint['amount_raw'] / 10**DECIMALS:.6f}, "
+                    f"backend still reports "
+                    f"{liquidity_constraint['available_raw'] / 10**DECIMALS:.6f} available."
+                )
         except (ValueError, TypeError):
             pass
         print(f"[!] Stable create order error: {resp.text}")
-        return StableSwapResult(False, reserve_constraint=reserve_constraint)
+        return StableSwapResult(
+            False,
+            reserve_constraint=reserve_constraint,
+            liquidity_constraint=liquidity_constraint,
+        )
         
     order = resp.json().get("data", resp.json())
     sig_hex = order.get("maintainerSignature", "")
@@ -635,13 +1159,42 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
     from solders.transaction import Transaction
     tx = Transaction.new_unsigned(msg)
     tx.sign([keypair], recent_blockhash)
-    
-    result = client.send_transaction(tx)
+    local_signature = str(tx.signatures[0])
+    blockhash = str(recent_blockhash)
+    if pending_store is not None:
+        pending_store.set_pending_submission(
+            local_signature,
+            blockhash,
+            submission_label,
+        )
+
+    try:
+        result = client.send_transaction(tx, opts=SUBMIT_ONLY_OPTS)
+    except Exception as exc:
+        print(
+            "[!] Stable RPC response was ambiguous after submission; "
+            f"reconciling local signature {local_signature}: {exc}"
+        )
+        submission = SwapSubmissionResult(
+            False,
+            local_signature,
+            blockhash,
+            ambiguous=True,
+            error=str(exc),
+        )
+        return StableSwapResult(False, submission=submission)
     if result.value:
         print(f"[+] Stable Swap Sent: {result.value}")
-        client.confirm_transaction(result.value, commitment=Confirmed)
-        return StableSwapResult(True)
-    return StableSwapResult(False)
+        submission = SwapSubmissionResult(True, str(result.value), blockhash)
+        return StableSwapResult(True, submission=submission)
+    submission = SwapSubmissionResult(
+        False,
+        local_signature,
+        blockhash,
+        ambiguous=True,
+        error="RPC returned no transaction signature",
+    )
+    return StableSwapResult(False, submission=submission)
 
 # ============================================================
 # MAIN
@@ -663,6 +1216,7 @@ def main():
     print(f"[*] Wallet: {wallet}")
     state_store = BotStateStore()
     state_store.start_session(wallet)
+    reconcile_persisted_submission(client, state_store)
 
     usdc_ata = get_ata(wallet, USDC_MINT_PK, TOKEN_PROGRAM)
     usdg_ata = get_ata(wallet, USDG_MINT_PK, TOKEN_2022_PROGRAM)
@@ -688,12 +1242,12 @@ def main():
     monitor = BalanceMonitor(RPC_URL, accounts_to_sub)
     
     print("[*] Fetching initial balances...")
-    monitor.balances["user_usdc"] = get_token_balance(client, usdc_ata)
-    monitor.balances["user_usdg"] = get_token_balance(client, usdg_ata)
-    monitor.balances["user_pyusd"] = get_token_balance(client, pyusd_ata)
-    monitor.balances["pool_usdc"] = get_token_balance(client, pool_usdc_ata)
-    monitor.balances["pool_usdg"] = get_token_balance(client, pool_usdg_ata)
-    monitor.balances["pool_pyusd"] = get_token_balance(client, pool_pyusd_ata)
+    monitor.seed("user_usdc", get_token_balance(client, usdc_ata))
+    monitor.seed("user_usdg", get_token_balance(client, usdg_ata))
+    monitor.seed("user_pyusd", get_token_balance(client, pyusd_ata))
+    monitor.seed("pool_usdc", get_token_balance(client, pool_usdc_ata))
+    monitor.seed("pool_usdg", get_token_balance(client, pool_usdg_ata))
+    monitor.seed("pool_pyusd", get_token_balance(client, pool_pyusd_ata))
     
     print("[*] Starting WebSocket Balance Monitor...")
     monitor.start()
@@ -706,9 +1260,9 @@ def main():
             "PYUSD": prev_port["pyusd_raw"],
         },
         {
-            "USDC": monitor.balances["pool_usdc"],
-            "USDG": monitor.balances["pool_usdg"],
-            "PYUSD": monitor.balances["pool_pyusd"],
+            "USDC": monitor.get("pool_usdc"),
+            "USDG": monitor.get("pool_usdg"),
+            "PYUSD": monitor.get("pool_pyusd"),
         },
         prev_port["sol_lamports"],
         prev_port["sol_price"],
@@ -718,38 +1272,41 @@ def main():
     usdg_drain_min_remainder_raw = USDG_DRAIN_DUST_RAW
     stable_reserve_failure_counts = {}
     stable_reserve_backoff_until = {}
+    last_unresolved_position = None
     while True:
         try:
+            reconcile_persisted_submission(client, state_store)
             # Fetch user and pool balances directly from RPC to avoid WebSocket cache lag
             try:
                 usdc_raw = get_token_balance(client, usdc_ata)
             except Exception:
-                usdc_raw = monitor.balances["user_usdc"]
+                usdc_raw = monitor.get("user_usdc")
 
             try:
                 usdg_raw = get_token_balance(client, usdg_ata)
             except Exception:
-                usdg_raw = monitor.balances["user_usdg"]
+                usdg_raw = monitor.get("user_usdg")
 
             try:
                 pyusd_raw = get_token_balance(client, pyusd_ata)
             except Exception:
-                pyusd_raw = monitor.balances["user_pyusd"]
+                pyusd_raw = monitor.get("user_pyusd")
 
             try:
                 pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
             except Exception:
-                pool_usdc_raw = monitor.balances["pool_usdc"]
+                pool_usdc_raw = monitor.get("pool_usdc")
 
             try:
                 pool_usdg_raw = get_token_balance(client, pool_usdg_ata)
+                monitor.observe_balance("pool_usdg", pool_usdg_raw)
             except Exception:
-                pool_usdg_raw = monitor.balances["pool_usdg"]
+                pool_usdg_raw = monitor.get("pool_usdg")
 
             try:
                 pool_pyusd_raw = get_token_balance(client, pool_pyusd_ata)
             except Exception:
-                pool_pyusd_raw = monitor.balances["pool_pyusd"]
+                pool_pyusd_raw = monitor.get("pool_pyusd")
 
             usdc_bal = usdc_raw // 10**DECIMALS
             usdg_bal = usdg_raw // 10**DECIMALS
@@ -769,6 +1326,31 @@ def main():
                 current_sol_lamports,
                 prev_port["sol_price"],
             )
+            unresolved_positions = tuple(
+                (symbol, raw)
+                for symbol, raw in (("USDG", usdg_raw), ("PYUSD", pyusd_raw))
+                if raw > POSITION_TOLERANCE_RAW
+            )
+            if unresolved_positions:
+                if unresolved_positions != last_unresolved_position:
+                    rendered_positions = ", ".join(
+                        f"{raw / 10**DECIMALS:.6f} {symbol}"
+                        for symbol, raw in unresolved_positions
+                    )
+                    print(
+                        f"[halt] Unresolved intermediate position: {rendered_positions}. "
+                        "No new first leg will be submitted until it is cleared."
+                    )
+                    last_unresolved_position = unresolved_positions
+                state_store.set_status(
+                    "exposed",
+                    "Unresolved intermediate position; new entries halted",
+                    error="Clear the stablecoin position before resuming arbitrage",
+                )
+                monitor.update_event.wait(timeout=5)
+                monitor.update_event.clear()
+                continue
+            last_unresolved_position = None
             state_store.set_status("scanning", "Scanning markets")
 
             token_configs = {
@@ -815,6 +1397,18 @@ def main():
                     continue
                 pool_to = strategy["stable_destination_pool"]
                 usdg_drain_mode = venue_order == "stable_first" and token == "USDG"
+                if usdg_drain_mode:
+                    sync_remaining = monitor.seconds_until_increase_settled(
+                        "pool_usdg",
+                        STABLE_POOL_REFILL_SYNC_SECONDS,
+                    )
+                    if sync_remaining > 0:
+                        print(
+                            "[wait] USDG refill is confirmed on-chain, but Stable.com's "
+                            f"order service may still be syncing; retrying this route in "
+                            f"{sync_remaining:.1f}s"
+                        )
+                        continue
                 drain_candidate_raws = []
                 if usdg_drain_mode:
                     min_trade_raw = int(round(MIN_TRADE_SIZE_USD * 10**DECIMALS))
@@ -1112,6 +1706,15 @@ def main():
                 key=lambda metrics: metrics["net_profit_usd"],
             )
 
+            if not monitor.is_ready():
+                print(
+                    "[wait] WebSocket account subscriptions are not ready; "
+                    "not taking first-leg exposure."
+                )
+                monitor.ready_event.wait(timeout=1)
+                if not monitor.is_ready():
+                    continue
+
             attempt_before = print_portfolio(
                 session,
                 client,
@@ -1127,17 +1730,28 @@ def main():
             try:
                 intermediate_baseline_raw = get_token_balance(client, token_ata)
             except Exception:
-                intermediate_baseline_raw = monitor.balances[balance_key]
+                intermediate_baseline_raw = monitor.get(balance_key)
 
             arb_successful = False
             failure_note = ""
-            tolerance_raw = 100_000
-            fallback_getter = lambda: monitor.balances[balance_key]
+            tolerance_raw = POSITION_TOLERANCE_RAW
 
             if venue_order == "stable_first":
                 state_store.set_status("executing_stable", "Executing Stable.com entry", route=route_label)
                 print(f"[*] Stable.com entry: {swap_size} USDC -> {token}")
                 if selected_usdg_drain_mode:
+                    sync_remaining = monitor.seconds_until_increase_settled(
+                        "pool_usdg",
+                        STABLE_POOL_REFILL_SYNC_SECONDS,
+                    )
+                    if sync_remaining > 0:
+                        print(
+                            "[!] USDG refilled during quote validation; allowing Stable.com's "
+                            f"order service another {sync_remaining:.1f}s to synchronize, then "
+                            "rescanning with a fresh quote."
+                        )
+                        state_store.set_status("scanning", "Waiting for Stable.com pool sync")
+                        continue
                     try:
                         live_usdg_pool_raw = get_token_balance(client, pool_usdg_ata)
                     except Exception as exc:
@@ -1146,6 +1760,18 @@ def main():
                             f"skipping the tightly bounded drain order: {exc}"
                         )
                         state_store.set_status("scanning", "Scanning markets")
+                        continue
+                    monitor.observe_balance("pool_usdg", live_usdg_pool_raw)
+                    sync_remaining = monitor.seconds_until_increase_settled(
+                        "pool_usdg",
+                        STABLE_POOL_REFILL_SYNC_SECONDS,
+                    )
+                    if sync_remaining > 0:
+                        print(
+                            "[!] A fresh RPC balance exposed a USDG refill before entry; "
+                            f"waiting {sync_remaining:.1f}s for Stable.com's order service."
+                        )
+                        state_store.set_status("scanning", "Waiting for Stable.com pool sync")
                         continue
                     selected_swap_raw = int(round(swap_size * 10**DECIMALS))
                     checked_usdg_remainder_raw = live_usdg_pool_raw - selected_swap_raw
@@ -1163,6 +1789,7 @@ def main():
                         )
                         state_store.set_status("scanning", "Scanning markets")
                         continue
+                entry_cursor = monitor.snapshot([balance_key, "user_usdc"])
                 stable_result = execute_stable_swap(
                     session,
                     client,
@@ -1170,11 +1797,14 @@ def main():
                     "USDC",
                     token,
                     swap_size,
+                    pending_store=state_store,
+                    submission_label=f"Stable.com USDC->{token} entry",
                 )
                 selected_route_key = (token, venue_order)
-                if not stable_result:
+                if not stable_result.may_have_landed:
                     failure_note = "Stable.com entry failed"
                     reserve_constraint = stable_result.reserve_constraint
+                    liquidity_constraint = stable_result.liquidity_constraint
                     if selected_usdg_drain_mode and reserve_constraint:
                         adjusted_min_raw = adjusted_drain_minimum_raw(
                             usdg_drain_min_remainder_raw,
@@ -1212,6 +1842,40 @@ def main():
                             f"{adjustment_text}; backing off {backoff_seconds}s"
                         )
                         print(f"[!] {failure_note}")
+                    elif selected_usdg_drain_mode and liquidity_constraint:
+                        failure_count = stable_reserve_failure_counts.get(selected_route_key, 0) + 1
+                        stable_reserve_failure_counts[selected_route_key] = failure_count
+                        backoff_seconds = min(
+                            30.0,
+                            max(1.0, STABLE_BACKEND_LAG_RETRY_SECONDS)
+                            * (2 ** min(failure_count - 1, 3)),
+                        )
+                        stable_reserve_backoff_until[selected_route_key] = (
+                            time.monotonic() + backoff_seconds
+                        )
+                        chain_available_raw = max(
+                            0,
+                            live_usdg_pool_raw - usdg_drain_min_remainder_raw,
+                        )
+                        backend_available_raw = liquidity_constraint["available_raw"]
+                        if (
+                            backend_available_raw + USDG_DRAIN_SAFETY_BUFFER_RAW
+                            < chain_available_raw
+                        ):
+                            availability_reason = (
+                                "order service trails the confirmed on-chain pool"
+                            )
+                        else:
+                            availability_reason = (
+                                "order service reports liquidity as unavailable or reserved"
+                            )
+                        failure_note = (
+                            f"Stable.com {availability_reason} (backend available "
+                            f"{backend_available_raw / 10**DECIMALS:.6f}, on-chain capacity "
+                            f"{chain_available_raw / 10**DECIMALS:.6f}); "
+                            f"backing off {backoff_seconds:.0f}s without resubmitting"
+                        )
+                        print(f"[!] {failure_note}")
                     else:
                         stable_reserve_failure_counts.pop(selected_route_key, None)
                         stable_reserve_backoff_until.pop(selected_route_key, None)
@@ -1219,26 +1883,36 @@ def main():
                     stable_reserve_failure_counts.pop(selected_route_key, None)
                     stable_reserve_backoff_until.pop(selected_route_key, None)
                     state_store.set_status("exposed", f"Holding {token}; preparing Jupiter exit", route=route_label)
-                    intermediate_after_raw = wait_for_token_balance(
+                    entry_confirmed, entry_balances, _ = confirm_transfer_ws_first(
                         client,
-                        token_ata,
-                        lambda balance: balance > intermediate_baseline_raw,
-                        token,
-                        fallback_getter=fallback_getter,
-                        attempts=10,
-                        delay_seconds=1,
+                        monitor,
+                        {
+                            balance_key: (
+                                token_ata,
+                                lambda balance: balance > intermediate_baseline_raw,
+                            ),
+                            "user_usdc": (
+                                usdc_ata,
+                                lambda balance: balance < attempt_before["usdc_raw"],
+                            ),
+                        },
+                        entry_cursor.revisions,
+                        f"Stable.com {token} entry",
+                        submission=stable_result.submission,
+                        pending_store=state_store,
+                    )
+                    intermediate_after_raw = entry_balances.get(
+                        balance_key,
+                        intermediate_baseline_raw,
                     )
                     received_raw = acquired_balance_delta(intermediate_after_raw, intermediate_baseline_raw)
-                    if received_raw <= 0:
+                    if not entry_confirmed or received_raw <= 0:
                         failure_note = f"{token} entry balance delta was not observed"
                     else:
+                        entry_usdc_after_raw = entry_balances["user_usdc"]
                         print(f"[+] Stable.com produced {received_raw / 10**DECIMALS:.6f} {token}")
+                        remaining_raw = received_raw
                         for exit_attempt in range(1, 11):
-                            try:
-                                current_raw = get_token_balance(client, token_ata)
-                            except Exception:
-                                current_raw = monitor.balances[balance_key]
-                            remaining_raw = acquired_balance_delta(current_raw, intermediate_baseline_raw)
                             if remaining_raw <= tolerance_raw:
                                 arb_successful = True
                                 break
@@ -1267,30 +1941,66 @@ def main():
 
                             state_store.set_status("executing_jupiter", "Executing Jupiter exit", route=route_label)
                             print(f"[*] Jupiter exit attempt {exit_attempt}: {in_human:.6f} {token} -> USDC")
-                            execute_jup_swap(session, client, keypair, final_quote)
-                            returned_balance = wait_for_token_balance(
+                            exit_cursor = monitor.snapshot([balance_key, "user_usdc"])
+                            # The confirmed post-entry balance is the correct
+                            # credit baseline even if the monitor missed or is
+                            # still delivering an entry notification.
+                            exit_usdc_before_raw = entry_usdc_after_raw
+                            submission = execute_jup_swap(
+                                session,
                                 client,
-                                token_ata,
-                                lambda balance: acquired_delta_is_cleared(
-                                    balance,
-                                    intermediate_baseline_raw,
-                                    tolerance_raw,
-                                ),
-                                token,
-                                fallback_getter=fallback_getter,
-                                attempts=15,
-                                delay_seconds=2,
+                                keypair,
+                                final_quote,
+                                pending_store=state_store,
+                                submission_label=f"Jupiter {token}->USDC exit",
                             )
-                            if acquired_delta_is_cleared(
-                                returned_balance,
-                                intermediate_baseline_raw,
-                                tolerance_raw,
-                            ):
+                            if not submission.may_have_landed:
+                                print(f"[!] Jupiter exit submission failed ({exit_attempt}/10)")
+                                time.sleep(2)
+                                continue
+
+                            exit_confirmed, _, exit_confirmation_source = confirm_transfer_ws_first(
+                                client,
+                                monitor,
+                                {
+                                    balance_key: (
+                                        token_ata,
+                                        lambda balance: acquired_delta_is_cleared(
+                                            balance,
+                                            intermediate_baseline_raw,
+                                            tolerance_raw,
+                                        ),
+                                    ),
+                                    "user_usdc": (
+                                        usdc_ata,
+                                        lambda balance: balance > exit_usdc_before_raw,
+                                    ),
+                                },
+                                exit_cursor.revisions,
+                                f"Jupiter {token}->USDC exit",
+                                submission=submission,
+                                pending_store=state_store,
+                            )
+                            if exit_confirmed:
                                 arb_successful = True
                                 break
+                            if exit_confirmation_source in {"signature_error", "expired"}:
+                                print(
+                                    "[!] Jupiter exit transaction definitively failed or expired; "
+                                    "it is safe to request a fresh quote without duplicating it."
+                                )
+                                time.sleep(1)
+                                continue
+                            failure_note = (
+                                f"Jupiter exit was submitted, but fresh {token} clearance "
+                                "and USDC credit were not observed; not resubmitting blindly"
+                            )
+                            break
 
                         if not arb_successful:
-                            failure_note = f"Jupiter exit did not clear the acquired {token} delta"
+                            failure_note = failure_note or (
+                                f"Jupiter exit did not clear the acquired {token} delta"
+                            )
 
             else:
                 state_store.set_status("executing_jupiter", "Executing Jupiter entry", route=route_label)
@@ -1308,7 +2018,7 @@ def main():
                     try:
                         live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
                     except Exception:
-                        live_pool_usdc_raw = monitor.balances["pool_usdc"]
+                        live_pool_usdc_raw = monitor.get("pool_usdc")
                     stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
                     live_metrics = calculate_quote_metrics(
                         swap_size,
@@ -1321,55 +2031,105 @@ def main():
                         failure_note = "Stable.com USDC pool cannot settle the Jupiter output"
                     else:
                         print(f"[*] Jupiter entry: {swap_size} USDC -> {token}")
-                        execute_jup_swap(session, client, keypair, final_quote)
-                        intermediate_after_raw = wait_for_token_balance(
+                        entry_cursor = monitor.snapshot([balance_key, "user_usdc"])
+                        submission = execute_jup_swap(
+                            session,
                             client,
-                            token_ata,
-                            lambda balance: balance > intermediate_baseline_raw,
-                            token,
-                            fallback_getter=fallback_getter,
-                            attempts=15,
-                            delay_seconds=2,
+                            keypair,
+                            final_quote,
+                            pending_store=state_store,
+                            submission_label=f"Jupiter USDC->{token} entry",
                         )
-                        received_raw = acquired_balance_delta(intermediate_after_raw, intermediate_baseline_raw)
-                        if received_raw <= 0:
-                            failure_note = f"Jupiter entry did not produce a {token} balance delta"
+                        if not submission.may_have_landed:
+                            failure_note = "Jupiter entry submission failed"
                         else:
-                            try:
-                                live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
-                            except Exception:
-                                live_pool_usdc_raw = monitor.balances["pool_usdc"]
-                            stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
-                            if received_raw > stable_capacity_raw:
-                                failure_note = "Stable.com USDC pool changed and cannot settle the received amount"
-                            else:
-                                state_store.set_status("executing_stable", "Executing Stable.com exit", route=route_label)
-                                received_human = received_raw / 10**DECIMALS
-                                print(f"[*] Stable.com exit: {received_human:.6f} {token} -> USDC")
-                                if not execute_stable_swap(session, client, keypair, token, "USDC", received_human):
-                                    failure_note = "Stable.com exit failed after Jupiter entry"
-                                else:
-                                    returned_balance = wait_for_token_balance(
-                                        client,
+                            entry_confirmed, entry_balances, _ = confirm_transfer_ws_first(
+                                client,
+                                monitor,
+                                {
+                                    balance_key: (
                                         token_ata,
-                                        lambda balance: acquired_delta_is_cleared(
-                                            balance,
-                                            intermediate_baseline_raw,
-                                            tolerance_raw,
-                                        ),
+                                        lambda balance: balance > intermediate_baseline_raw,
+                                    ),
+                                    "user_usdc": (
+                                        usdc_ata,
+                                        lambda balance: balance < attempt_before["usdc_raw"],
+                                    ),
+                                },
+                                entry_cursor.revisions,
+                                f"Jupiter USDC->{token} entry",
+                                submission=submission,
+                                pending_store=state_store,
+                            )
+                            intermediate_after_raw = entry_balances.get(
+                                balance_key,
+                                intermediate_baseline_raw,
+                            )
+                            received_raw = acquired_balance_delta(
+                                intermediate_after_raw,
+                                intermediate_baseline_raw,
+                            )
+                            if not entry_confirmed or received_raw <= 0:
+                                failure_note = f"Jupiter entry did not produce a {token} balance delta"
+                            else:
+                                try:
+                                    live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
+                                except Exception:
+                                    live_pool_usdc_raw = monitor.get("pool_usdc")
+                                stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
+                                if received_raw > stable_capacity_raw:
+                                    failure_note = "Stable.com USDC pool changed and cannot settle the received amount"
+                                else:
+                                    state_store.set_status("executing_stable", "Executing Stable.com exit", route=route_label)
+                                    received_human = received_raw / 10**DECIMALS
+                                    print(f"[*] Stable.com exit: {received_human:.6f} {token} -> USDC")
+                                    exit_cursor = monitor.snapshot([balance_key, "user_usdc"])
+                                    # Use the confirmed entry result, not a
+                                    # potentially lagging WS cache, as the
+                                    # starting point for the USDC credit.
+                                    exit_usdc_before_raw = entry_balances["user_usdc"]
+                                    stable_exit_result = execute_stable_swap(
+                                        session,
+                                        client,
+                                        keypair,
                                         token,
-                                        fallback_getter=fallback_getter,
-                                        attempts=10,
-                                        delay_seconds=1,
+                                        "USDC",
+                                        received_human,
+                                        pending_store=state_store,
+                                        submission_label=f"Stable.com {token}->USDC exit",
                                     )
-                                    if acquired_delta_is_cleared(
-                                        returned_balance,
-                                        intermediate_baseline_raw,
-                                        tolerance_raw,
-                                    ):
-                                        arb_successful = True
+                                    if not stable_exit_result.may_have_landed:
+                                        failure_note = "Stable.com exit failed after Jupiter entry"
                                     else:
-                                        failure_note = f"Stable.com exit did not clear the acquired {token} delta"
+                                        exit_confirmed, _, _ = confirm_transfer_ws_first(
+                                            client,
+                                            monitor,
+                                            {
+                                                balance_key: (
+                                                    token_ata,
+                                                    lambda balance: acquired_delta_is_cleared(
+                                                        balance,
+                                                        intermediate_baseline_raw,
+                                                        tolerance_raw,
+                                                    ),
+                                                ),
+                                                "user_usdc": (
+                                                    usdc_ata,
+                                                    lambda balance: balance > exit_usdc_before_raw,
+                                                ),
+                                            },
+                                            exit_cursor.revisions,
+                                            f"Stable.com {token}->USDC exit",
+                                            submission=stable_exit_result.submission,
+                                            pending_store=state_store,
+                                        )
+                                        if exit_confirmed:
+                                            arb_successful = True
+                                        else:
+                                            failure_note = (
+                                                "Stable.com exit was submitted, but fresh token "
+                                                "clearance and USDC credit were not observed"
+                                            )
 
             new_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] AFTER ARB", prev=prev_port)
             note = "" if arb_successful else (failure_note or f"{token} cycle was not confirmed")
@@ -1398,7 +2158,7 @@ def main():
                     )
                 except Exception:
                     unresolved_raw = acquired_balance_delta(
-                        monitor.balances[balance_key],
+                        monitor.get(balance_key),
                         intermediate_baseline_raw,
                     )
                 if unresolved_raw > tolerance_raw:

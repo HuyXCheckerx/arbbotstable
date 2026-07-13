@@ -61,6 +61,7 @@ def default_state():
             },
         },
         "market": {"sol_usd": 0.0, "stablecoin_valuation": "$1 estimate"},
+        "pending_submission": None,
         "performance": {
             "total_realized_pnl_usd": 0.0,
             "session_realized_pnl_usd": 0.0,
@@ -178,6 +179,39 @@ class BotStateStore:
             elif status not in ("error", "exposed"):
                 self.state["bot"]["last_error"] = None
             self._write_locked()
+
+    def get_pending_submission(self):
+        with self.lock:
+            pending = self.state.get("pending_submission")
+            return copy.deepcopy(pending) if isinstance(pending, dict) else None
+
+    def set_pending_submission(self, signature, blockhash, label):
+        """Persist a signed transaction before it is handed to a broadcaster."""
+
+        with self.lock:
+            self.state["pending_submission"] = {
+                "signature": str(signature),
+                "blockhash": str(blockhash),
+                "label": str(label),
+                "saved_at": utc_now(),
+            }
+            self._write_locked()
+
+    def clear_pending_submission(self, expected_signature=None):
+        """Clear the pending lock, optionally only for the expected signature."""
+
+        with self.lock:
+            pending = self.state.get("pending_submission")
+            if not isinstance(pending, dict):
+                return False
+            if (
+                expected_signature is not None
+                and pending.get("signature") != str(expected_signature)
+            ):
+                return False
+            self.state["pending_submission"] = None
+            self._write_locked()
+            return True
 
     @staticmethod
     def _asset(raw, decimals, usd_price=1.0):

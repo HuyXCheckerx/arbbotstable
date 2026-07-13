@@ -89,6 +89,23 @@ USDG_MAX_REMAINDER_USD=1.99
 
 The protocol floor is hard-clamped, so legacy or mistaken configuration cannot lower the effective remainder below the safe minimum; the former `$1` maximum is migrated to the new `$1.99` default. The route is skipped when the wallet cannot drain the pool into this window, and a fresh raw pool balance is checked immediately before order creation. If Stable.com reports a higher live constraint, the bot raises its runtime floor when the refill window permits and applies exponential backoff instead of retrying the rejected order immediately. Every candidate must still meet the absolute `$0.10` net-profit floor. Other strategies retain their normal dynamic sizing.
 
+### WebSocket confirmation and Stable.com synchronization
+
+Balance confirmation is WebSocket-first at Solana's `confirmed` commitment. The monitor stores a revision and slot for every subscribed account, and the bot captures those cursors immediately before transaction submission. An entry requires fresh updates showing the intermediate token received and USDC debited. An exit requires fresh updates showing the intermediate token cleared and USDC credited. Events that arrive while a submit call is still returning are consumed immediately; stale cached balances cannot confirm a new transaction. The bot will not take first-leg exposure until all account subscriptions are ready. If no matching event arrives within the configured timeout, it takes one RPC balance snapshot instead of polling 11-16 times.
+
+Every signed transaction stores its local signature and blockhash atomically in `bot_state.json` before broadcast. If an RPC or Jupiter HTTP response is lost, or the first snapshot is still too early, the bot freezes new submissions and reconciles that signature with delayed WS updates. The lock survives the panel's automatic process restart. It resumes only after the transaction is confirmed/failed or an unrecorded transaction's blockhash has expired, preventing a hidden accepted transaction from being submitted twice. A confirmed transaction with unexpected balances stays locked for operator review instead of being balance-polled indefinitely.
+
+The scanner also refuses every new first leg while the wallet holds more than the normal 0.1-token intermediate tolerance in USDG or PYUSD. This makes a late first leg or failed exit visible as an `exposed` state instead of compounding it with another arbitrage attempt.
+
+Stable.com's create-order service may index a USDG refill after the confirmed on-chain account notification. The bot therefore gives an observed USDG pool increase a short settlement window before quoting that drain route. If the API still reports the old `available` balance, the route receives a short exponential cooldown rather than submitting the same request repeatedly.
+
+```text
+WS_CONFIRM_TIMEOUT_SECONDS=12
+SIGNATURE_CHECK_INTERVAL_SECONDS=5
+STABLE_POOL_REFILL_SYNC_SECONDS=15
+STABLE_BACKEND_LAG_RETRY_SECONDS=5
+```
+
 ## Local setup
 
 ```bash

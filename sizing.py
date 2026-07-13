@@ -161,6 +161,34 @@ def parse_stable_reserve_constraint(payload):
     }
 
 
+def parse_stable_liquidity_constraint(payload):
+    """Extract Stable.com's backend view of requested and available liquidity."""
+    if not isinstance(payload, dict):
+        return None
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        return None
+    liquidity_error = details.get("insufficient_pool_balance")
+    if not liquidity_error:
+        return None
+
+    values = {
+        name: int(value)
+        for name, value in re.findall(
+            r"\b(amount|available)=(\d+)",
+            str(liquidity_error),
+        )
+    }
+    amount_raw = values.get("amount")
+    available_raw = values.get("available")
+    if amount_raw is None or available_raw is None or amount_raw <= available_raw:
+        return None
+    return {
+        "amount_raw": amount_raw,
+        "available_raw": available_raw,
+    }
+
+
 def adjusted_drain_minimum_raw(
     current_min_raw,
     max_remainder_raw,
