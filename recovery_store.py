@@ -142,6 +142,19 @@ class RecoveryStore:
 
         return self._mutate(apply)
 
+    def set_min_net_profit(self, plan_id, min_net_profit_usd):
+        """Apply a changed recovery policy to an already-persisted plan."""
+
+        def apply(state):
+            plan = state.get("recovery")
+            if not isinstance(plan, dict) or plan.get("id") != plan_id:
+                return None
+            plan["min_net_profit_usd"] = float(min_net_profit_usd)
+            plan["updated_at"] = utc_now()
+            return plan
+
+        return self._mutate(apply)
+
     def mark_watching(self, plan_id, error=None):
         def apply(state):
             plan = state.get("recovery")

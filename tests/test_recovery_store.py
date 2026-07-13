@@ -15,6 +15,7 @@ class RecoveryStoreTests(unittest.TestCase):
 
             store.set_pending_submission("sig", "hash", "USDG recovery")
             self.assertEqual(store.get_active()["status"], "pending")
+            self.assertEqual(store.set_min_net_profit(plan["id"], 0.10)["min_net_profit_usd"], 0.10)
             self.assertFalse(store.clear_pending_submission("other"))
             self.assertTrue(store.clear_pending_submission("sig"))
 

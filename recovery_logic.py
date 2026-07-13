@@ -23,7 +23,7 @@ def recovery_quote_metrics(amount_raw, out_raw, execution_cost_usd, slippage_bps
 
 
 def recovery_quote_is_eligible(metrics, minimum_net_profit_usd):
-    return metrics["net_profit_usd"] > float(minimum_net_profit_usd)
+    return metrics["net_profit_usd"] >= float(minimum_net_profit_usd)
 
 
 def planned_amount_is_available(wallet_raw, planned_raw, tolerance_raw):

@@ -40,6 +40,7 @@ from swapstable import (  # noqa: E402
     Confirmed,
     Keypair,
     confirm_transfer_ws_first,
+    execute_stable_swap,
     execute_jup_swap,
     get_ata,
     get_jup_quote,
@@ -49,11 +50,14 @@ from swapstable import (  # noqa: E402
 )
 
 
-MIN_NET_PROFIT_USD = float(os.environ.get("RECOVERY_MIN_NET_PROFIT_USD", "0.50"))
+MIN_NET_PROFIT_USD = float(os.environ.get("RECOVERY_MIN_NET_PROFIT_USD", "0.10"))
 JUP_SLIPPAGE_BPS = max(0, int(os.environ.get("RECOVERY_JUP_SLIPPAGE_BPS", "1")))
 EXECUTION_COST_USD = float(os.environ.get("RECOVERY_EXECUTION_COST_USD", "0.01"))
 QUOTE_INTERVAL_SECONDS = max(
     0.25, float(os.environ.get("RECOVERY_QUOTE_INTERVAL_SECONDS", "1"))
+)
+STABLE_FALLBACK_RETRY_SECONDS = max(
+    1.0, float(os.environ.get("RECOVERY_STABLE_RETRY_SECONDS", "5"))
 )
 
 ASSETS = {
@@ -110,6 +114,66 @@ def reconcile_pending_plan(client, store, plan, token_ata):
     return True
 
 
+def attempt_stable_recovery(
+    session,
+    client,
+    keypair,
+    monitor,
+    store,
+    plan,
+    token,
+    token_ata,
+    balance_key,
+    usdc_ata,
+    actual_raw,
+    reason,
+):
+    """Immediately return the planned amount through Stable.com after a bad Jup quote."""
+
+    amount_raw = int(plan["amount_raw"])
+    amount_human = amount_raw / DECIMALS
+    print(
+        f"[*] Recovery fallback: Jupiter is not profitable ({reason}); "
+        f"sending exact {amount_human:.6f} {token}->USDC through Stable.com."
+    )
+    usdc_before = get_token_balance(client, usdc_ata)
+    cursor = monitor.snapshot([balance_key, "user_usdc"])
+    result = execute_stable_swap(
+        session,
+        client,
+        keypair,
+        token,
+        "USDC",
+        amount_human,
+        pending_store=store,
+        submission_label=f"Recovery Stable.com {token}->USDC",
+    )
+    if not result.may_have_landed:
+        store.mark_watching(plan["id"], "Stable.com recovery exit was not submitted")
+        return False
+    confirmed, _, _ = confirm_transfer_ws_first(
+        client,
+        monitor,
+        {
+            balance_key: (
+                token_ata,
+                lambda balance: balance <= actual_raw - amount_raw + POSITION_TOLERANCE_RAW,
+            ),
+            "user_usdc": (usdc_ata, lambda balance: balance > usdc_before),
+        },
+        cursor.revisions,
+        f"Recovery Stable.com {token}->USDC",
+        submission=result.submission,
+        pending_store=store,
+    )
+    if confirmed:
+        store.complete(plan["id"])
+        print(f"[+] Stable.com recovery complete: exact {amount_human:.6f} {token} returned.")
+        return True
+    store.mark_watching(plan["id"], "Stable.com recovery exit did not confirm")
+    return False
+
+
 def main():
     client = Client(RPC_URL, commitment=Confirmed)
     keypair = load_keypair()
@@ -147,6 +211,14 @@ def main():
             if plan.get("status") == "manual_review":
                 time.sleep(5)
                 continue
+            if float(plan.get("min_net_profit_usd", MIN_NET_PROFIT_USD)) != MIN_NET_PROFIT_USD:
+                plan = store.set_min_net_profit(plan["id"], MIN_NET_PROFIT_USD)
+                if plan is None:
+                    continue
+                print(
+                    f"[*] Updated persisted recovery threshold to "
+                    f"${MIN_NET_PROFIT_USD:.2f}."
+                )
             token = plan.get("token")
             if token not in ASSETS:
                 store.mark_manual_review(plan["id"], f"Unsupported recovery token: {token}")
@@ -181,16 +253,24 @@ def main():
                 slippage_bps=JUP_SLIPPAGE_BPS,
             )
             if not quote or "outAmount" not in quote:
-                store.mark_watching(plan["id"], "Jupiter quote unavailable")
-                time.sleep(QUOTE_INTERVAL_SECONDS)
+                attempt_stable_recovery(
+                    session, client, keypair, monitor, store, plan, token, token_ata,
+                    balance_key, usdc_ata, actual_raw, "quote unavailable",
+                )
+                time.sleep(STABLE_FALLBACK_RETRY_SECONDS)
                 continue
             metrics = recovery_quote_metrics(
                 amount_raw, quote["outAmount"], EXECUTION_COST_USD, JUP_SLIPPAGE_BPS
             )
             store.update_quote(plan["id"], metrics["gross_profit_usd"], metrics["net_profit_usd"])
-            threshold = float(plan.get("min_net_profit_usd", MIN_NET_PROFIT_USD))
+            threshold = MIN_NET_PROFIT_USD
             if not recovery_quote_is_eligible(metrics, threshold):
-                time.sleep(QUOTE_INTERVAL_SECONDS)
+                attempt_stable_recovery(
+                    session, client, keypair, monitor, store, plan, token, token_ata,
+                    balance_key, usdc_ata, actual_raw,
+                    f"Jupiter net ${metrics['net_profit_usd']:.6f} <= ${threshold:.2f}",
+                )
+                time.sleep(STABLE_FALLBACK_RETRY_SECONDS)
                 continue
 
             print(
