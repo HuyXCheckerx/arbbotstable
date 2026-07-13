@@ -3,10 +3,11 @@ import unittest
 from sizing import (
     acquired_balance_delta,
     acquired_delta_is_cleared,
-    calculate_refill_aware_min_size,
     calculate_quote_metrics,
     capital_efficiency_key,
+    drain_candidate_is_valid,
     generate_candidate_sizes,
+    generate_drain_candidate_amounts_raw,
     generate_refinement_sizes,
     is_profitable_candidate,
     stable_pool_can_settle,
@@ -38,25 +39,53 @@ class DynamicSizingTests(unittest.TestCase):
         self.assertTrue(acquired_delta_is_cleared(950_000, baseline))
         self.assertFalse(acquired_delta_is_cleared(2_000_000, baseline))
 
-    def test_usdg_refill_floor_drains_5000_pool_below_2000(self):
-        minimum = calculate_refill_aware_min_size(5_000, 1_000, 2_000, 1)
-        self.assertEqual(minimum, 3_001)
-        self.assertLess(5_000 - minimum, 2_000)
-        self.assertEqual(
-            generate_candidate_sizes(4_999, minimum),
-            [3_001, 3_749, 4_999],
+    def test_usdg_drain_candidates_leave_only_small_raw_remainders(self):
+        pool = 5_000 * 10**6
+        wallet = 50_027 * 10**6
+        candidates = generate_drain_candidate_amounts_raw(
+            pool,
+            wallet,
+            1_000 * 10**6,
+            dust_raw=1,
+            max_remainder_raw=1 * 10**6,
         )
-
-    def test_stable_minimum_wins_when_pool_is_near_refill_threshold(self):
         self.assertEqual(
-            calculate_refill_aware_min_size(2_500, 1_000, 2_000, 1),
-            1_000,
+            candidates,
+            [
+                4_999 * 10**6,
+                4_999_900_000,
+                4_999_990_000,
+                4_999_999_999,
+            ],
         )
+        self.assertTrue(all(pool - amount <= 1 * 10**6 for amount in candidates))
 
-    def test_large_usdg_pool_uses_refill_aware_floor(self):
-        self.assertEqual(
-            calculate_refill_aware_min_size(19_999, 1_000, 2_000, 1),
-            18_000,
+    def test_usdg_drain_rejects_partial_drain_when_wallet_is_too_small(self):
+        candidates = generate_drain_candidate_amounts_raw(
+            5_000 * 10**6,
+            3_000 * 10**6,
+            1_000 * 10**6,
+            dust_raw=1,
+            max_remainder_raw=1 * 10**6,
+        )
+        self.assertEqual(candidates, [])
+
+    def test_usdg_drain_validity_rejects_large_remainder(self):
+        self.assertTrue(
+            drain_candidate_is_valid(
+                5_000 * 10**6,
+                4_999 * 10**6,
+                dust_raw=1,
+                max_remainder_raw=1 * 10**6,
+            )
+        )
+        self.assertFalse(
+            drain_candidate_is_valid(
+                5_000 * 10**6,
+                3_001 * 10**6,
+                dust_raw=1,
+                max_remainder_raw=1 * 10**6,
+            )
         )
 
     def test_generates_coarse_grid_including_minimum_and_maximum(self):

@@ -69,25 +69,23 @@ EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 
 With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Among all candidates that pass, the bot selects the one with the highest net return per token committed. For example, $0.14 net on 10,000 outranks $0.20 net on 20,000 because the 10,000 trade is more capital-efficient.
 
-#### USDG reserve refill floor
+#### USDG reserve drain mode
 
-Stable.com currently refills its USDG reserve after the remaining balance falls below $2,000. For routes whose Stable.com output is USDG, the candidate floor is therefore:
+For `USDC -> USDG on Stable.com -> USDC on Jupiter`, the scanner no longer chooses a minimum that merely crosses a refill threshold. It only considers near-full-drain candidates, so a profitable partial trade cannot leave the reserve funded and prevent Stable.com from replenishing it.
 
-```text
-effective minimum = max(
-    MIN_TRADE_SIZE_USD,
-    current USDG pool - USDG_REFILL_THRESHOLD_USD + USDG_REFILL_BUFFER_USD
-)
-```
-
-With a 5,000 USDG pool and the defaults below, the smallest quoted candidate is 3,001 USDG, leaving 1,999 USDG and crossing the refill trigger:
+Sizing remains in raw six-decimal units. With a 5,000 USDG pool and the defaults below, the candidate ladder leaves at most $1 in the pool:
 
 ```text
-USDG_REFILL_THRESHOLD_USD=2000
-USDG_REFILL_BUFFER_USD=1
+USDG_DRAIN_DUST_RAW=1
+USDG_MAX_REMAINDER_USD=1
+
+4,999.000000 USDG -> leaves 1.000000
+4,999.900000 USDG -> leaves 0.100000
+4,999.990000 USDG -> leaves 0.010000
+4,999.999999 USDG -> leaves 0.000001
 ```
 
-If no candidate at or above that refill-aware minimum produces at least $0.10 net profit, the bot skips the route rather than executing a smaller trade that leaves the reserve above its refill threshold. Other destination assets continue using `MIN_TRADE_SIZE_USD` directly.
+The route is skipped when the wallet cannot drain the pool below the configured remainder. Every candidate must still meet the absolute `$0.10` net-profit floor. Other strategies retain their normal dynamic sizing.
 
 ## Local setup
 

@@ -34,21 +34,65 @@ def acquired_delta_is_cleared(current_raw, baseline_raw, tolerance_raw=100_000):
     return int(current_raw) <= int(baseline_raw) + int(tolerance_raw)
 
 
-def calculate_refill_aware_min_size(
-    pool_balance,
-    min_trade_size,
-    refill_threshold,
-    refill_buffer=1,
+def drain_candidate_is_valid(
+    pool_balance_raw,
+    amount_raw,
+    dust_raw=1,
+    max_remainder_raw=1_000_000,
 ):
-    """Return the minimum trade needed to leave a pool below its refill trigger."""
-    minimum = int(math.ceil(min_trade_size))
-    threshold = float(refill_threshold)
-    buffer = max(0, int(math.ceil(refill_buffer)))
-    if threshold <= 0:
-        return minimum
+    """Return whether an exact-input swap safely leaves only drain dust."""
+    pool = max(0, int(pool_balance_raw))
+    amount = max(0, int(amount_raw))
+    dust = max(0, int(dust_raw))
+    max_remainder = max(dust, int(max_remainder_raw))
+    remainder = pool - amount
+    return amount > 0 and dust <= remainder <= max_remainder
 
-    required_to_trigger_refill = math.floor(float(pool_balance) - threshold) + buffer
-    return max(minimum, required_to_trigger_refill)
+
+def generate_drain_candidate_amounts_raw(
+    pool_balance_raw,
+    wallet_balance_raw,
+    min_trade_size_raw,
+    dust_raw=1,
+    max_remainder_raw=1_000_000,
+):
+    """Return raw-unit sizes that leave a destination pool almost empty.
+
+    The exact drain is preferred, with a short fallback ladder that leaves at
+    most the configured remainder. If the wallet cannot bring the pool inside
+    that remainder, no partial-drain candidate is returned.
+    """
+    pool = max(0, int(pool_balance_raw))
+    wallet = max(0, int(wallet_balance_raw))
+    minimum = max(1, int(min_trade_size_raw))
+    dust = max(0, int(dust_raw))
+    max_remainder = max(dust, int(max_remainder_raw))
+
+    maximum_amount = min(wallet, pool - dust)
+    if maximum_amount < minimum:
+        return []
+    if pool - maximum_amount > max_remainder:
+        return []
+
+    fallback_remainders = {dust, 10_000, 100_000, max_remainder}
+    candidates = {maximum_amount}
+    for remainder in fallback_remainders:
+        if not dust <= remainder <= max_remainder:
+            continue
+        amount = pool - remainder
+        if minimum <= amount <= wallet:
+            candidates.add(amount)
+
+    return sorted(
+        amount
+        for amount in candidates
+        if drain_candidate_is_valid(
+            pool,
+            amount,
+            dust_raw=dust,
+            max_remainder_raw=max_remainder,
+        )
+    )
 
 
 def generate_candidate_sizes(max_feasible, min_trade_size):

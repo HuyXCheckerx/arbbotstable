@@ -31,10 +31,11 @@ from state_store import BotStateStore
 from sizing import (
     acquired_balance_delta,
     acquired_delta_is_cleared,
-    calculate_refill_aware_min_size,
     calculate_quote_metrics,
     capital_efficiency_key,
+    drain_candidate_is_valid,
     generate_candidate_sizes,
+    generate_drain_candidate_amounts_raw,
     generate_refinement_sizes,
     is_profitable_candidate,
     stable_pool_can_settle,
@@ -71,8 +72,12 @@ JUP_API_KEY = os.environ.get("JUP_API_KEY", "")
 MIN_TRADE_SIZE_USD = float(os.environ.get("MIN_TRADE_SIZE_USD", "1000"))
 MIN_NET_PROFIT_USD = float(os.environ.get("MIN_NET_PROFIT_USD", "0.10"))
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
-USDG_REFILL_THRESHOLD_USD = float(os.environ.get("USDG_REFILL_THRESHOLD_USD", "2000"))
-USDG_REFILL_BUFFER_USD = float(os.environ.get("USDG_REFILL_BUFFER_USD", "1"))
+USDG_DRAIN_DUST_RAW = max(1, int(os.environ.get("USDG_DRAIN_DUST_RAW", "1")))
+USDG_MAX_REMAINDER_USD = max(0.0, float(os.environ.get("USDG_MAX_REMAINDER_USD", "1")))
+USDG_MAX_REMAINDER_RAW = max(
+    USDG_DRAIN_DUST_RAW,
+    int(round(USDG_MAX_REMAINDER_USD * 1_000_000)),
+)
 DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", "0.005"))
 EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
 QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
@@ -746,24 +751,47 @@ def main():
                 token = strategy["token"]
                 venue_order = strategy["venue_order"]
                 pool_to = strategy["stable_destination_pool"]
-                effective_min_trade_size = MIN_TRADE_SIZE_USD
-                if venue_order == "stable_first" and token == "USDG":
-                    effective_min_trade_size = calculate_refill_aware_min_size(
-                        pool_to,
-                        MIN_TRADE_SIZE_USD,
-                        USDG_REFILL_THRESHOLD_USD,
-                        USDG_REFILL_BUFFER_USD,
+                usdg_drain_mode = venue_order == "stable_first" and token == "USDG"
+                drain_candidate_raws = []
+                if usdg_drain_mode:
+                    drain_candidate_raws = generate_drain_candidate_amounts_raw(
+                        pool_usdg_raw,
+                        usdc_raw,
+                        int(round(MIN_TRADE_SIZE_USD * 10**DECIMALS)),
+                        dust_raw=USDG_DRAIN_DUST_RAW,
+                        max_remainder_raw=USDG_MAX_REMAINDER_RAW,
                     )
-
-                if usdc_bal >= effective_min_trade_size and pool_to >= effective_min_trade_size + 1:
+                    if not drain_candidate_raws:
+                        pool_human = pool_usdg_raw / 10**DECIMALS
+                        print(
+                            f"[skip] USDC/USDG (Stable->Jupiter): cannot drain USDG pool "
+                            f"{pool_human:.6f} to <= ${USDG_MAX_REMAINDER_USD:.6f} "
+                            f"with USDC balance ${usdc_raw / 10**DECIMALS:.6f}"
+                        )
+                        continue
+                    coarse_sizes = [raw / 10**DECIMALS for raw in drain_candidate_raws]
+                    effective_min_trade_size = MIN_TRADE_SIZE_USD
+                    max_feasible_size = coarse_sizes[-1]
+                else:
+                    effective_min_trade_size = MIN_TRADE_SIZE_USD
+                    if usdc_bal < effective_min_trade_size or pool_to < effective_min_trade_size + 1:
+                        continue
                     max_feasible_size = int(min(usdc_bal, pool_to - 1))
                     coarse_sizes = generate_candidate_sizes(max_feasible_size, effective_min_trade_size)
                     if not coarse_sizes:
                         continue
 
-                    route_cost_estimate = estimated_execution_cost_usd
-                    evaluated = {}
-                    venue_label = "Stable->Jupiter" if venue_order == "stable_first" else "Jupiter->Stable"
+                route_cost_estimate = estimated_execution_cost_usd
+                evaluated = {}
+                venue_label = "Stable->Jupiter" if venue_order == "stable_first" else "Jupiter->Stable"
+                if usdg_drain_mode:
+                    print(
+                        f"[*] USDG drain sizing USDC/{token} ({venue_label}): "
+                        f"{coarse_sizes[0]:.6f}-{coarse_sizes[-1]:.6f} tokens | "
+                        f"pool remainder <= ${USDG_MAX_REMAINDER_USD:.6f} | "
+                        f"estimated cost ${route_cost_estimate:.6f}"
+                    )
+                else:
                     print(
                         f"[*] Dynamic sizing USDC/{token} ({venue_label}): "
                         f"{coarse_sizes[0]}-{coarse_sizes[-1]} tokens | "
@@ -771,130 +799,138 @@ def main():
                         f"minimum {effective_min_trade_size}"
                     )
 
-                    def evaluate_size(size):
-                        if size in evaluated:
-                            return evaluated[size]
-                        probe_amount_raw = int(size) * 10**DECIMALS
-                        quote = get_jup_quote(
-                            session,
-                            strategy["jup_input_mint"],
-                            strategy["jup_output_mint"],
-                            probe_amount_raw,
-                        )
-                        if not quote:
-                            evaluated[size] = None
-                            return None
-                        out_human = int(quote.get("outAmount", 0)) / 10**DECIMALS
-                        metrics = calculate_quote_metrics(size, out_human, route_cost_estimate)
-                        pool_can_settle = stable_pool_can_settle(
-                            venue_order,
-                            size,
-                            out_human,
-                            pool_to,
-                        )
-                        eligible = pool_can_settle and is_profitable_candidate(
-                            metrics,
-                            MIN_NET_PROFIT_USD,
-                            MIN_NET_RETURN_BPS,
-                        )
-                        if not pool_can_settle:
-                            marker = "skip: Stable pool capacity"
-                        else:
-                            marker = "eligible" if eligible else "skip"
-                        jup_pair = f"{token}->USDC" if venue_order == "stable_first" else f"USDC->{token}"
-                        print(
-                            f"    {size:>8} {jup_pair} -> {out_human:.6f} | "
-                            f"gross ${metrics['gross_profit_usd']:+.6f} | "
-                            f"net ${metrics['net_profit_usd']:+.6f} "
-                            f"({metrics['net_return_bps']:+.4f} bps) [{marker}]"
-                        )
-                        evaluated[size] = (quote, metrics)
-                        if QUOTE_SAMPLE_DELAY_SECONDS > 0:
-                            time.sleep(QUOTE_SAMPLE_DELAY_SECONDS)
+                def evaluate_size(size):
+                    if size in evaluated:
                         return evaluated[size]
-
-                    for size in coarse_sizes:
-                        evaluate_size(size)
-
-                    quoted_coarse = {
-                        size: result
-                        for size, result in evaluated.items()
-                        if result is not None
-                    }
-                    if not quoted_coarse:
-                        continue
-
-                    eligible_coarse = {
-                        size: result
-                        for size, result in quoted_coarse.items()
-                        if is_profitable_candidate(
-                            result[1],
-                            MIN_NET_PROFIT_USD,
-                            MIN_NET_RETURN_BPS,
-                        ) and stable_pool_can_settle(
-                            venue_order,
-                            size,
-                            result[1]["output_amount"],
-                            pool_to,
-                        )
-                    }
-                    if eligible_coarse:
-                        coarse_best_size = max(
-                            eligible_coarse,
-                            key=lambda size: capital_efficiency_key(
-                                size,
-                                eligible_coarse[size][1],
-                            ),
-                        )
+                    probe_amount_raw = (
+                        int(round(size * 10**DECIMALS))
+                        if usdg_drain_mode
+                        else int(size) * 10**DECIMALS
+                    )
+                    input_human = probe_amount_raw / 10**DECIMALS
+                    quote = get_jup_quote(
+                        session,
+                        strategy["jup_input_mint"],
+                        strategy["jup_output_mint"],
+                        probe_amount_raw,
+                    )
+                    if not quote:
+                        evaluated[size] = None
+                        return None
+                    out_human = int(quote.get("outAmount", 0)) / 10**DECIMALS
+                    metrics = calculate_quote_metrics(input_human, out_human, route_cost_estimate)
+                    pool_can_settle = stable_pool_can_settle(
+                        venue_order,
+                        input_human,
+                        out_human,
+                        pool_to,
+                        reserve=0 if usdg_drain_mode else 1,
+                    )
+                    eligible = pool_can_settle and is_profitable_candidate(
+                        metrics,
+                        MIN_NET_PROFIT_USD,
+                        MIN_NET_RETURN_BPS,
+                    )
+                    if not pool_can_settle:
+                        marker = "skip: Stable pool capacity"
                     else:
-                        # No coarse point passed yet; refine around the closest
-                        # point by absolute net dollars in case a midpoint does.
-                        coarse_best_size = max(
-                            quoted_coarse,
-                            key=lambda size: quoted_coarse[size][1]["net_profit_usd"],
-                        )
-                    refinement_sizes = generate_refinement_sizes(
-                        coarse_best_size,
-                        coarse_sizes,
-                        effective_min_trade_size,
-                        max_feasible_size,
+                        marker = "eligible" if eligible else "skip"
+                    jup_pair = f"{token}->USDC" if venue_order == "stable_first" else f"USDC->{token}"
+                    print(
+                        f"    {input_human:>12.6f} {jup_pair} -> {out_human:.6f} | "
+                        f"gross ${metrics['gross_profit_usd']:+.6f} | "
+                        f"net ${metrics['net_profit_usd']:+.6f} "
+                        f"({metrics['net_return_bps']:+.4f} bps) [{marker}]"
                     )
-                    for size in refinement_sizes:
-                        evaluate_size(size)
+                    evaluated[size] = (quote, metrics)
+                    if QUOTE_SAMPLE_DELAY_SECONDS > 0:
+                        time.sleep(QUOTE_SAMPLE_DELAY_SECONDS)
+                    return evaluated[size]
 
-                    eligible_results = [
-                        (size, quote, metrics)
-                        for size, result in evaluated.items()
-                        if result is not None
-                        for quote, metrics in [result]
-                        if is_profitable_candidate(
-                            metrics,
-                            MIN_NET_PROFIT_USD,
-                            MIN_NET_RETURN_BPS,
-                        ) and stable_pool_can_settle(
-                            venue_order,
+                for size in coarse_sizes:
+                    evaluate_size(size)
+
+                quoted_coarse = {
+                    size: result
+                    for size, result in evaluated.items()
+                    if result is not None
+                }
+                if not quoted_coarse:
+                    continue
+
+                eligible_coarse = {
+                    size: result
+                    for size, result in quoted_coarse.items()
+                    if is_profitable_candidate(
+                        result[1],
+                        MIN_NET_PROFIT_USD,
+                        MIN_NET_RETURN_BPS,
+                    ) and stable_pool_can_settle(
+                        venue_order,
+                        result[1]["input_amount"],
+                        result[1]["output_amount"],
+                        pool_to,
+                        reserve=0 if usdg_drain_mode else 1,
+                    )
+                }
+                if eligible_coarse:
+                    coarse_best_size = max(
+                        eligible_coarse,
+                        key=lambda size: capital_efficiency_key(
                             size,
-                            metrics["output_amount"],
-                            pool_to,
-                        )
-                    ]
-                    if not eligible_results:
-                        continue
-
-                    local_best = max(
-                        eligible_results,
-                        key=lambda item: capital_efficiency_key(item[0], item[2]),
+                            eligible_coarse[size][1],
+                        ),
                     )
-                    swap_size, quote, metrics = local_best
-                    selection_score = capital_efficiency_key(swap_size, metrics)
-                    if best_selection_score is None or selection_score > best_selection_score:
-                        best_selection_score = selection_score
-                        best_route = (
-                            strategy,
-                            swap_size,
-                            metrics,
-                            route_cost_estimate,
-                        )
+                else:
+                    # No coarse point passed yet; refine around the closest
+                    # point by absolute net dollars in case a midpoint does.
+                    coarse_best_size = max(
+                        quoted_coarse,
+                        key=lambda size: quoted_coarse[size][1]["net_profit_usd"],
+                    )
+                refinement_sizes = [] if usdg_drain_mode else generate_refinement_sizes(
+                    coarse_best_size,
+                    coarse_sizes,
+                    effective_min_trade_size,
+                    max_feasible_size,
+                )
+                for size in refinement_sizes:
+                    evaluate_size(size)
+
+                eligible_results = [
+                    (size, quote, metrics)
+                    for size, result in evaluated.items()
+                    if result is not None
+                    for quote, metrics in [result]
+                    if is_profitable_candidate(
+                        metrics,
+                        MIN_NET_PROFIT_USD,
+                        MIN_NET_RETURN_BPS,
+                    ) and stable_pool_can_settle(
+                        venue_order,
+                        metrics["input_amount"],
+                        metrics["output_amount"],
+                        pool_to,
+                        reserve=0 if usdg_drain_mode else 1,
+                    )
+                ]
+                if not eligible_results:
+                    continue
+
+                local_best = max(
+                    eligible_results,
+                    key=lambda item: capital_efficiency_key(item[0], item[2]),
+                )
+                swap_size, quote, metrics = local_best
+                selection_score = capital_efficiency_key(swap_size, metrics)
+                if best_selection_score is None or selection_score > best_selection_score:
+                    best_selection_score = selection_score
+                    best_route = (
+                        strategy,
+                        swap_size,
+                        metrics,
+                        route_cost_estimate,
+                    )
 
             if not best_route:
                 print(f"[!] No profitable arb output found on Jup right now. Waiting for updates...")
@@ -930,7 +966,12 @@ def main():
             print("[*] Revalidating selected size twice before taking first-leg exposure...")
             verify_failed = False
             verification_metrics = [selected_metrics]
-            probe_amount_raw = int(swap_size) * 10**DECIMALS
+            selected_usdg_drain_mode = token == "USDG" and venue_order == "stable_first"
+            probe_amount_raw = (
+                int(round(swap_size * 10**DECIMALS))
+                if selected_usdg_drain_mode
+                else int(swap_size) * 10**DECIMALS
+            )
             for i in range(2):
                 time.sleep(0.5)
                 v_quote = get_jup_quote(
@@ -951,6 +992,7 @@ def main():
                     swap_size,
                     out_human,
                     selected_strategy["stable_destination_pool"],
+                    reserve=0 if selected_usdg_drain_mode else 1,
                 )
                 if pool_can_settle and is_profitable_candidate(
                     metrics,
@@ -974,6 +1016,25 @@ def main():
                 print("[!] Selected size failed net-profit revalidation. Skipping...")
                 time.sleep(1)
                 continue
+
+            if selected_usdg_drain_mode:
+                try:
+                    live_usdg_pool_raw = get_token_balance(client, pool_usdg_ata)
+                except Exception:
+                    live_usdg_pool_raw = monitor.balances["pool_usdg"]
+                selected_swap_raw = int(round(swap_size * 10**DECIMALS))
+                if not drain_candidate_is_valid(
+                    live_usdg_pool_raw,
+                    selected_swap_raw,
+                    dust_raw=USDG_DRAIN_DUST_RAW,
+                    max_remainder_raw=USDG_MAX_REMAINDER_RAW,
+                ):
+                    print(
+                        "[!] USDG pool changed before entry; selected size is no longer a near-drain. "
+                        "Skipping and rescanning."
+                    )
+                    time.sleep(1)
+                    continue
 
             # Record the least favorable verified quote as the expected result.
             selected_metrics = min(
