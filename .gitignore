@@ -6,6 +6,9 @@
 # Runtime state and logs remain on each server across git pulls.
 bot_state.json
 bot_state.json.tmp
+recovery_state.json
+recovery_state.json.tmp
+recovery_state.json.lock
 pnl.txt
 logs/
 

@@ -36,6 +36,7 @@ from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from solana.rpc.types import TxOpts
 from state_store import BotStateStore
+from recovery_store import RecoveryStore
 from balance_tracker import (
     BalanceTracker,
     coherent_ws_match,
@@ -76,7 +77,8 @@ class Logger(object):
         self.log.flush()
 
 os.makedirs("logs", exist_ok=True)
-log_filename = f"logs/{os.path.splitext(os.path.basename(__file__))[0]}.log"
+log_name = os.environ.get("BOT_LOG_NAME", os.path.splitext(os.path.basename(__file__))[0])
+log_filename = f"logs/{log_name}.log"
 sys.stdout = Logger(log_filename)
 sys.stderr = sys.stdout
 
@@ -124,6 +126,9 @@ DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", 
 EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
 QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
 WS_CONFIRM_TIMEOUT_SECONDS = float(os.environ.get("WS_CONFIRM_TIMEOUT_SECONDS", "12"))
+RECOVERY_MIN_NET_PROFIT_USD = float(
+    os.environ.get("RECOVERY_MIN_NET_PROFIT_USD", "0.50")
+)
 SIGNATURE_CHECK_INTERVAL_SECONDS = max(
     1.0,
     float(os.environ.get("SIGNATURE_CHECK_INTERVAL_SECONDS", "5")),
@@ -733,13 +738,13 @@ def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, labe
 # ============================================================
 # SWAP EXECUTION logic
 # ============================================================
-def get_jup_quote(session, input_mint, output_mint, amount_raw, taker=None):
-    # Slippage is 0 per presets
+def get_jup_quote(session, input_mint, output_mint, amount_raw, taker=None, slippage_bps=0):
+    slippage_bps = max(0, int(slippage_bps))
     params = {
         "inputMint": input_mint,
         "outputMint": output_mint,
         "amount": str(amount_raw),
-        "slippageBps": "0",
+        "slippageBps": str(slippage_bps),
     }
     if taker:
         params["taker"] = taker
@@ -759,7 +764,7 @@ def get_jup_quote(session, input_mint, output_mint, amount_raw, taker=None):
         "inputMint": input_mint,
         "outputMint": output_mint,
         "amount": str(amount_raw),
-        "slippageBps": "0",
+        "slippageBps": str(slippage_bps),
     }, headers=get_jup_headers(), timeout=10)
     if resp.status_code == 200:
         return resp.json()
@@ -1215,6 +1220,7 @@ def main():
     wallet = keypair.pubkey()
     print(f"[*] Wallet: {wallet}")
     state_store = BotStateStore()
+    recovery_store = RecoveryStore()
     state_store.start_session(wallet)
     reconcile_persisted_submission(client, state_store)
 
@@ -1332,6 +1338,20 @@ def main():
                 if raw > POSITION_TOLERANCE_RAW
             )
             if unresolved_positions:
+                active_recovery = recovery_store.get_active()
+                if active_recovery is None:
+                    symbol, raw = unresolved_positions[0]
+                    active_recovery = recovery_store.schedule(
+                        symbol,
+                        raw,
+                        RECOVERY_MIN_NET_PROFIT_USD,
+                        f"Jupiter {symbol}->USDC recovery",
+                        "Detected intermediate position before a new first leg",
+                    )
+                    print(
+                        f"[recovery] Scheduled exact {raw / 10**DECIMALS:.6f} {symbol} "
+                        f"return when net profit reaches ${RECOVERY_MIN_NET_PROFIT_USD:.2f}."
+                    )
                 if unresolved_positions != last_unresolved_position:
                     rendered_positions = ", ".join(
                         f"{raw / 10**DECIMALS:.6f} {symbol}"
@@ -1343,9 +1363,12 @@ def main():
                     )
                     last_unresolved_position = unresolved_positions
                 state_store.set_status(
-                    "exposed",
-                    "Unresolved intermediate position; new entries halted",
-                    error="Clear the stablecoin position before resuming arbitrage",
+                    "recovering",
+                    "Recovery worker is monitoring the exact intermediate position",
+                    error=(
+                        f"Waiting for ${active_recovery['min_net_profit_usd']:.2f} net "
+                        "return threshold before the Jupiter exit"
+                    ),
                 )
                 monitor.update_event.wait(timeout=5)
                 monitor.update_event.clear()
@@ -2162,9 +2185,20 @@ def main():
                         intermediate_baseline_raw,
                     )
                 if unresolved_raw > tolerance_raw:
+                    plan = recovery_store.schedule(
+                        token,
+                        unresolved_raw,
+                        RECOVERY_MIN_NET_PROFIT_USD,
+                        f"Jupiter {token}->USDC recovery",
+                        note,
+                    )
+                    print(
+                        f"[recovery] Scheduled exact {unresolved_raw / 10**DECIMALS:.6f} {token} "
+                        f"return when net profit reaches ${plan['min_net_profit_usd']:.2f}."
+                    )
                     state_store.set_status(
-                        "exposed",
-                        f"Unresolved {token} position",
+                        "recovering",
+                        f"Recovery worker is monitoring {token}",
                         route=route_label,
                         error=note,
                     )

@@ -35,17 +35,23 @@ if __name__ == "__main__":
     # Create process for script
     p1 = multiprocessing.Process(target=run_script, args=("swapstable.py", env))
     p2 = multiprocessing.Process(target=run_script, args=("web.py", env))
+    recovery_env = env.copy()
+    recovery_env["BOT_LOG_NAME"] = "recovery_worker"
+    p3 = multiprocessing.Process(target=run_script, args=("recovery_worker.py", recovery_env))
     
     # Start process
     p1.start()
     p2.start()
+    p3.start()
     
     try:
         # Keep the main process alive
         p1.join()
         p2.join()
+        p3.join()
     except KeyboardInterrupt:
         print("\n[*] Shutting down...")
         p1.terminate()
         p2.terminate()
+        p3.terminate()
         sys.exit(0)
