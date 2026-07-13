@@ -1,6 +1,23 @@
 import math
 
 
+def calculate_refill_aware_min_size(
+    pool_balance,
+    min_trade_size,
+    refill_threshold,
+    refill_buffer=1,
+):
+    """Return the minimum trade needed to leave a pool below its refill trigger."""
+    minimum = int(math.ceil(min_trade_size))
+    threshold = float(refill_threshold)
+    buffer = max(0, int(math.ceil(refill_buffer)))
+    if threshold <= 0:
+        return minimum
+
+    required_to_trigger_refill = math.floor(float(pool_balance) - threshold) + buffer
+    return max(minimum, required_to_trigger_refill)
+
+
 def generate_candidate_sizes(max_feasible, min_trade_size):
     """Return a bounded coarse grid of whole-token trade sizes."""
     maximum = int(math.floor(max_feasible))
@@ -72,4 +89,13 @@ def is_profitable_candidate(metrics, min_net_profit_usd, min_net_return_bps=0.0)
     return (
         metrics["net_profit_usd"] + epsilon >= float(min_net_profit_usd)
         and metrics["net_return_bps"] + epsilon >= float(min_net_return_bps)
+    )
+
+
+def capital_efficiency_key(size, metrics):
+    """Rank eligible candidates by net return, then dollars, then lower exposure."""
+    return (
+        metrics["net_return_bps"],
+        metrics["net_profit_usd"],
+        -float(size),
     )

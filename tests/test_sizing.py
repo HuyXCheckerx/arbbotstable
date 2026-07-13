@@ -1,7 +1,9 @@
 import unittest
 
 from sizing import (
+    calculate_refill_aware_min_size,
     calculate_quote_metrics,
+    capital_efficiency_key,
     generate_candidate_sizes,
     generate_refinement_sizes,
     is_profitable_candidate,
@@ -9,6 +11,27 @@ from sizing import (
 
 
 class DynamicSizingTests(unittest.TestCase):
+    def test_usdg_refill_floor_drains_5000_pool_below_2000(self):
+        minimum = calculate_refill_aware_min_size(5_000, 1_000, 2_000, 1)
+        self.assertEqual(minimum, 3_001)
+        self.assertLess(5_000 - minimum, 2_000)
+        self.assertEqual(
+            generate_candidate_sizes(4_999, minimum),
+            [3_001, 3_749, 4_999],
+        )
+
+    def test_stable_minimum_wins_when_pool_is_near_refill_threshold(self):
+        self.assertEqual(
+            calculate_refill_aware_min_size(2_500, 1_000, 2_000, 1),
+            1_000,
+        )
+
+    def test_large_usdg_pool_uses_refill_aware_floor(self):
+        self.assertEqual(
+            calculate_refill_aware_min_size(19_999, 1_000, 2_000, 1),
+            18_000,
+        )
+
     def test_generates_coarse_grid_including_minimum_and_maximum(self):
         sizes = generate_candidate_sizes(5_000, 1_000)
         self.assertEqual(sizes, [1_000, 1_250, 2_000, 2_500, 3_750, 5_000])
@@ -38,6 +61,22 @@ class DynamicSizingTests(unittest.TestCase):
         enough = calculate_quote_metrics(5_000, 5_000.10, 0.0)
         self.assertFalse(is_profitable_candidate(too_small, 0.10, 0.0))
         self.assertTrue(is_profitable_candidate(enough, 0.10, 0.0))
+
+    def test_selection_prefers_capital_efficiency_after_absolute_gate(self):
+        candidates = {
+            10_000: calculate_quote_metrics(10_000, 10_000.14, 0.0),
+            20_000: calculate_quote_metrics(20_000, 20_000.20, 0.0),
+        }
+        eligible = {
+            size: metrics
+            for size, metrics in candidates.items()
+            if is_profitable_candidate(metrics, 0.10, 0.0)
+        }
+        selected = max(
+            eligible,
+            key=lambda size: capital_efficiency_key(size, eligible[size]),
+        )
+        self.assertEqual(selected, 10_000)
 
 
 if __name__ == "__main__":

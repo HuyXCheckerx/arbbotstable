@@ -44,7 +44,7 @@ The scanner does not assume that the largest available trade is the most profita
 3. Subtracts a conservative execution-cost estimate derived from recent observed SOL consumption.
 4. Requires at least `MIN_NET_PROFIT_USD` after that estimated cost.
 5. Revalidates the selected size twice before submitting the Stable.com leg.
-6. Chooses the eligible size with the highest absolute net dollar profit; profit does not scale with notional.
+6. Chooses the eligible size with the highest capital efficiency (net return per token committed). Absolute net dollars break ties; lower exposure breaks any remaining tie.
 
 Defaults:
 
@@ -56,7 +56,27 @@ DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 ```
 
-With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Among all candidates that pass, the bot selects the one with the highest absolute net profit, even if another candidate has a better percentage return.
+With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Among all candidates that pass, the bot selects the one with the highest net return per token committed. For example, $0.14 net on 10,000 outranks $0.20 net on 20,000 because the 10,000 trade is more capital-efficient.
+
+#### USDG reserve refill floor
+
+Stable.com currently refills its USDG reserve after the remaining balance falls below $2,000. For routes whose Stable.com output is USDG, the candidate floor is therefore:
+
+```text
+effective minimum = max(
+    MIN_TRADE_SIZE_USD,
+    current USDG pool - USDG_REFILL_THRESHOLD_USD + USDG_REFILL_BUFFER_USD
+)
+```
+
+With a 5,000 USDG pool and the defaults below, the smallest quoted candidate is 3,001 USDG, leaving 1,999 USDG and crossing the refill trigger:
+
+```text
+USDG_REFILL_THRESHOLD_USD=2000
+USDG_REFILL_BUFFER_USD=1
+```
+
+If no candidate at or above that refill-aware minimum produces at least $0.10 net profit, the bot skips the route rather than executing a smaller trade that leaves the reserve above its refill threshold. Other destination assets continue using `MIN_TRADE_SIZE_USD` directly.
 
 ## Local setup
 

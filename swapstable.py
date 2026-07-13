@@ -29,7 +29,9 @@ from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from state_store import BotStateStore
 from sizing import (
+    calculate_refill_aware_min_size,
     calculate_quote_metrics,
+    capital_efficiency_key,
     generate_candidate_sizes,
     generate_refinement_sizes,
     is_profitable_candidate,
@@ -62,10 +64,11 @@ sys.stderr = sys.stdout
 PRIVATE_KEY = os.environ["SOLANA_PRIVATE_KEY"]
 RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 JUP_API_KEY = os.environ.get("JUP_API_KEY", "")
-MIN_ARB_LIQUIDITY = float(os.environ.get("MIN_ARB_LIQUIDITY", "10000"))
 MIN_TRADE_SIZE_USD = float(os.environ.get("MIN_TRADE_SIZE_USD", "1000"))
 MIN_NET_PROFIT_USD = float(os.environ.get("MIN_NET_PROFIT_USD", "0.10"))
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
+USDG_REFILL_THRESHOLD_USD = float(os.environ.get("USDG_REFILL_THRESHOLD_USD", "2000"))
+USDG_REFILL_BUFFER_USD = float(os.environ.get("USDG_REFILL_BUFFER_USD", "1"))
 DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", "0.005"))
 EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
 QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
@@ -685,7 +688,7 @@ def main():
                 state_store.estimated_execution_cost_usd(DEFAULT_EXECUTION_COST_USD)
                 * EXECUTION_COST_SAFETY_MULTIPLIER
             )
-            best_net_profit = float("-inf")
+            best_selection_score = None
             best_route = None
             rescue_asset = None
             
@@ -704,9 +707,18 @@ def main():
                         simulated_bal = max_rescue_usdg
                         potential_rescue = "USDG"
 
-                if simulated_bal >= MIN_TRADE_SIZE_USD and pool_to >= MIN_ARB_LIQUIDITY + 1:
+                effective_min_trade_size = MIN_TRADE_SIZE_USD
+                if asset_to == "USDG":
+                    effective_min_trade_size = calculate_refill_aware_min_size(
+                        pool_to,
+                        MIN_TRADE_SIZE_USD,
+                        USDG_REFILL_THRESHOLD_USD,
+                        USDG_REFILL_BUFFER_USD,
+                    )
+
+                if simulated_bal >= effective_min_trade_size and pool_to >= effective_min_trade_size + 1:
                     max_feasible_size = int(min(simulated_bal, pool_to - 1))
-                    coarse_sizes = generate_candidate_sizes(max_feasible_size, MIN_TRADE_SIZE_USD)
+                    coarse_sizes = generate_candidate_sizes(max_feasible_size, effective_min_trade_size)
                     if not coarse_sizes:
                         continue
 
@@ -717,7 +729,8 @@ def main():
                     print(
                         f"[*] Dynamic sizing {asset_to} -> {asset_from}: "
                         f"{coarse_sizes[0]}-{coarse_sizes[-1]} tokens | "
-                        f"estimated cost ${route_cost_estimate:.6f}"
+                        f"estimated cost ${route_cost_estimate:.6f} | "
+                        f"minimum {effective_min_trade_size}"
                     )
 
                     def evaluate_size(size):
@@ -758,14 +771,34 @@ def main():
                     if not quoted_coarse:
                         continue
 
-                    coarse_best_size = max(
-                        quoted_coarse,
-                        key=lambda size: quoted_coarse[size][1]["net_profit_usd"],
-                    )
+                    eligible_coarse = {
+                        size: result
+                        for size, result in quoted_coarse.items()
+                        if is_profitable_candidate(
+                            result[1],
+                            MIN_NET_PROFIT_USD,
+                            MIN_NET_RETURN_BPS,
+                        )
+                    }
+                    if eligible_coarse:
+                        coarse_best_size = max(
+                            eligible_coarse,
+                            key=lambda size: capital_efficiency_key(
+                                size,
+                                eligible_coarse[size][1],
+                            ),
+                        )
+                    else:
+                        # No coarse point passed yet; refine around the closest
+                        # point by absolute net dollars in case a midpoint does.
+                        coarse_best_size = max(
+                            quoted_coarse,
+                            key=lambda size: quoted_coarse[size][1]["net_profit_usd"],
+                        )
                     refinement_sizes = generate_refinement_sizes(
                         coarse_best_size,
                         coarse_sizes,
-                        MIN_TRADE_SIZE_USD,
+                        effective_min_trade_size,
                         max_feasible_size,
                     )
                     for size in refinement_sizes:
@@ -787,11 +820,12 @@ def main():
 
                     local_best = max(
                         eligible_results,
-                        key=lambda item: item[2]["net_profit_usd"],
+                        key=lambda item: capital_efficiency_key(item[0], item[2]),
                     )
                     swap_size, quote, metrics = local_best
-                    if metrics["net_profit_usd"] > best_net_profit:
-                        best_net_profit = metrics["net_profit_usd"]
+                    selection_score = capital_efficiency_key(swap_size, metrics)
+                    if best_selection_score is None or selection_score > best_selection_score:
+                        best_selection_score = selection_score
                         best_route = (
                             asset_from,
                             asset_to,
@@ -820,7 +854,8 @@ def main():
             ) = best_route
             print(
                 f"\n[*] Best dynamic route: {asset_from} -> {asset_to} | "
-                f"size {swap_size} | estimated net ${selected_metrics['net_profit_usd']:.6f}"
+                f"size {swap_size} | estimated net ${selected_metrics['net_profit_usd']:.6f} | "
+                f"efficiency {selected_metrics['net_return_bps']:.4f} bps"
             )
             route_label = f"{asset_from} -> {asset_to} -> {asset_from}"
 
