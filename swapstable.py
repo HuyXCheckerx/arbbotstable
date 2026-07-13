@@ -2036,6 +2036,10 @@ def main():
                 )
                 if not final_quote:
                     failure_note = "Jupiter entry quote unavailable"
+                    print(
+                        f"[skip] Jupiter entry {swap_size} USDC->{token}: "
+                        "final executable quote was unavailable"
+                    )
                 else:
                     entry_out_raw = int(final_quote.get("outAmount", 0))
                     try:
@@ -2049,9 +2053,23 @@ def main():
                         selected_cost_estimate,
                     )
                     if not is_profitable_candidate(live_metrics, MIN_NET_PROFIT_USD, MIN_NET_RETURN_BPS):
-                        failure_note = "Jupiter entry fell below the net-profit threshold"
+                        failure_note = (
+                            "Jupiter entry fell below the net-profit threshold "
+                            f"(net ${live_metrics['net_profit_usd']:.6f}, "
+                            f"return {live_metrics['net_return_bps']:.4f} bps)"
+                        )
+                        print(
+                            f"[skip] Jupiter entry {swap_size} USDC->{token}: {failure_note}; "
+                            f"requires net >= ${MIN_NET_PROFIT_USD:.6f} and return >= "
+                            f"{MIN_NET_RETURN_BPS:.4f} bps"
+                        )
                     elif entry_out_raw > stable_capacity_raw:
-                        failure_note = "Stable.com USDC pool cannot settle the Jupiter output"
+                        failure_note = (
+                            "Stable.com USDC pool cannot settle the Jupiter output "
+                            f"({entry_out_raw / 10**DECIMALS:.6f} {token} required, "
+                            f"{stable_capacity_raw / 10**DECIMALS:.6f} available)"
+                        )
+                        print(f"[skip] Jupiter entry {swap_size} USDC->{token}: {failure_note}")
                     else:
                         print(f"[*] Jupiter entry: {swap_size} USDC -> {token}")
                         entry_cursor = monitor.snapshot([balance_key, "user_usdc"])
