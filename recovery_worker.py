@@ -16,12 +16,12 @@ import requests
 os.environ.setdefault("BOT_LOG_NAME", "recovery_worker")
 
 from recovery_logic import (  # noqa: E402
+    raw_amount_to_human,
     recovery_quote_is_eligible,
     recovery_quote_metrics,
 )
 from recovery_store import RecoveryStore  # noqa: E402
 from swapstable import (  # noqa: E402
-    DECIMALS,
     JUP_API_KEY,
     POSITION_TOLERANCE_RAW,
     PRIVATE_KEY,
@@ -133,7 +133,7 @@ def attempt_stable_recovery(
     """Immediately return the planned amount through Stable.com after a bad Jup quote."""
 
     amount_raw = int(plan["amount_raw"])
-    amount_human = amount_raw / DECIMALS
+    amount_human = raw_amount_to_human(amount_raw)
     if amount_human > STABLE_MAX_RECOVERY_AMOUNT_USD:
         store.mark_manual_review(
             plan["id"],
@@ -287,7 +287,7 @@ def main():
                 continue
 
             print(
-                f"[*] Recovery eligible: {amount_raw / DECIMALS:.6f} {token}->USDC | "
+                f"[*] Recovery eligible: {raw_amount_to_human(amount_raw):.6f} {token}->USDC | "
                 f"net ${metrics['net_profit_usd']:.6f} (threshold ${threshold:.2f})"
             )
             usdc_before = get_token_balance(client, usdc_ata)
@@ -317,7 +317,10 @@ def main():
             )
             if confirmed:
                 store.complete(plan["id"])
-                print(f"[+] Recovery complete: exact {amount_raw / DECIMALS:.6f} {token} returned.")
+                print(
+                    f"[+] Recovery complete: exact "
+                    f"{raw_amount_to_human(amount_raw):.6f} {token} returned."
+                )
             else:
                 store.mark_watching(plan["id"], "Recovery exit did not confirm; watching fresh quotes")
         except Exception as exc:

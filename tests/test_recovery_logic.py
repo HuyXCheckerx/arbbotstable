@@ -2,12 +2,16 @@ import unittest
 
 from recovery_logic import (
     planned_amount_is_available,
+    raw_amount_to_human,
     recovery_quote_is_eligible,
     recovery_quote_metrics,
 )
 
 
 class RecoveryLogicTests(unittest.TestCase):
+    def test_raw_six_decimal_amount_converts_to_human_tokens(self):
+        self.assertEqual(raw_amount_to_human(50_078_301_316), 50_078.301316)
+
     def test_quote_includes_execution_and_slippage_reserves(self):
         metrics = recovery_quote_metrics(20_000_000_000, 20_003_000_000, 0.01, 1)
         self.assertEqual(metrics["gross_profit_usd"], 3.0)

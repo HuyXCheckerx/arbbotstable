@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 
-DECIMALS = 1_000_000
+RAW_SCALE = 1_000_000
+
+
+def raw_amount_to_human(amount_raw):
+    return int(amount_raw) / RAW_SCALE
 
 
 def recovery_quote_metrics(amount_raw, out_raw, execution_cost_usd, slippage_bps):
@@ -11,8 +15,8 @@ def recovery_quote_metrics(amount_raw, out_raw, execution_cost_usd, slippage_bps
 
     amount_raw = int(amount_raw)
     out_raw = int(out_raw)
-    amount_usd = amount_raw / DECIMALS
-    gross_profit_usd = (out_raw - amount_raw) / DECIMALS
+    amount_usd = raw_amount_to_human(amount_raw)
+    gross_profit_usd = (out_raw - amount_raw) / RAW_SCALE
     slippage_reserve_usd = amount_usd * max(0, int(slippage_bps)) / 10_000
     net_profit_usd = gross_profit_usd - float(execution_cost_usd) - slippage_reserve_usd
     return {
