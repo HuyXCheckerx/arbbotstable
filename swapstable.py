@@ -29,12 +29,16 @@ from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from state_store import BotStateStore
 from sizing import (
+    acquired_balance_delta,
+    acquired_delta_is_cleared,
     calculate_refill_aware_min_size,
     calculate_quote_metrics,
     capital_efficiency_key,
     generate_candidate_sizes,
     generate_refinement_sizes,
     is_profitable_candidate,
+    stable_pool_can_settle,
+    usdc_strategy_directions,
 )
 
 load_dotenv()
@@ -212,6 +216,29 @@ def get_token_balance(client, ata):
     if resp.value is None:
         return 0
     return int(resp.value.amount)
+
+
+def wait_for_token_balance(
+    client,
+    ata,
+    predicate,
+    label,
+    fallback_getter=None,
+    attempts=15,
+    delay_seconds=1.0,
+):
+    latest = 0
+    for attempt in range(attempts):
+        if attempt > 0 or delay_seconds > 0:
+            time.sleep(delay_seconds)
+        try:
+            latest = get_token_balance(client, ata)
+        except Exception:
+            latest = int(fallback_getter()) if fallback_getter else latest
+        print(f"    Balance check {attempt + 1}/{attempts}: {label}={latest}")
+        if predicate(latest):
+            return latest
+    return latest
 
 def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, label="", prev=None):
     GREEN = "\033[92m"
@@ -435,7 +462,12 @@ def execute_jup_swap(session, client, keypair, quote):
 
 def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_human):
     wallet = keypair.pubkey()
-    amount_str = str(amount_human)
+    amount_raw = int(round(float(amount_human) * 10**DECIMALS))
+    if amount_raw <= 0:
+        print("[!] Stable swap amount must be positive")
+        return False
+    amount_human = amount_raw / 10**DECIMALS
+    amount_str = f"{amount_human:.{DECIMALS}f}".rstrip("0").rstrip(".")
     
     resp = session.post(f"{STABLE_API}/swap/create/singleChain", json={
         "assetFrom": asset_from,
@@ -474,8 +506,6 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
     nonce = int(order.get("nonce", 0))
     deadline = int(order.get("deadline", 0))
     native_fee = int(order.get("executionFeeNative", order.get("nativeFee", "0")))
-    amount_raw = amount_human * 10**DECIMALS
-    
     if native_fee > 0:
         print(f"[*] Stable.com is charging a native fee of {native_fee} lamports!")
 
@@ -675,14 +705,35 @@ def main():
             )
             state_store.set_status("scanning", "Scanning markets")
 
-            permutations = [
-                ("USDC", "USDG", usdc_bal, pool_usdg, USDC_MINT, USDG_MINT),
-                ("USDG", "USDC", usdg_bal, pool_usdc, USDG_MINT, USDC_MINT),
-                ("USDC", "PYUSD", usdc_bal, pool_pyusd, USDC_MINT, PYUSD_MINT),
-                ("PYUSD", "USDC", pyusd_bal, pool_usdc, PYUSD_MINT, USDC_MINT),
-                ("USDG", "PYUSD", usdg_bal, pool_pyusd, USDG_MINT, PYUSD_MINT),
-                ("PYUSD", "USDG", pyusd_bal, pool_usdg, PYUSD_MINT, USDG_MINT),
-            ]
+            token_configs = {
+                "USDG": {
+                    "mint": USDG_MINT,
+                    "stable_pool": pool_usdg,
+                    "token_ata": usdg_ata,
+                    "balance_key": "user_usdg",
+                },
+                "PYUSD": {
+                    "mint": PYUSD_MINT,
+                    "stable_pool": pool_pyusd,
+                    "token_ata": pyusd_ata,
+                    "balance_key": "user_pyusd",
+                },
+            }
+            strategies = []
+            for token, venue_order in usdc_strategy_directions():
+                config = token_configs[token]
+                stable_first = venue_order == "stable_first"
+                strategies.append(
+                    {
+                        "token": token,
+                        "venue_order": venue_order,
+                        "jup_input_mint": config["mint"] if stable_first else USDC_MINT,
+                        "jup_output_mint": USDC_MINT if stable_first else config["mint"],
+                        "stable_destination_pool": config["stable_pool"] if stable_first else pool_usdc,
+                        "token_ata": config["token_ata"],
+                        "balance_key": config["balance_key"],
+                    }
+                )
             
             estimated_execution_cost_usd = (
                 state_store.estimated_execution_cost_usd(DEFAULT_EXECUTION_COST_USD)
@@ -690,25 +741,13 @@ def main():
             )
             best_selection_score = None
             best_route = None
-            rescue_asset = None
             
-            for (asset_from, asset_to, bal_from, pool_to, mint_from, mint_to) in permutations:
-                simulated_bal = bal_from
-                potential_rescue = None
-                
-                if asset_from == "USDC" and bal_from < MIN_TRADE_SIZE_USD:
-                    max_rescue_pyusd = min(pyusd_bal, pool_usdc - 1) if pool_usdc > 0 else 0
-                    max_rescue_usdg = min(usdg_bal, pool_usdc - 1) if pool_usdc > 0 else 0
-                    
-                    if max_rescue_pyusd >= MIN_TRADE_SIZE_USD and asset_to != "PYUSD":
-                        simulated_bal = max_rescue_pyusd
-                        potential_rescue = "PYUSD"
-                    elif max_rescue_usdg >= MIN_TRADE_SIZE_USD and asset_to != "USDG":
-                        simulated_bal = max_rescue_usdg
-                        potential_rescue = "USDG"
-
+            for strategy in strategies:
+                token = strategy["token"]
+                venue_order = strategy["venue_order"]
+                pool_to = strategy["stable_destination_pool"]
                 effective_min_trade_size = MIN_TRADE_SIZE_USD
-                if asset_to == "USDG":
+                if venue_order == "stable_first" and token == "USDG":
                     effective_min_trade_size = calculate_refill_aware_min_size(
                         pool_to,
                         MIN_TRADE_SIZE_USD,
@@ -716,18 +755,17 @@ def main():
                         USDG_REFILL_BUFFER_USD,
                     )
 
-                if simulated_bal >= effective_min_trade_size and pool_to >= effective_min_trade_size + 1:
-                    max_feasible_size = int(min(simulated_bal, pool_to - 1))
+                if usdc_bal >= effective_min_trade_size and pool_to >= effective_min_trade_size + 1:
+                    max_feasible_size = int(min(usdc_bal, pool_to - 1))
                     coarse_sizes = generate_candidate_sizes(max_feasible_size, effective_min_trade_size)
                     if not coarse_sizes:
                         continue
 
-                    # A rescue path contains an additional Stable.com transaction,
-                    # so reserve another half-cycle of observed execution cost.
-                    route_cost_estimate = estimated_execution_cost_usd * (1.5 if potential_rescue else 1.0)
+                    route_cost_estimate = estimated_execution_cost_usd
                     evaluated = {}
+                    venue_label = "Stable->Jupiter" if venue_order == "stable_first" else "Jupiter->Stable"
                     print(
-                        f"[*] Dynamic sizing {asset_to} -> {asset_from}: "
+                        f"[*] Dynamic sizing USDC/{token} ({venue_label}): "
                         f"{coarse_sizes[0]}-{coarse_sizes[-1]} tokens | "
                         f"estimated cost ${route_cost_estimate:.6f} | "
                         f"minimum {effective_min_trade_size}"
@@ -737,20 +775,35 @@ def main():
                         if size in evaluated:
                             return evaluated[size]
                         probe_amount_raw = int(size) * 10**DECIMALS
-                        quote = get_jup_quote(session, mint_to, mint_from, probe_amount_raw)
+                        quote = get_jup_quote(
+                            session,
+                            strategy["jup_input_mint"],
+                            strategy["jup_output_mint"],
+                            probe_amount_raw,
+                        )
                         if not quote:
                             evaluated[size] = None
                             return None
                         out_human = int(quote.get("outAmount", 0)) / 10**DECIMALS
                         metrics = calculate_quote_metrics(size, out_human, route_cost_estimate)
-                        eligible = is_profitable_candidate(
+                        pool_can_settle = stable_pool_can_settle(
+                            venue_order,
+                            size,
+                            out_human,
+                            pool_to,
+                        )
+                        eligible = pool_can_settle and is_profitable_candidate(
                             metrics,
                             MIN_NET_PROFIT_USD,
                             MIN_NET_RETURN_BPS,
                         )
-                        marker = "eligible" if eligible else "skip"
+                        if not pool_can_settle:
+                            marker = "skip: Stable pool capacity"
+                        else:
+                            marker = "eligible" if eligible else "skip"
+                        jup_pair = f"{token}->USDC" if venue_order == "stable_first" else f"USDC->{token}"
                         print(
-                            f"    {size:>8} {asset_to} -> {out_human:.6f} {asset_from} | "
+                            f"    {size:>8} {jup_pair} -> {out_human:.6f} | "
                             f"gross ${metrics['gross_profit_usd']:+.6f} | "
                             f"net ${metrics['net_profit_usd']:+.6f} "
                             f"({metrics['net_return_bps']:+.4f} bps) [{marker}]"
@@ -778,6 +831,11 @@ def main():
                             result[1],
                             MIN_NET_PROFIT_USD,
                             MIN_NET_RETURN_BPS,
+                        ) and stable_pool_can_settle(
+                            venue_order,
+                            size,
+                            result[1]["output_amount"],
+                            pool_to,
                         )
                     }
                     if eligible_coarse:
@@ -813,6 +871,11 @@ def main():
                             metrics,
                             MIN_NET_PROFIT_USD,
                             MIN_NET_RETURN_BPS,
+                        ) and stable_pool_can_settle(
+                            venue_order,
+                            size,
+                            metrics["output_amount"],
+                            pool_to,
                         )
                     ]
                     if not eligible_results:
@@ -827,15 +890,11 @@ def main():
                     if best_selection_score is None or selection_score > best_selection_score:
                         best_selection_score = selection_score
                         best_route = (
-                            asset_from,
-                            asset_to,
+                            strategy,
                             swap_size,
-                            mint_from,
-                            mint_to,
                             metrics,
                             route_cost_estimate,
                         )
-                        rescue_asset = potential_rescue
 
             if not best_route:
                 print(f"[!] No profitable arb output found on Jup right now. Waiting for updates...")
@@ -844,20 +903,23 @@ def main():
                 continue
 
             (
-                asset_from,
-                asset_to,
+                selected_strategy,
                 swap_size,
-                mint_from,
-                mint_to,
                 selected_metrics,
                 selected_cost_estimate,
             ) = best_route
+            token = selected_strategy["token"]
+            venue_order = selected_strategy["venue_order"]
+            venue_label = "Stable->Jupiter" if venue_order == "stable_first" else "Jupiter->Stable"
             print(
-                f"\n[*] Best dynamic route: {asset_from} -> {asset_to} | "
+                f"\n[*] Best USDC route: USDC/{token} ({venue_label}) | "
                 f"size {swap_size} | estimated net ${selected_metrics['net_profit_usd']:.6f} | "
                 f"efficiency {selected_metrics['net_return_bps']:.4f} bps"
             )
-            route_label = f"{asset_from} -> {asset_to} -> {asset_from}"
+            if venue_order == "stable_first":
+                route_label = f"USDC -> {token} (Stable) -> USDC (Jupiter)"
+            else:
+                route_label = f"USDC -> {token} (Jupiter) -> USDC (Stable)"
 
             if swap_size < 1:
                 print(f"[!] Swap size too small ({swap_size})")
@@ -871,7 +933,12 @@ def main():
             probe_amount_raw = int(swap_size) * 10**DECIMALS
             for i in range(2):
                 time.sleep(0.5)
-                v_quote = get_jup_quote(session, mint_to, mint_from, probe_amount_raw)
+                v_quote = get_jup_quote(
+                    session,
+                    selected_strategy["jup_input_mint"],
+                    selected_strategy["jup_output_mint"],
+                    probe_amount_raw,
+                )
                 if not v_quote:
                     print(f"    Verify {i+1}/2: quote unavailable")
                     verify_failed = True
@@ -879,14 +946,25 @@ def main():
                 out_human = int(v_quote.get("outAmount", 0)) / 10**DECIMALS
                 metrics = calculate_quote_metrics(swap_size, out_human, selected_cost_estimate)
                 verification_metrics.append(metrics)
-                if is_profitable_candidate(metrics, MIN_NET_PROFIT_USD, MIN_NET_RETURN_BPS):
+                pool_can_settle = stable_pool_can_settle(
+                    venue_order,
+                    swap_size,
+                    out_human,
+                    selected_strategy["stable_destination_pool"],
+                )
+                if pool_can_settle and is_profitable_candidate(
+                    metrics,
+                    MIN_NET_PROFIT_USD,
+                    MIN_NET_RETURN_BPS,
+                ):
                     print(
                         f"    Verify {i+1}/2: net ${metrics['net_profit_usd']:.6f} "
                         f"({metrics['net_return_bps']:.4f} bps)"
                     )
                 else:
+                    reason = "Stable pool capacity" if not pool_can_settle else "profit threshold"
                     print(
-                        f"    Verify {i+1}/2: below threshold | "
+                        f"    Verify {i+1}/2: rejected by {reason} | "
                         f"net ${metrics['net_profit_usd']:.6f}"
                     )
                     verify_failed = True
@@ -913,147 +991,179 @@ def main():
                 "[*] TRADE START",
                 prev=prev_port,
             )
-            state_store.set_status("executing_stable", "Executing Stable.com leg", route=route_label)
+            token_ata = selected_strategy["token_ata"]
+            balance_key = selected_strategy["balance_key"]
+            try:
+                intermediate_baseline_raw = get_token_balance(client, token_ata)
+            except Exception:
+                intermediate_baseline_raw = monitor.balances[balance_key]
 
-            if rescue_asset:
-                print(f"[*] Stuck {rescue_asset} detected. Executing {rescue_asset} -> USDC rescue swap on stable.com first...")
-                state_store.set_status("recovering", f"Recovering {rescue_asset}", route=route_label)
-                if not execute_stable_swap(session, client, keypair, rescue_asset, "USDC", swap_size):
-                    print(f"[!] Rescue swap failed. Aborting.")
-                    failed_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] AFTER FAILED ATTEMPT", prev=attempt_before)
-                    state_store.record_attempt(
-                        route_label,
-                        swap_size,
-                        selected_metrics["gross_profit_usd"],
-                        attempt_before,
-                        failed_port,
-                        False,
-                        "Stable.com rescue swap failed",
-                    )
-                    state_store.update_snapshot(
-                        {"USDC": failed_port["usdc_raw"], "USDG": failed_port["usdg_raw"], "PYUSD": failed_port["pyusd_raw"]},
-                        {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw},
-                        failed_port["sol_lamports"],
-                        failed_port["sol_price"],
-                    )
-                    prev_port = failed_port
-                    state_store.set_status("error", "Rescue failed", route=route_label, error="Stable.com rescue swap failed")
-                    monitor.update_event.wait(timeout=5)
-                    monitor.update_event.clear()
-                    continue
-                print(f"[+] Rescue swap success! Proceeding with main arb...")
-                state_store.set_status("executing_stable", "Executing Stable.com leg", route=route_label)
-
-            print(f"[*] Swapping {swap_size} {asset_from} -> {asset_to} on stable.com...")
-            if not execute_stable_swap(session, client, keypair, asset_from, asset_to, swap_size):
-                print("[!] Stable.com swap failed. Aborting.")
-                failed_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] AFTER FAILED ATTEMPT", prev=attempt_before)
-                state_store.record_attempt(
-                    route_label,
-                    swap_size,
-                    selected_metrics["gross_profit_usd"],
-                    attempt_before,
-                    failed_port,
-                    False,
-                    "Stable.com arbitrage leg failed",
-                )
-                state_store.update_snapshot(
-                    {"USDC": failed_port["usdc_raw"], "USDG": failed_port["usdg_raw"], "PYUSD": failed_port["pyusd_raw"]},
-                    {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw},
-                    failed_port["sol_lamports"],
-                    failed_port["sol_price"],
-                )
-                prev_port = failed_port
-                state_store.set_status("error", "Stable.com leg failed", route=route_label, error="Stable.com arbitrage leg failed")
-                monitor.update_event.wait(timeout=5)
-                monitor.update_event.clear()
-                continue
-            
-            print(f"[+] Stable.com swap success!")
-
-            # 3. Swap all to Jup
-            print(f"\n[*] Swapping {asset_to} back to {asset_from} on Jupiter (0% slippage)...")
-            state_store.set_status("exposed", f"Holding {asset_to}; preparing exit", route=route_label)
-
-            temp_asset_key = f"user_{asset_to.lower()}"
-            retries = 0
-            while retries < 5:
-                new_bal = monitor.balances[temp_asset_key]
-                if new_bal > 0:
-                    break
-                print(f"[!] Balance not showing yet... waiting 1s (Attempt {retries+1}/5)")
-                time.sleep(1)
-                retries += 1
-            
-            print(f"[*] Current {asset_to} balance to swap back: {new_bal / 10**DECIMALS:.6f}")
-            
-            balance_key = f"user_{asset_to.lower()}"
-            if asset_to == "USDC":
-                ata_to_check = usdc_ata
-            elif asset_to == "USDG":
-                ata_to_check = usdg_ata
-            else:
-                ata_to_check = pyusd_ata
-
-            attempts = 0
             arb_successful = False
-            while True:
-                attempts += 1
-                
-                final_quote = get_jup_quote(session, mint_to, mint_from, new_bal, taker=str(wallet))
-                if not final_quote:
-                    print("[!] Failed to get Jupiter quote. Retrying...")
-                    time.sleep(2)
-                    if monitor.balances[balance_key] < 100000:
-                        print("[+] Balance is now 0. A previous swap must have landed!")
-                        arb_successful = True
-                        break
-                    continue
-                
-                expected_out = int(final_quote["outAmount"]) / 10**DECIMALS
-                in_human = new_bal / 10**DECIMALS
-                if expected_out <= in_human:
-                    if attempts > 10:
-                        print(f"[!] Attempts exceeded 10. Discarding loop and restarting...")
-                        break
-                    print(f"[-] Attempt {attempts}: Quote unprofitable ({in_human} -> {expected_out:.6f}). Waiting for price to improve...")
-                    time.sleep(3)
-                    continue
+            failure_note = ""
+            tolerance_raw = 100_000
+            fallback_getter = lambda: monitor.balances[balance_key]
 
-                print(f"[*] Attempt {attempts}: Firing Jup swap for {expected_out:.6f} {asset_from}...")
-                state_store.set_status("executing_jupiter", "Executing Jupiter exit", route=route_label)
-            
-                if execute_jup_swap(session, client, keypair, final_quote):
-                    print("[+] Jupiter swap submitted! Waiting to verify balance clearance...")
-                    cleared = False
-                    for check_i in range(15):
-                        time.sleep(2)
-                        try:
-                            check_bal = get_token_balance(client, ata_to_check)
-                        except Exception:
-                            check_bal = monitor.balances[balance_key]
-                        ws_check = monitor.balances[balance_key]
-                        print(f"    Verify check {check_i+1}/5: RPC={check_bal}, WS={ws_check}")
-                        if check_bal < 100000 and ws_check < 100000:
-                            cleared = True
-                            break
-                    if cleared:
-                        print("[+] Balance confirmed cleared!")
-                        arb_successful = True
-                        break
-                    else:
-                        print("[!] Balance not cleared yet. Retrying swap...")
+            if venue_order == "stable_first":
+                state_store.set_status("executing_stable", "Executing Stable.com entry", route=route_label)
+                print(f"[*] Stable.com entry: {swap_size} USDC -> {token}")
+                if not execute_stable_swap(session, client, keypair, "USDC", token, swap_size):
+                    failure_note = "Stable.com entry failed"
                 else:
-                    print("[!] Transaction execution/preflight failed. Checking if balance cleared...")
-                    if monitor.balances[balance_key] < 100000:
-                        print("[+] Balance is 0! Previous swap landed.")
-                        arb_successful = True
-                        break
-                    print("Retrying immediately...")
+                    state_store.set_status("exposed", f"Holding {token}; preparing Jupiter exit", route=route_label)
+                    intermediate_after_raw = wait_for_token_balance(
+                        client,
+                        token_ata,
+                        lambda balance: balance > intermediate_baseline_raw,
+                        token,
+                        fallback_getter=fallback_getter,
+                        attempts=10,
+                        delay_seconds=1,
+                    )
+                    received_raw = acquired_balance_delta(intermediate_after_raw, intermediate_baseline_raw)
+                    if received_raw <= 0:
+                        failure_note = f"{token} entry balance delta was not observed"
+                    else:
+                        print(f"[+] Stable.com produced {received_raw / 10**DECIMALS:.6f} {token}")
+                        for exit_attempt in range(1, 11):
+                            try:
+                                current_raw = get_token_balance(client, token_ata)
+                            except Exception:
+                                current_raw = monitor.balances[balance_key]
+                            remaining_raw = acquired_balance_delta(current_raw, intermediate_baseline_raw)
+                            if remaining_raw <= tolerance_raw:
+                                arb_successful = True
+                                break
 
-            # Out of the Jupiter swap loop (swap succeeded and balance is verified to be 0)
+                            final_quote = get_jup_quote(
+                                session,
+                                selected_strategy["jup_input_mint"],
+                                selected_strategy["jup_output_mint"],
+                                remaining_raw,
+                                taker=str(wallet),
+                            )
+                            if not final_quote:
+                                print(f"[!] Jupiter exit quote unavailable ({exit_attempt}/10)")
+                                time.sleep(2)
+                                continue
+
+                            expected_out = int(final_quote["outAmount"]) / 10**DECIMALS
+                            in_human = remaining_raw / 10**DECIMALS
+                            if expected_out <= in_human:
+                                print(
+                                    f"[-] Jupiter exit below parity ({exit_attempt}/10): "
+                                    f"{in_human:.6f} -> {expected_out:.6f}; waiting"
+                                )
+                                time.sleep(3)
+                                continue
+
+                            state_store.set_status("executing_jupiter", "Executing Jupiter exit", route=route_label)
+                            print(f"[*] Jupiter exit attempt {exit_attempt}: {in_human:.6f} {token} -> USDC")
+                            execute_jup_swap(session, client, keypair, final_quote)
+                            returned_balance = wait_for_token_balance(
+                                client,
+                                token_ata,
+                                lambda balance: acquired_delta_is_cleared(
+                                    balance,
+                                    intermediate_baseline_raw,
+                                    tolerance_raw,
+                                ),
+                                token,
+                                fallback_getter=fallback_getter,
+                                attempts=15,
+                                delay_seconds=2,
+                            )
+                            if acquired_delta_is_cleared(
+                                returned_balance,
+                                intermediate_baseline_raw,
+                                tolerance_raw,
+                            ):
+                                arb_successful = True
+                                break
+
+                        if not arb_successful:
+                            failure_note = f"Jupiter exit did not clear the acquired {token} delta"
+
+            else:
+                state_store.set_status("executing_jupiter", "Executing Jupiter entry", route=route_label)
+                final_quote = get_jup_quote(
+                    session,
+                    selected_strategy["jup_input_mint"],
+                    selected_strategy["jup_output_mint"],
+                    probe_amount_raw,
+                    taker=str(wallet),
+                )
+                if not final_quote:
+                    failure_note = "Jupiter entry quote unavailable"
+                else:
+                    entry_out_raw = int(final_quote.get("outAmount", 0))
+                    try:
+                        live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
+                    except Exception:
+                        live_pool_usdc_raw = monitor.balances["pool_usdc"]
+                    stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
+                    live_metrics = calculate_quote_metrics(
+                        swap_size,
+                        entry_out_raw / 10**DECIMALS,
+                        selected_cost_estimate,
+                    )
+                    if not is_profitable_candidate(live_metrics, MIN_NET_PROFIT_USD, MIN_NET_RETURN_BPS):
+                        failure_note = "Jupiter entry fell below the net-profit threshold"
+                    elif entry_out_raw > stable_capacity_raw:
+                        failure_note = "Stable.com USDC pool cannot settle the Jupiter output"
+                    else:
+                        print(f"[*] Jupiter entry: {swap_size} USDC -> {token}")
+                        execute_jup_swap(session, client, keypair, final_quote)
+                        intermediate_after_raw = wait_for_token_balance(
+                            client,
+                            token_ata,
+                            lambda balance: balance > intermediate_baseline_raw,
+                            token,
+                            fallback_getter=fallback_getter,
+                            attempts=15,
+                            delay_seconds=2,
+                        )
+                        received_raw = acquired_balance_delta(intermediate_after_raw, intermediate_baseline_raw)
+                        if received_raw <= 0:
+                            failure_note = f"Jupiter entry did not produce a {token} balance delta"
+                        else:
+                            try:
+                                live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
+                            except Exception:
+                                live_pool_usdc_raw = monitor.balances["pool_usdc"]
+                            stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
+                            if received_raw > stable_capacity_raw:
+                                failure_note = "Stable.com USDC pool changed and cannot settle the received amount"
+                            else:
+                                state_store.set_status("executing_stable", "Executing Stable.com exit", route=route_label)
+                                received_human = received_raw / 10**DECIMALS
+                                print(f"[*] Stable.com exit: {received_human:.6f} {token} -> USDC")
+                                if not execute_stable_swap(session, client, keypair, token, "USDC", received_human):
+                                    failure_note = "Stable.com exit failed after Jupiter entry"
+                                else:
+                                    returned_balance = wait_for_token_balance(
+                                        client,
+                                        token_ata,
+                                        lambda balance: acquired_delta_is_cleared(
+                                            balance,
+                                            intermediate_baseline_raw,
+                                            tolerance_raw,
+                                        ),
+                                        token,
+                                        fallback_getter=fallback_getter,
+                                        attempts=10,
+                                        delay_seconds=1,
+                                    )
+                                    if acquired_delta_is_cleared(
+                                        returned_balance,
+                                        intermediate_baseline_raw,
+                                        tolerance_raw,
+                                    ):
+                                        arb_successful = True
+                                    else:
+                                        failure_note = f"Stable.com exit did not clear the acquired {token} delta"
+
             new_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] AFTER ARB", prev=prev_port)
-            note = "" if arb_successful else f"{asset_to} exit was not confirmed; intermediate balance may remain"
+            note = "" if arb_successful else (failure_note or f"{token} cycle was not confirmed")
             record = state_store.record_attempt(
                 route_label,
                 swap_size,
@@ -1072,7 +1182,25 @@ def main():
             if arb_successful:
                 state_store.set_status("scanning", "Scanning markets")
             else:
-                state_store.set_status("exposed", f"Unresolved {asset_to} position", route=route_label, error=note)
+                try:
+                    unresolved_raw = acquired_balance_delta(
+                        get_token_balance(client, token_ata),
+                        intermediate_baseline_raw,
+                    )
+                except Exception:
+                    unresolved_raw = acquired_balance_delta(
+                        monitor.balances[balance_key],
+                        intermediate_baseline_raw,
+                    )
+                if unresolved_raw > tolerance_raw:
+                    state_store.set_status(
+                        "exposed",
+                        f"Unresolved {token} position",
+                        route=route_label,
+                        error=note,
+                    )
+                else:
+                    state_store.set_status("error", "Arbitrage attempt failed", route=route_label, error=note)
             print(
                 f"\n[+] Accounting updated | Net PnL: ${record['realized_pnl_usd']:.6f} | "
                 f"SOL consumed: {record['sol_consumed']:.9f} "

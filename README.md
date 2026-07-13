@@ -37,6 +37,17 @@ Accounting persists in `bot_state.json`. On the first upgraded run, the old `pnl
 
 ### Dynamic trade sizing
 
+All arbitrage cycles are anchored in USDC. The scanner evaluates only four strategies:
+
+```text
+USDC -> USDG  on Stable.com -> USDC on Jupiter
+USDC -> USDG  on Jupiter    -> USDC on Stable.com
+USDC -> PYUSD on Stable.com -> USDC on Jupiter
+USDC -> PYUSD on Jupiter    -> USDC on Stable.com
+```
+
+USDG↔PYUSD cycles and strategies that begin from existing USDG/PYUSD inventory are not considered. Execution measures the intermediate-token balance before and after the entry and exits only that delta, leaving pre-existing token balances untouched.
+
 The scanner does not assume that the largest available trade is the most profitable. For every feasible direction it:
 
 1. Quotes a bounded grid from `MIN_TRADE_SIZE_USD` to the maximum wallet/pool size.

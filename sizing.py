@@ -1,6 +1,39 @@
 import math
 
 
+def usdc_strategy_directions(tokens=("USDG", "PYUSD")):
+    """Return the only supported arbitrage cycles: USDC base, two venue orders."""
+    return [
+        (token, venue_order)
+        for token in tokens
+        for venue_order in ("stable_first", "jupiter_first")
+    ]
+
+
+def stable_pool_can_settle(
+    venue_order,
+    usdc_principal,
+    jupiter_output,
+    stable_destination_pool,
+    reserve=1,
+):
+    stable_amount = (
+        float(usdc_principal)
+        if venue_order == "stable_first"
+        else float(jupiter_output)
+    )
+    capacity = max(0.0, float(stable_destination_pool) - float(reserve))
+    return stable_amount <= capacity
+
+
+def acquired_balance_delta(current_raw, baseline_raw):
+    return max(0, int(current_raw) - int(baseline_raw))
+
+
+def acquired_delta_is_cleared(current_raw, baseline_raw, tolerance_raw=100_000):
+    return int(current_raw) <= int(baseline_raw) + int(tolerance_raw)
+
+
 def calculate_refill_aware_min_size(
     pool_balance,
     min_trade_size,

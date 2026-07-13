@@ -1,16 +1,43 @@
 import unittest
 
 from sizing import (
+    acquired_balance_delta,
+    acquired_delta_is_cleared,
     calculate_refill_aware_min_size,
     calculate_quote_metrics,
     capital_efficiency_key,
     generate_candidate_sizes,
     generate_refinement_sizes,
     is_profitable_candidate,
+    stable_pool_can_settle,
+    usdc_strategy_directions,
 )
 
 
 class DynamicSizingTests(unittest.TestCase):
+    def test_strategy_scope_is_usdc_with_two_venue_orders_per_token(self):
+        self.assertEqual(
+            usdc_strategy_directions(),
+            [
+                ("USDG", "stable_first"),
+                ("USDG", "jupiter_first"),
+                ("PYUSD", "stable_first"),
+                ("PYUSD", "jupiter_first"),
+            ],
+        )
+
+    def test_stable_pool_requirement_depends_on_venue_order(self):
+        self.assertTrue(stable_pool_can_settle("stable_first", 5_000, 5_000.20, 5_001))
+        self.assertFalse(stable_pool_can_settle("jupiter_first", 5_000, 5_000.20, 5_001))
+        self.assertTrue(stable_pool_can_settle("jupiter_first", 5_000, 5_000.20, 5_002))
+
+    def test_execution_uses_only_balance_created_by_current_cycle(self):
+        baseline = 900_000
+        after_entry = 1_000_900_000
+        self.assertEqual(acquired_balance_delta(after_entry, baseline), 1_000_000_000)
+        self.assertTrue(acquired_delta_is_cleared(950_000, baseline))
+        self.assertFalse(acquired_delta_is_cleared(2_000_000, baseline))
+
     def test_usdg_refill_floor_drains_5000_pool_below_2000(self):
         minimum = calculate_refill_aware_min_size(5_000, 1_000, 2_000, 1)
         self.assertEqual(minimum, 3_001)
