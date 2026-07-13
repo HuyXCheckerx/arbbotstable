@@ -55,7 +55,7 @@ The scanner does not assume that the largest available trade is the most profita
 3. Subtracts a conservative execution-cost estimate derived from recent observed SOL consumption.
 4. Requires at least `MIN_NET_PROFIT_USD` after that estimated cost.
 5. Revalidates the selected size twice before submitting the Stable.com leg.
-6. Chooses the eligible size with the highest capital efficiency (net return per token committed). Absolute net dollars break ties; lower exposure breaks any remaining tie.
+6. Chooses the eligible size with the highest absolute net dollar profit. Lower exposure breaks a tie at six-decimal dollar precision.
 
 Defaults:
 
@@ -67,24 +67,27 @@ DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 ```
 
-With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Among all candidates that pass, the bot selects the one with the highest net return per token committed. For example, $0.14 net on 10,000 outranks $0.20 net on 20,000 because the 10,000 trade is more capital-efficient.
+With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Among all candidates that pass, the bot selects the one with the highest net dollar profit. For example, $0.20 net on 20,000 outranks $0.14 net on 10,000 even though the smaller trade has a higher percentage return.
+
+`MIN_NET_RETURN_BPS` remains an optional eligibility floor. It can reject a quote, but it is not used to rank quotes that pass.
 
 #### USDG reserve drain mode
 
 For `USDC -> USDG on Stable.com -> USDC on Jupiter`, the scanner no longer chooses a minimum that merely crosses a refill threshold. It only considers near-full-drain candidates, so a profitable partial trade cannot leave the reserve funded and prevent Stable.com from replenishing it.
 
-Sizing remains in raw six-decimal units. Stable.com currently rejects an operation that leaves less than $1.80 USDG, so the drain window is configured between $1.80 and $1.99. This remains below the $2.00 refill trigger:
+Sizing remains in raw six-decimal units. Stable.com rejects an operation that leaves less than $1.80 USDG. A default $0.10 safety buffer makes the effective drain window $1.90-$1.99 while keeping it below the $2.00 refill trigger:
 
 ```text
 USDG_DRAIN_MIN_REMAINDER_USD=1.80
+USDG_DRAIN_SAFETY_BUFFER_USD=0.10
 USDG_MAX_REMAINDER_USD=1.99
 
 4,998.010000 USDG -> leaves 1.990000
-4,998.105000 USDG -> leaves 1.895000
-4,998.200000 USDG -> leaves 1.800000
+4,998.055000 USDG -> leaves 1.945000
+4,998.100000 USDG -> leaves 1.900000
 ```
 
-The route is skipped when the wallet cannot drain the pool below the configured remainder. Every candidate must still meet the absolute `$0.10` net-profit floor. Other strategies retain their normal dynamic sizing.
+The protocol floor is hard-clamped, so legacy or mistaken configuration cannot lower the effective remainder below the safe minimum; the former `$1` maximum is migrated to the new `$1.99` default. The route is skipped when the wallet cannot drain the pool into this window, and a fresh raw pool balance is checked immediately before order creation. If Stable.com reports a higher live constraint, the bot raises its runtime floor when the refill window permits and applies exponential backoff instead of retrying the rejected order immediately. Every candidate must still meet the absolute `$0.10` net-profit floor. Other strategies retain their normal dynamic sizing.
 
 ## Local setup
 

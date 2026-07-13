@@ -1,4 +1,5 @@
 import math
+import re
 
 
 def usdc_strategy_directions(tokens=("USDG", "PYUSD")):
@@ -97,6 +98,104 @@ def generate_drain_candidate_amounts_raw(
     )
 
 
+def normalize_drain_window_raw(
+    requested_min_raw,
+    requested_max_raw,
+    protocol_floor_raw=1_800_000,
+    safety_buffer_raw=100_000,
+    refill_trigger_raw=2_000_000,
+):
+    """Return a safe reserve window bounded by protocol and refill limits."""
+    protocol_floor = max(0, int(protocol_floor_raw))
+    safety_buffer = max(0, int(safety_buffer_raw))
+    refill_trigger = max(0, int(refill_trigger_raw))
+    maximum_below_refill = refill_trigger - 1
+    safe_floor = protocol_floor + safety_buffer
+
+    if safe_floor > maximum_below_refill:
+        raise ValueError("reserve floor and safety buffer leave no drain window")
+
+    minimum = max(int(requested_min_raw), safe_floor)
+    if minimum > maximum_below_refill:
+        raise ValueError("minimum drain remainder must stay below the refill trigger")
+
+    maximum = min(
+        maximum_below_refill,
+        max(minimum, int(requested_max_raw)),
+    )
+    return minimum, maximum
+
+
+def parse_stable_reserve_constraint(payload):
+    """Extract Stable.com's raw pool-reserve values from an error payload."""
+    if not isinstance(payload, dict):
+        return None
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        return None
+    reserve_error = details.get("insufficient_pool_balance")
+    if not reserve_error:
+        return None
+
+    values = {
+        name: int(value)
+        for name, value in re.findall(
+            r"(remainingAfterOperation|thresholdYMinusZ|thresholdY|thresholdZ)=(\d+)",
+            str(reserve_error),
+        )
+    }
+    required_raw = values.get("thresholdYMinusZ")
+    if required_raw is None:
+        threshold_y = values.get("thresholdY")
+        threshold_z = values.get("thresholdZ")
+        if threshold_y is not None and threshold_z is not None:
+            required_raw = threshold_y - threshold_z
+
+    if required_raw is None or required_raw < 0:
+        return None
+    return {
+        "remaining_raw": values.get("remainingAfterOperation"),
+        "required_raw": required_raw,
+        "threshold_y_raw": values.get("thresholdY"),
+        "threshold_z_raw": values.get("thresholdZ"),
+    }
+
+
+def adjusted_drain_minimum_raw(
+    current_min_raw,
+    max_remainder_raw,
+    reserve_constraint,
+    safety_buffer_raw=100_000,
+    checked_remainder_raw=None,
+):
+    """Raise a drain floor after a reserve rejection, or return None if impossible."""
+    if not isinstance(reserve_constraint, dict):
+        return int(current_min_raw)
+
+    required_raw = reserve_constraint.get("required_raw")
+    if required_raw is None:
+        return int(current_min_raw)
+
+    current_min = max(0, int(current_min_raw))
+    maximum = max(0, int(max_remainder_raw))
+    required = max(0, int(required_raw))
+    safety_buffer = max(0, int(safety_buffer_raw))
+    adjusted_min = max(current_min, required + safety_buffer)
+
+    remaining_raw = reserve_constraint.get("remaining_raw")
+    if remaining_raw is not None and checked_remainder_raw is not None:
+        observed_depletion = max(
+            0,
+            int(checked_remainder_raw) - int(remaining_raw),
+        )
+        adjusted_min = max(
+            adjusted_min,
+            required + max(safety_buffer, observed_depletion),
+        )
+
+    return adjusted_min if adjusted_min <= maximum else None
+
+
 def generate_candidate_sizes(max_feasible, min_trade_size):
     """Return a bounded coarse grid of whole-token trade sizes."""
     maximum = int(math.floor(max_feasible))
@@ -171,10 +270,9 @@ def is_profitable_candidate(metrics, min_net_profit_usd, min_net_return_bps=0.0)
     )
 
 
-def capital_efficiency_key(size, metrics):
-    """Rank eligible candidates by net return, then dollars, then lower exposure."""
+def absolute_profit_key(size, metrics):
+    """Rank by six-decimal net dollars, then lower exposure on a tie."""
     return (
-        metrics["net_return_bps"],
-        metrics["net_profit_usd"],
+        round(float(metrics["net_profit_usd"]), 6),
         -float(size),
     )

@@ -6,7 +6,6 @@ import hashlib
 import uuid
 import sys
 import glob
-import re
 
 # Fix for Pterodactyl / Cloud hosts not mapping .local packages correctly
 local_paths = glob.glob("/home/container/.local/lib/python*/site-packages")
@@ -30,15 +29,18 @@ from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from state_store import BotStateStore
 from sizing import (
+    absolute_profit_key,
     acquired_balance_delta,
     acquired_delta_is_cleared,
+    adjusted_drain_minimum_raw,
     calculate_quote_metrics,
-    capital_efficiency_key,
     drain_candidate_is_valid,
     generate_candidate_sizes,
     generate_drain_candidate_amounts_raw,
     generate_refinement_sizes,
     is_profitable_candidate,
+    normalize_drain_window_raw,
+    parse_stable_reserve_constraint,
     stable_pool_can_settle,
     usdc_strategy_directions,
 )
@@ -73,28 +75,37 @@ JUP_API_KEY = os.environ.get("JUP_API_KEY", "")
 MIN_TRADE_SIZE_USD = float(os.environ.get("MIN_TRADE_SIZE_USD", "1000"))
 MIN_NET_PROFIT_USD = float(os.environ.get("MIN_NET_PROFIT_USD", "0.10"))
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
-USDG_DRAIN_MIN_REMAINDER_USD = max(
-    0.0,
-    float(os.environ.get("USDG_DRAIN_MIN_REMAINDER_USD", "1.8")),
+# Stable's reported USDG constraint is 1.8 tokens; keep a default 0.1-token
+# race buffer while remaining below the 2.0-token refill trigger.
+USDG_PROTOCOL_RESERVE_FLOOR_RAW = 1_800_000
+USDG_REFILL_TRIGGER_RAW = 2_000_000
+USDG_DEFAULT_MAX_REMAINDER_RAW = 1_990_000
+USDG_DRAIN_SAFETY_BUFFER_RAW = max(
+    0,
+    int(round(float(os.environ.get("USDG_DRAIN_SAFETY_BUFFER_USD", "0.10")) * 1_000_000)),
 )
-USDG_DRAIN_MIN_REMAINDER_RAW = max(
-    1,
-    int(round(USDG_DRAIN_MIN_REMAINDER_USD * 1_000_000)),
-)
-# Stable.com currently rejects USDG operations that leave less than $1.80.
-# Keep the old raw setting backward-compatible, but never below that floor.
-USDG_DRAIN_DUST_RAW = max(
-    USDG_DRAIN_MIN_REMAINDER_RAW,
+_requested_usdg_min_remainder_raw = max(
+    0,
+    int(round(float(os.environ.get("USDG_DRAIN_MIN_REMAINDER_USD", "1.80")) * 1_000_000)),
     int(os.environ.get("USDG_DRAIN_DUST_RAW", "1")),
 )
-USDG_MAX_REMAINDER_USD = max(
-    USDG_DRAIN_MIN_REMAINDER_USD,
-    float(os.environ.get("USDG_MAX_REMAINDER_USD", "1.99")),
+_requested_usdg_max_remainder_raw = max(
+    0,
+    int(round(float(os.environ.get("USDG_MAX_REMAINDER_USD", "1.99")) * 1_000_000)),
 )
-USDG_MAX_REMAINDER_RAW = max(
-    USDG_DRAIN_DUST_RAW,
-    int(round(USDG_MAX_REMAINDER_USD * 1_000_000)),
+if _requested_usdg_max_remainder_raw < USDG_PROTOCOL_RESERVE_FLOOR_RAW:
+    # Migrate the former $1 maximum to the new safe window automatically.
+    _requested_usdg_max_remainder_raw = USDG_DEFAULT_MAX_REMAINDER_RAW
+USDG_DRAIN_DUST_RAW, USDG_MAX_REMAINDER_RAW = normalize_drain_window_raw(
+    _requested_usdg_min_remainder_raw,
+    _requested_usdg_max_remainder_raw,
+    protocol_floor_raw=USDG_PROTOCOL_RESERVE_FLOOR_RAW,
+    safety_buffer_raw=USDG_DRAIN_SAFETY_BUFFER_RAW,
+    refill_trigger_raw=USDG_REFILL_TRIGGER_RAW,
 )
+USDG_DRAIN_MIN_REMAINDER_RAW = USDG_DRAIN_DUST_RAW
+USDG_DRAIN_MIN_REMAINDER_USD = USDG_DRAIN_MIN_REMAINDER_RAW / 1_000_000
+USDG_MAX_REMAINDER_USD = USDG_MAX_REMAINDER_RAW / 1_000_000
 DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", "0.005"))
 EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
 QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
@@ -482,12 +493,21 @@ def execute_jup_swap(session, client, keypair, quote):
         print(f"[!] RPC Error during Jup swap: {e}")
     return False
 
+class StableSwapResult:
+    def __init__(self, ok, reserve_constraint=None):
+        self.ok = bool(ok)
+        self.reserve_constraint = reserve_constraint
+
+    def __bool__(self):
+        return self.ok
+
+
 def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_human):
     wallet = keypair.pubkey()
     amount_raw = int(round(float(amount_human) * 10**DECIMALS))
     if amount_raw <= 0:
         print("[!] Stable swap amount must be positive")
-        return False
+        return StableSwapResult(False)
     amount_human = amount_raw / 10**DECIMALS
     amount_str = f"{amount_human:.{DECIMALS}f}".rstrip("0").rstrip(".")
     
@@ -505,29 +525,33 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
     }, timeout=15)
     
     if resp.status_code != 200:
+        reserve_constraint = None
         try:
             error_payload = resp.json()
-            details = error_payload.get("details", {}) if isinstance(error_payload, dict) else {}
-            reserve_error = details.get("insufficient_pool_balance")
-            if reserve_error:
-                threshold_match = re.search(r"thresholdYMinusZ=(\d+)", str(reserve_error))
-                if threshold_match:
-                    threshold_raw = int(threshold_match.group(1))
-                    print(
-                        "[!] Stable.com pool reserve floor: "
-                        f"{threshold_raw / 10**DECIMALS:.6f} {asset_to}; "
-                        "increase the drain remainder before retrying."
-                    )
+            reserve_constraint = parse_stable_reserve_constraint(error_payload)
+            if reserve_constraint:
+                required_raw = reserve_constraint["required_raw"]
+                remaining_raw = reserve_constraint["remaining_raw"]
+                remaining_text = (
+                    f"{remaining_raw / 10**DECIMALS:.6f}"
+                    if remaining_raw is not None
+                    else "unknown"
+                )
+                print(
+                    "[!] Stable.com rejected the pool remainder: "
+                    f"would leave {remaining_text} {asset_to}, requires at least "
+                    f"{required_raw / 10**DECIMALS:.6f}. Rescanning without retrying."
+                )
         except (ValueError, TypeError):
             pass
         print(f"[!] Stable create order error: {resp.text}")
-        return False
+        return StableSwapResult(False, reserve_constraint=reserve_constraint)
         
     order = resp.json().get("data", resp.json())
     sig_hex = order.get("maintainerSignature", "")
     if not sig_hex:
         print("[!] No maintainer signature")
-        return False
+        return StableSwapResult(False)
         
     sig_raw = bytes.fromhex(sig_hex.replace("0x", ""))
     if len(sig_raw) == 65:
@@ -538,7 +562,7 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
         recovery_id = int(order.get("recoveryId", 0))
     else:
         print("[!] Bad sig length")
-        return False
+        return StableSwapResult(False)
 
     nonce = int(order.get("nonce", 0))
     deadline = int(order.get("deadline", 0))
@@ -614,8 +638,8 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
     if result.value:
         print(f"[+] Stable Swap Sent: {result.value}")
         client.confirm_transaction(result.value, commitment=Confirmed)
-        return True
-    return False
+        return StableSwapResult(True)
+    return StableSwapResult(False)
 
 # ============================================================
 # MAIN
@@ -689,6 +713,9 @@ def main():
     )
     state_store.set_status("scanning", "Scanning markets")
     print("[*] Starting Arb Bot loop...")
+    usdg_drain_min_remainder_raw = USDG_DRAIN_DUST_RAW
+    stable_reserve_failure_counts = {}
+    stable_reserve_backoff_until = {}
     while True:
         try:
             # Fetch user and pool balances directly from RPC to avoid WebSocket cache lag
@@ -776,12 +803,15 @@ def main():
                 state_store.estimated_execution_cost_usd(DEFAULT_EXECUTION_COST_USD)
                 * EXECUTION_COST_SAFETY_MULTIPLIER
             )
-            best_selection_score = None
+            best_profit_score = None
             best_route = None
             
             for strategy in strategies:
                 token = strategy["token"]
                 venue_order = strategy["venue_order"]
+                route_key = (token, venue_order)
+                if time.monotonic() < stable_reserve_backoff_until.get(route_key, 0):
+                    continue
                 pool_to = strategy["stable_destination_pool"]
                 usdg_drain_mode = venue_order == "stable_first" and token == "USDG"
                 drain_candidate_raws = []
@@ -790,7 +820,7 @@ def main():
                         pool_usdg_raw,
                         usdc_raw,
                         int(round(MIN_TRADE_SIZE_USD * 10**DECIMALS)),
-                        dust_raw=USDG_DRAIN_DUST_RAW,
+                        dust_raw=usdg_drain_min_remainder_raw,
                         max_remainder_raw=USDG_MAX_REMAINDER_RAW,
                     )
                     if not drain_candidate_raws:
@@ -908,7 +938,7 @@ def main():
                 if eligible_coarse:
                     coarse_best_size = max(
                         eligible_coarse,
-                        key=lambda size: capital_efficiency_key(
+                        key=lambda size: absolute_profit_key(
                             size,
                             eligible_coarse[size][1],
                         ),
@@ -918,7 +948,10 @@ def main():
                     # point by absolute net dollars in case a midpoint does.
                     coarse_best_size = max(
                         quoted_coarse,
-                        key=lambda size: quoted_coarse[size][1]["net_profit_usd"],
+                        key=lambda size: absolute_profit_key(
+                            size,
+                            quoted_coarse[size][1],
+                        ),
                     )
                 refinement_sizes = [] if usdg_drain_mode else generate_refinement_sizes(
                     coarse_best_size,
@@ -951,12 +984,12 @@ def main():
 
                 local_best = max(
                     eligible_results,
-                    key=lambda item: capital_efficiency_key(item[0], item[2]),
+                    key=lambda item: absolute_profit_key(item[0], item[2]),
                 )
                 swap_size, quote, metrics = local_best
-                selection_score = capital_efficiency_key(swap_size, metrics)
-                if best_selection_score is None or selection_score > best_selection_score:
-                    best_selection_score = selection_score
+                profit_score = absolute_profit_key(swap_size, metrics)
+                if best_profit_score is None or profit_score > best_profit_score:
+                    best_profit_score = profit_score
                     best_route = (
                         strategy,
                         swap_size,
@@ -982,7 +1015,7 @@ def main():
             print(
                 f"\n[*] Best USDC route: USDC/{token} ({venue_label}) | "
                 f"size {swap_size} | estimated net ${selected_metrics['net_profit_usd']:.6f} | "
-                f"efficiency {selected_metrics['net_return_bps']:.4f} bps"
+                f"return {selected_metrics['net_return_bps']:.4f} bps"
             )
             if venue_order == "stable_first":
                 route_label = f"USDC -> {token} (Stable) -> USDC (Jupiter)"
@@ -1049,25 +1082,6 @@ def main():
                 time.sleep(1)
                 continue
 
-            if selected_usdg_drain_mode:
-                try:
-                    live_usdg_pool_raw = get_token_balance(client, pool_usdg_ata)
-                except Exception:
-                    live_usdg_pool_raw = monitor.balances["pool_usdg"]
-                selected_swap_raw = int(round(swap_size * 10**DECIMALS))
-                if not drain_candidate_is_valid(
-                    live_usdg_pool_raw,
-                    selected_swap_raw,
-                    dust_raw=USDG_DRAIN_DUST_RAW,
-                    max_remainder_raw=USDG_MAX_REMAINDER_RAW,
-                ):
-                    print(
-                        "[!] USDG pool changed before entry; selected size is no longer a near-drain. "
-                        "Skipping and rescanning."
-                    )
-                    time.sleep(1)
-                    continue
-
             # Record the least favorable verified quote as the expected result.
             selected_metrics = min(
                 verification_metrics,
@@ -1099,9 +1113,87 @@ def main():
             if venue_order == "stable_first":
                 state_store.set_status("executing_stable", "Executing Stable.com entry", route=route_label)
                 print(f"[*] Stable.com entry: {swap_size} USDC -> {token}")
-                if not execute_stable_swap(session, client, keypair, "USDC", token, swap_size):
+                if selected_usdg_drain_mode:
+                    try:
+                        live_usdg_pool_raw = get_token_balance(client, pool_usdg_ata)
+                    except Exception as exc:
+                        print(
+                            "[!] Cannot fetch a fresh USDG pool balance immediately before entry; "
+                            f"skipping the tightly bounded drain order: {exc}"
+                        )
+                        state_store.set_status("scanning", "Scanning markets")
+                        continue
+                    selected_swap_raw = int(round(swap_size * 10**DECIMALS))
+                    checked_usdg_remainder_raw = live_usdg_pool_raw - selected_swap_raw
+                    if not drain_candidate_is_valid(
+                        live_usdg_pool_raw,
+                        selected_swap_raw,
+                        dust_raw=usdg_drain_min_remainder_raw,
+                        max_remainder_raw=USDG_MAX_REMAINDER_RAW,
+                    ):
+                        print(
+                            "[!] USDG pool changed immediately before entry; order would leave "
+                            f"{checked_usdg_remainder_raw / 10**DECIMALS:.6f} USDG, outside the safe "
+                            f"{usdg_drain_min_remainder_raw / 10**DECIMALS:.6f}-"
+                            f"{USDG_MAX_REMAINDER_USD:.6f} window. Skipping and rescanning."
+                        )
+                        state_store.set_status("scanning", "Scanning markets")
+                        continue
+                stable_result = execute_stable_swap(
+                    session,
+                    client,
+                    keypair,
+                    "USDC",
+                    token,
+                    swap_size,
+                )
+                selected_route_key = (token, venue_order)
+                if not stable_result:
                     failure_note = "Stable.com entry failed"
+                    reserve_constraint = stable_result.reserve_constraint
+                    if selected_usdg_drain_mode and reserve_constraint:
+                        adjusted_min_raw = adjusted_drain_minimum_raw(
+                            usdg_drain_min_remainder_raw,
+                            USDG_MAX_REMAINDER_RAW,
+                            reserve_constraint,
+                            safety_buffer_raw=USDG_DRAIN_SAFETY_BUFFER_RAW,
+                            checked_remainder_raw=checked_usdg_remainder_raw,
+                        )
+                        if adjusted_min_raw is not None:
+                            usdg_drain_min_remainder_raw = adjusted_min_raw
+
+                        failure_count = stable_reserve_failure_counts.get(selected_route_key, 0) + 1
+                        stable_reserve_failure_counts[selected_route_key] = failure_count
+                        backoff_seconds = min(
+                            300,
+                            30 * (2 ** min(failure_count - 1, 4)),
+                        )
+                        if adjusted_min_raw is None:
+                            backoff_seconds = 300
+                        stable_reserve_backoff_until[selected_route_key] = (
+                            time.monotonic() + backoff_seconds
+                        )
+
+                        required_raw = reserve_constraint["required_raw"]
+                        if adjusted_min_raw is None:
+                            adjustment_text = "no safe remainder remains below the refill trigger"
+                        else:
+                            adjustment_text = (
+                                "runtime minimum is now "
+                                f"{adjusted_min_raw / 10**DECIMALS:.6f} USDG"
+                            )
+                        failure_note = (
+                            "Stable.com USDG reserve rejected the entry; "
+                            f"requires {required_raw / 10**DECIMALS:.6f} USDG, "
+                            f"{adjustment_text}; backing off {backoff_seconds}s"
+                        )
+                        print(f"[!] {failure_note}")
+                    else:
+                        stable_reserve_failure_counts.pop(selected_route_key, None)
+                        stable_reserve_backoff_until.pop(selected_route_key, None)
                 else:
+                    stable_reserve_failure_counts.pop(selected_route_key, None)
+                    stable_reserve_backoff_until.pop(selected_route_key, None)
                     state_store.set_status("exposed", f"Holding {token}; preparing Jupiter exit", route=route_label)
                     intermediate_after_raw = wait_for_token_balance(
                         client,
