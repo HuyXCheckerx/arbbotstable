@@ -155,6 +155,51 @@ class RecoveryStore:
 
         return self._mutate(apply)
 
+    def sync_detected_position(self, token, amount_raw, min_net_profit_usd, route):
+        """Adopt a startup-detected balance unless a transaction is pending.
+
+        A prior process can leave a stale watching plan behind.  Its amount is
+        not an authority over the wallet; the confirmed current balance is.
+        """
+
+        amount_raw = int(amount_raw)
+        if amount_raw <= 0:
+            raise ValueError("detected recovery amount must be positive")
+
+        def apply(state):
+            plan = state.get("recovery")
+            if not isinstance(plan, dict):
+                plan = {
+                    "id": uuid.uuid4().hex,
+                    "status": "watching",
+                    "token": str(token),
+                    "amount_raw": amount_raw,
+                    "min_net_profit_usd": float(min_net_profit_usd),
+                    "route": str(route),
+                    "reason": "Detected intermediate position before a new first leg",
+                    "created_at": utc_now(),
+                    "updated_at": utc_now(),
+                    "last_quote": None,
+                    "last_error": None,
+                    "submission": None,
+                }
+                state["recovery"] = plan
+                return plan, True
+            if plan.get("submission"):
+                return plan, False
+            if plan.get("token") == str(token):
+                changed = int(plan.get("amount_raw", 0)) != amount_raw
+                plan["amount_raw"] = amount_raw
+                plan["min_net_profit_usd"] = float(min_net_profit_usd)
+                plan["route"] = str(route)
+                plan["status"] = "watching"
+                plan["last_error"] = None
+                plan["updated_at"] = utc_now()
+                return plan, changed
+            return plan, False
+
+        return self._mutate(apply)
+
     def mark_watching(self, plan_id, error=None):
         def apply(state):
             plan = state.get("recovery")

@@ -16,7 +16,6 @@ import requests
 os.environ.setdefault("BOT_LOG_NAME", "recovery_worker")
 
 from recovery_logic import (  # noqa: E402
-    planned_amount_is_available,
     recovery_quote_is_eligible,
     recovery_quote_metrics,
 )
@@ -58,6 +57,9 @@ QUOTE_INTERVAL_SECONDS = max(
 )
 STABLE_FALLBACK_RETRY_SECONDS = max(
     1.0, float(os.environ.get("RECOVERY_STABLE_RETRY_SECONDS", "5"))
+)
+STABLE_MAX_RECOVERY_AMOUNT_USD = float(
+    os.environ.get("RECOVERY_STABLE_MAX_AMOUNT_USD", "1000000")
 )
 
 ASSETS = {
@@ -132,6 +134,17 @@ def attempt_stable_recovery(
 
     amount_raw = int(plan["amount_raw"])
     amount_human = amount_raw / DECIMALS
+    if amount_human > STABLE_MAX_RECOVERY_AMOUNT_USD:
+        store.mark_manual_review(
+            plan["id"],
+            f"Stable.com recovery amount {amount_human:.6f} exceeds its "
+            f"${STABLE_MAX_RECOVERY_AMOUNT_USD:.0f} limit",
+        )
+        print(
+            f"[halt] Not submitting {amount_human:.6f} {token} to Stable.com: "
+            f"it exceeds the ${STABLE_MAX_RECOVERY_AMOUNT_USD:.0f} API limit."
+        )
+        return False
     print(
         f"[*] Recovery fallback: Jupiter is not profitable ({reason}); "
         f"sending exact {amount_human:.6f} {token}->USDC through Stable.com."
@@ -237,7 +250,7 @@ def main():
                 print(f"[+] {token} recovery plan already cleared from wallet.")
                 store.complete(plan["id"])
                 continue
-            if not planned_amount_is_available(actual_raw, amount_raw, POSITION_TOLERANCE_RAW):
+            if abs(actual_raw - amount_raw) > POSITION_TOLERANCE_RAW:
                 store.mark_manual_review(
                     plan["id"],
                     f"Wallet has {actual_raw} raw {token}; plan requires exact {amount_raw}",

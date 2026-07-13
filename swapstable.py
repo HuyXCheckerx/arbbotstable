@@ -1338,16 +1338,14 @@ def main():
                 if raw > POSITION_TOLERANCE_RAW
             )
             if unresolved_positions:
-                active_recovery = recovery_store.get_active()
-                if active_recovery is None:
-                    symbol, raw = unresolved_positions[0]
-                    active_recovery = recovery_store.schedule(
-                        symbol,
-                        raw,
-                        RECOVERY_MIN_NET_PROFIT_USD,
-                        f"Jupiter {symbol}->USDC recovery",
-                        "Detected intermediate position before a new first leg",
-                    )
+                symbol, raw = unresolved_positions[0]
+                active_recovery, refreshed_recovery = recovery_store.sync_detected_position(
+                    symbol,
+                    raw,
+                    RECOVERY_MIN_NET_PROFIT_USD,
+                    f"Jupiter {symbol}->USDC recovery",
+                )
+                if refreshed_recovery:
                     print(
                         f"[recovery] Scheduled exact {raw / 10**DECIMALS:.6f} {symbol} "
                         f"return when net profit reaches ${RECOVERY_MIN_NET_PROFIT_USD:.2f}."
