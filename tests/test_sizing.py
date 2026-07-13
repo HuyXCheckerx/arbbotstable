@@ -9,6 +9,7 @@ from sizing import (
     drain_candidate_is_valid,
     generate_candidate_sizes,
     generate_drain_candidate_amounts_raw,
+    maximum_safe_stable_input_raw,
     generate_refinement_sizes,
     is_profitable_candidate,
     normalize_drain_window_raw,
@@ -20,6 +21,16 @@ from sizing import (
 
 
 class DynamicSizingTests(unittest.TestCase):
+    def test_partial_usdg_trade_uses_wallet_max_when_full_drain_is_impossible(self):
+        self.assertEqual(
+            maximum_safe_stable_input_raw(
+                50_083_578_567,
+                70_082_964_400,
+                1_900_000,
+            ),
+            50_083_578_567,
+        )
+
     def test_strategy_scope_is_usdc_with_two_venue_orders_per_token(self):
         self.assertEqual(
             usdc_strategy_directions(),

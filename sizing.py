@@ -98,6 +98,14 @@ def generate_drain_candidate_amounts_raw(
     )
 
 
+def maximum_safe_stable_input_raw(wallet_balance_raw, pool_balance_raw, reserve_raw):
+    """Maximum exact input bounded by wallet funds and protected pool reserve."""
+
+    wallet = max(0, int(wallet_balance_raw))
+    pool_capacity = max(0, int(pool_balance_raw) - max(0, int(reserve_raw)))
+    return min(wallet, pool_capacity)
+
+
 def normalize_drain_window_raw(
     requested_min_raw,
     requested_max_raw,

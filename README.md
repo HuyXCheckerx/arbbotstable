@@ -73,7 +73,7 @@ With these defaults, every size has the same $0.10 net-profit requirement. When 
 
 #### USDG reserve drain mode
 
-For `USDC -> USDG on Stable.com -> USDC on Jupiter`, the scanner no longer chooses a minimum that merely crosses a refill threshold. It only considers near-full-drain candidates, so a profitable partial trade cannot leave the reserve funded and prevent Stable.com from replenishing it.
+For `USDC -> USDG on Stable.com -> USDC on Jupiter`, the scanner prefers near-full-drain candidates when the wallet can bring the pool into the refill window. If the wallet cannot reach that window, it falls back to ordinary dynamic sizing instead of discarding the route. The fallback includes the exact wallet-or-pool-limited maximum, including fractional token units, and still selects the eligible size with the highest absolute net profit.
 
 Sizing remains in raw six-decimal units. Stable.com rejects an operation that leaves less than $1.80 USDG. A default $0.10 safety buffer makes the effective drain window $1.90-$1.99 while keeping it below the $2.00 refill trigger:
 
@@ -87,7 +87,7 @@ USDG_MAX_REMAINDER_USD=1.99
 4,998.100000 USDG -> leaves 1.900000
 ```
 
-The protocol floor is hard-clamped, so legacy or mistaken configuration cannot lower the effective remainder below the safe minimum; the former `$1` maximum is migrated to the new `$1.99` default. The route is skipped when the wallet cannot drain the pool into this window, and a fresh raw pool balance is checked immediately before order creation. If Stable.com reports a higher live constraint, the bot raises its runtime floor when the refill window permits and applies exponential backoff instead of retrying the rejected order immediately. Every candidate must still meet the absolute `$0.10` net-profit floor. Other strategies retain their normal dynamic sizing.
+The protocol floor is hard-clamped, so legacy or mistaken configuration cannot lower the effective remainder below the safe minimum; the former `$1` maximum is migrated to the new `$1.99` default. A fresh raw pool balance is checked immediately before either a drain or partial order. If Stable.com reports a higher live constraint, the bot raises its runtime floor when the refill window permits and applies exponential backoff instead of retrying the rejected order immediately. Every candidate must still meet the absolute `$0.10` net-profit floor.
 
 ### WebSocket confirmation and Stable.com synchronization
 

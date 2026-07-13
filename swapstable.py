@@ -53,6 +53,7 @@ from sizing import (
     generate_drain_candidate_amounts_raw,
     generate_refinement_sizes,
     is_profitable_candidate,
+    maximum_safe_stable_input_raw,
     normalize_drain_window_raw,
     parse_stable_liquidity_constraint,
     parse_stable_reserve_constraint,
@@ -1377,13 +1378,13 @@ def main():
             token_configs = {
                 "USDG": {
                     "mint": USDG_MINT,
-                    "stable_pool": pool_usdg,
+                    "stable_pool": pool_usdg_raw / 10**DECIMALS,
                     "token_ata": usdg_ata,
                     "balance_key": "user_usdg",
                 },
                 "PYUSD": {
                     "mint": PYUSD_MINT,
-                    "stable_pool": pool_pyusd,
+                    "stable_pool": pool_pyusd_raw / 10**DECIMALS,
                     "token_ata": pyusd_ata,
                     "balance_key": "user_pyusd",
                 },
@@ -1398,7 +1399,11 @@ def main():
                         "venue_order": venue_order,
                         "jup_input_mint": config["mint"] if stable_first else USDC_MINT,
                         "jup_output_mint": USDC_MINT if stable_first else config["mint"],
-                        "stable_destination_pool": config["stable_pool"] if stable_first else pool_usdc,
+                        "stable_destination_pool": (
+                            config["stable_pool"]
+                            if stable_first
+                            else pool_usdc_raw / 10**DECIMALS
+                        ),
                         "token_ata": config["token_ata"],
                         "balance_key": config["balance_key"],
                     }
@@ -1417,7 +1422,10 @@ def main():
                 if time.monotonic() < stable_reserve_backoff_until.get(route_key, 0):
                     continue
                 pool_to = strategy["stable_destination_pool"]
-                usdg_drain_mode = venue_order == "stable_first" and token == "USDG"
+                usdg_sizing_mode = (
+                    "drain" if venue_order == "stable_first" and token == "USDG" else None
+                )
+                usdg_drain_mode = usdg_sizing_mode == "drain"
                 if usdg_drain_mode:
                     sync_remaining = monitor.seconds_until_increase_settled(
                         "pool_usdg",
@@ -1442,36 +1450,39 @@ def main():
                     )
                     if not drain_candidate_raws:
                         pool_human = pool_usdg_raw / 10**DECIMALS
-                        safe_capacity_raw = max(
-                            0,
-                            pool_usdg_raw - usdg_drain_min_remainder_raw,
-                        )
-                        required_input_raw = max(
-                            0,
-                            pool_usdg_raw - USDG_MAX_REMAINDER_RAW,
+                        safe_capacity_raw = maximum_safe_stable_input_raw(
+                            usdc_raw,
+                            pool_usdg_raw,
+                            usdg_drain_min_remainder_raw,
                         )
                         if safe_capacity_raw < min_trade_raw:
-                            reason = (
-                                f"only ${safe_capacity_raw / 10**DECIMALS:.6f} is available "
-                                f"above the ${usdg_drain_min_remainder_raw / 10**DECIMALS:.6f} "
-                                f"protected reserve; minimum trade is ${MIN_TRADE_SIZE_USD:.6f}"
+                            print(
+                                f"[skip] USDC/USDG (Stable->Jupiter): pool has "
+                                f"${pool_human:.6f}; only "
+                                f"${safe_capacity_raw / 10**DECIMALS:.6f} can be traded "
+                                f"while protecting the reserve; minimum is "
+                                f"${MIN_TRADE_SIZE_USD:.6f}"
                             )
-                        elif usdc_raw < required_input_raw:
-                            reason = (
-                                f"at least ${required_input_raw / 10**DECIMALS:.6f} USDC is "
-                                f"required to reach the reserve window; wallet has "
-                                f"${usdc_raw / 10**DECIMALS:.6f}"
-                            )
-                        else:
-                            reason = "no input leaves the pool inside the configured reserve window"
-                        print(
-                            f"[skip] USDC/USDG (Stable->Jupiter): pool has "
-                            f"${pool_human:.6f}; {reason}"
+                            continue
+                        usdg_sizing_mode = "partial"
+                        usdg_drain_mode = False
+                        max_feasible_size = safe_capacity_raw / 10**DECIMALS
+                        coarse_sizes = generate_candidate_sizes(
+                            max_feasible_size,
+                            MIN_TRADE_SIZE_USD,
                         )
-                        continue
-                    coarse_sizes = [raw / 10**DECIMALS for raw in drain_candidate_raws]
+                        # Include the wallet/pool-bound exact maximum, including
+                        # fractional token units, in the normal sizing sweep.
+                        coarse_sizes = sorted(set(coarse_sizes + [max_feasible_size]))
+                        print(
+                            f"[fallback] USDG cannot reach the refill window; evaluating "
+                            f"normal sizes up to the exact safe maximum "
+                            f"${max_feasible_size:.6f}."
+                        )
+                    else:
+                        coarse_sizes = [raw / 10**DECIMALS for raw in drain_candidate_raws]
+                        max_feasible_size = coarse_sizes[-1]
                     effective_min_trade_size = MIN_TRADE_SIZE_USD
-                    max_feasible_size = coarse_sizes[-1]
                 else:
                     effective_min_trade_size = MIN_TRADE_SIZE_USD
                     if usdc_bal < effective_min_trade_size or pool_to < effective_min_trade_size + 1:
@@ -1504,7 +1515,7 @@ def main():
                         return evaluated[size]
                     probe_amount_raw = (
                         int(round(size * 10**DECIMALS))
-                        if usdg_drain_mode
+                        if usdg_sizing_mode in {"drain", "partial"}
                         else int(size) * 10**DECIMALS
                     )
                     input_human = probe_amount_raw / 10**DECIMALS
@@ -1528,7 +1539,13 @@ def main():
                         input_human,
                         out_human,
                         pool_to,
-                        reserve=0 if usdg_drain_mode else 1,
+                        reserve=(
+                            0
+                            if usdg_drain_mode
+                            else USDG_DRAIN_MIN_REMAINDER_USD
+                            if usdg_sizing_mode == "partial"
+                            else 1
+                        ),
                     )
                     eligible = pool_can_settle and is_profitable_candidate(
                         metrics,
@@ -1574,7 +1591,13 @@ def main():
                         result[1]["input_amount"],
                         result[1]["output_amount"],
                         pool_to,
-                        reserve=0 if usdg_drain_mode else 1,
+                        reserve=(
+                            0
+                            if usdg_drain_mode
+                            else USDG_DRAIN_MIN_REMAINDER_USD
+                            if usdg_sizing_mode == "partial"
+                            else 1
+                        ),
                     )
                 }
                 if eligible_coarse:
@@ -1618,7 +1641,13 @@ def main():
                         metrics["input_amount"],
                         metrics["output_amount"],
                         pool_to,
-                        reserve=0 if usdg_drain_mode else 1,
+                        reserve=(
+                            0
+                            if usdg_drain_mode
+                            else USDG_DRAIN_MIN_REMAINDER_USD
+                            if usdg_sizing_mode == "partial"
+                            else 1
+                        ),
                     )
                 ]
                 if not eligible_results:
@@ -1634,6 +1663,7 @@ def main():
                     swap_size,
                     metrics,
                     route_cost_estimate,
+                    usdg_sizing_mode,
                 )
                 # This route's full coarse/refinement sweep is complete and
                 # local_best is its highest absolute-net-profit candidate.
@@ -1651,6 +1681,7 @@ def main():
                 swap_size,
                 selected_metrics,
                 selected_cost_estimate,
+                selected_usdg_sizing_mode,
             ) = best_route
             token = selected_strategy["token"]
             venue_order = selected_strategy["venue_order"]
@@ -1674,10 +1705,11 @@ def main():
             print("[*] Revalidating selected size twice before taking first-leg exposure...")
             verify_failed = False
             verification_metrics = [selected_metrics]
-            selected_usdg_drain_mode = token == "USDG" and venue_order == "stable_first"
+            selected_usdg_drain_mode = selected_usdg_sizing_mode == "drain"
+            selected_usdg_raw_sizing = selected_usdg_sizing_mode in {"drain", "partial"}
             probe_amount_raw = (
                 int(round(swap_size * 10**DECIMALS))
-                if selected_usdg_drain_mode
+                if selected_usdg_raw_sizing
                 else int(swap_size) * 10**DECIMALS
             )
             for i in range(2):
@@ -1704,7 +1736,13 @@ def main():
                     swap_size,
                     out_human,
                     selected_strategy["stable_destination_pool"],
-                    reserve=0 if selected_usdg_drain_mode else 1,
+                    reserve=(
+                        0
+                        if selected_usdg_drain_mode
+                        else USDG_DRAIN_MIN_REMAINDER_USD
+                        if selected_usdg_sizing_mode == "partial"
+                        else 1
+                    ),
                 )
                 if pool_can_settle and is_profitable_candidate(
                     metrics,
@@ -1815,6 +1853,29 @@ def main():
                             f"{checked_usdg_remainder_raw / 10**DECIMALS:.6f} USDG, outside the safe "
                             f"{usdg_drain_min_remainder_raw / 10**DECIMALS:.6f}-"
                             f"{USDG_MAX_REMAINDER_USD:.6f} window. Skipping and rescanning."
+                        )
+                        state_store.set_status("scanning", "Scanning markets")
+                        continue
+                elif selected_usdg_sizing_mode == "partial":
+                    try:
+                        live_usdg_pool_raw = get_token_balance(client, pool_usdg_ata)
+                    except Exception as exc:
+                        print(
+                            "[!] Cannot fetch a fresh USDG pool balance before the "
+                            f"partial entry; skipping: {exc}"
+                        )
+                        state_store.set_status("scanning", "Scanning markets")
+                        continue
+                    live_safe_capacity_raw = max(
+                        0,
+                        live_usdg_pool_raw - usdg_drain_min_remainder_raw,
+                    )
+                    if probe_amount_raw > live_safe_capacity_raw:
+                        print(
+                            "[!] USDG pool decreased before entry; exact input "
+                            f"{probe_amount_raw / 10**DECIMALS:.6f} exceeds fresh safe "
+                            f"capacity {live_safe_capacity_raw / 10**DECIMALS:.6f}. "
+                            "Skipping and resizing."
                         )
                         state_store.set_status("scanning", "Scanning markets")
                         continue
