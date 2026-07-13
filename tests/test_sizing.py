@@ -47,6 +47,11 @@ class DynamicSizingTests(unittest.TestCase):
         self.assertFalse(stable_pool_can_settle("jupiter_first", 5_000, 5_000.20, 5_001))
         self.assertTrue(stable_pool_can_settle("jupiter_first", 5_000, 5_000.20, 5_002))
 
+    def test_stable_pool_sizing_can_protect_protocol_reserve(self):
+        pool = 32_251.371284
+        self.assertFalse(stable_pool_can_settle("stable_first", 32_250, 0, pool, reserve=1.9))
+        self.assertTrue(stable_pool_can_settle("stable_first", 32_249, 0, pool, reserve=1.9))
+
     def test_execution_uses_only_balance_created_by_current_cycle(self):
         baseline = 900_000
         after_entry = 1_000_900_000

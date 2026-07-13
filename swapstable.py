@@ -1491,9 +1491,17 @@ def main():
                     effective_min_trade_size = MIN_TRADE_SIZE_USD
                 else:
                     effective_min_trade_size = MIN_TRADE_SIZE_USD
-                    if usdc_bal < effective_min_trade_size or pool_to < effective_min_trade_size + 1:
+                    protected_reserve_usd = (
+                        usdg_drain_min_remainder_raw / 10**DECIMALS
+                    )
+                    if (
+                        usdc_bal < effective_min_trade_size
+                        or pool_to < effective_min_trade_size + protected_reserve_usd
+                    ):
                         continue
-                    max_feasible_size = int(min(usdc_bal, pool_to - 1))
+                    max_feasible_size = int(
+                        min(usdc_bal, pool_to - protected_reserve_usd)
+                    )
                     coarse_sizes = generate_candidate_sizes(max_feasible_size, effective_min_trade_size)
                     if not coarse_sizes:
                         continue
@@ -1548,9 +1556,7 @@ def main():
                         reserve=(
                             0
                             if usdg_drain_mode
-                            else USDG_DRAIN_MIN_REMAINDER_USD
-                            if usdg_sizing_mode == "partial"
-                            else 1
+                            else usdg_drain_min_remainder_raw / 10**DECIMALS
                         ),
                     )
                     eligible = pool_can_settle and is_profitable_candidate(
@@ -1600,9 +1606,7 @@ def main():
                         reserve=(
                             0
                             if usdg_drain_mode
-                            else USDG_DRAIN_MIN_REMAINDER_USD
-                            if usdg_sizing_mode == "partial"
-                            else 1
+                            else usdg_drain_min_remainder_raw / 10**DECIMALS
                         ),
                     )
                 }
@@ -1650,9 +1654,7 @@ def main():
                         reserve=(
                             0
                             if usdg_drain_mode
-                            else USDG_DRAIN_MIN_REMAINDER_USD
-                            if usdg_sizing_mode == "partial"
-                            else 1
+                            else usdg_drain_min_remainder_raw / 10**DECIMALS
                         ),
                     )
                 ]
@@ -1746,9 +1748,7 @@ def main():
                     reserve=(
                         0
                         if selected_usdg_drain_mode
-                        else USDG_DRAIN_MIN_REMAINDER_USD
-                        if selected_usdg_sizing_mode == "partial"
-                        else 1
+                        else usdg_drain_min_remainder_raw / 10**DECIMALS
                     ),
                 )
                 if pool_can_settle and is_profitable_candidate(
@@ -1889,6 +1889,29 @@ def main():
                         )
                         state_store.set_status("scanning", "Scanning markets")
                         continue
+                elif token == "PYUSD":
+                    try:
+                        live_pyusd_pool_raw = get_token_balance(client, pool_pyusd_ata)
+                    except Exception as exc:
+                        print(
+                            "[!] Cannot fetch a fresh PYUSD pool balance before entry; "
+                            f"skipping: {exc}"
+                        )
+                        state_store.set_status("scanning", "Scanning markets")
+                        continue
+                    live_safe_capacity_raw = max(
+                        0,
+                        live_pyusd_pool_raw - usdg_drain_min_remainder_raw,
+                    )
+                    if probe_amount_raw > live_safe_capacity_raw:
+                        print(
+                            "[!] PYUSD pool decreased before entry; exact input "
+                            f"{probe_amount_raw / 10**DECIMALS:.6f} exceeds fresh safe "
+                            f"capacity {live_safe_capacity_raw / 10**DECIMALS:.6f}. "
+                            "Skipping and resizing."
+                        )
+                        state_store.set_status("scanning", "Scanning markets")
+                        continue
                 entry_cursor = monitor.snapshot([balance_key, "user_usdc"])
                 stable_result = execute_stable_swap(
                     session,
@@ -1974,6 +1997,25 @@ def main():
                             f"{backend_available_raw / 10**DECIMALS:.6f}, on-chain capacity "
                             f"{chain_available_raw / 10**DECIMALS:.6f}); "
                             f"backing off {backoff_seconds:.0f}s without resubmitting"
+                        )
+                        print(f"[!] {failure_note}")
+                    elif reserve_constraint:
+                        failure_count = stable_reserve_failure_counts.get(
+                            selected_route_key, 0
+                        ) + 1
+                        stable_reserve_failure_counts[selected_route_key] = failure_count
+                        backoff_seconds = min(
+                            300,
+                            30 * (2 ** min(failure_count - 1, 4)),
+                        )
+                        stable_reserve_backoff_until[selected_route_key] = (
+                            time.monotonic() + backoff_seconds
+                        )
+                        required_raw = reserve_constraint["required_raw"]
+                        failure_note = (
+                            f"Stable.com {token} reserve rejected the entry; requires "
+                            f"{required_raw / 10**DECIMALS:.6f} remaining; backing off "
+                            f"{backoff_seconds}s before resizing"
                         )
                         print(f"[!] {failure_note}")
                     else:
