@@ -1510,11 +1510,15 @@ def main():
                         else int(size) * 10**DECIMALS
                     )
                     input_human = probe_amount_raw / 10**DECIMALS
+                    # Use the same wallet-specific executable order request as
+                    # the eventual submission. Generic quotes were repeatedly
+                    # optimistic relative to the final taker-bound order.
                     quote = get_jup_quote(
                         session,
                         strategy["jup_input_mint"],
                         strategy["jup_output_mint"],
                         probe_amount_raw,
+                        taker=str(wallet),
                     )
                     if not quote:
                         evaluated[size] = None
@@ -1680,11 +1684,15 @@ def main():
             )
             for i in range(2):
                 time.sleep(0.5)
+                # Keep validation on the same executable quote path used for
+                # the first-leg transaction; otherwise a generic quote can
+                # pass and the taker-bound order can immediately fail.
                 v_quote = get_jup_quote(
                     session,
                     selected_strategy["jup_input_mint"],
                     selected_strategy["jup_output_mint"],
                     probe_amount_raw,
+                    taker=str(wallet),
                 )
                 if not v_quote:
                     print(f"    Verify {i+1}/2: quote unavailable")
