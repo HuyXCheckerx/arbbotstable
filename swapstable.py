@@ -1472,7 +1472,13 @@ def main():
                             MIN_TRADE_SIZE_USD,
                         )
                         # Include the wallet/pool-bound exact maximum, including
-                        # fractional token units, in the normal sizing sweep.
+                        # fractional token units, without also quoting the
+                        # nearly identical rounded-down maximum.
+                        whole_maximum = int(max_feasible_size)
+                        if max_feasible_size != whole_maximum:
+                            coarse_sizes = [
+                                size for size in coarse_sizes if size != whole_maximum
+                            ]
                         coarse_sizes = sorted(set(coarse_sizes + [max_feasible_size]))
                         print(
                             f"[fallback] USDG cannot reach the refill window; evaluating "
@@ -1704,6 +1710,7 @@ def main():
 
             print("[*] Revalidating selected size twice before taking first-leg exposure...")
             verify_failed = False
+            verified_entry_quote = None
             verification_metrics = [selected_metrics]
             selected_usdg_drain_mode = selected_usdg_sizing_mode == "drain"
             selected_usdg_raw_sizing = selected_usdg_sizing_mode in {"drain", "partial"}
@@ -1749,6 +1756,9 @@ def main():
                     MIN_NET_PROFIT_USD,
                     MIN_NET_RETURN_BPS,
                 ):
+                    # The second successful value replaces the first and can
+                    # be submitted directly for a Jupiter-first route.
+                    verified_entry_quote = v_quote
                     print(
                         f"    Verify {i+1}/2: net ${metrics['net_profit_usd']:.6f} "
                         f"({metrics['net_return_bps']:.4f} bps)"
@@ -2094,20 +2104,15 @@ def main():
 
             else:
                 state_store.set_status("executing_jupiter", "Executing Jupiter entry", route=route_label)
-                final_quote = get_jup_quote(
-                    session,
-                    selected_strategy["jup_input_mint"],
-                    selected_strategy["jup_output_mint"],
-                    probe_amount_raw,
-                    taker=str(wallet),
-                )
+                final_quote = verified_entry_quote
                 if not final_quote:
-                    failure_note = "Jupiter entry quote unavailable"
+                    failure_note = "Verified Jupiter entry order unavailable"
                     print(
                         f"[skip] Jupiter entry {swap_size} USDC->{token}: "
-                        "final executable quote was unavailable"
+                        "second verified executable order was unavailable"
                     )
                 else:
+                    print("[*] Reusing verification 2/2 executable order for Jupiter entry.")
                     entry_out_raw = int(final_quote.get("outAmount", 0))
                     try:
                         live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)

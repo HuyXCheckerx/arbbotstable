@@ -233,7 +233,7 @@ def adjusted_drain_minimum_raw(
 
 
 def generate_candidate_sizes(max_feasible, min_trade_size):
-    """Return a bounded coarse grid of whole-token trade sizes."""
+    """Return a low-request coarse grid with small anchors and exact maximum."""
     maximum = int(math.floor(max_feasible))
     minimum = int(math.ceil(min_trade_size))
     if maximum < minimum or minimum <= 0:
@@ -243,9 +243,6 @@ def generate_candidate_sizes(max_feasible, min_trade_size):
         minimum,
         minimum * 2,
         minimum * 5,
-        maximum // 4,
-        maximum // 2,
-        (maximum * 3) // 4,
         maximum,
     }
     return sorted(size for size in candidates if minimum <= size <= maximum)

@@ -244,7 +244,13 @@ class DynamicSizingTests(unittest.TestCase):
 
     def test_generates_coarse_grid_including_minimum_and_maximum(self):
         sizes = generate_candidate_sizes(5_000, 1_000)
-        self.assertEqual(sizes, [1_000, 1_250, 2_000, 2_500, 3_750, 5_000])
+        self.assertEqual(sizes, [1_000, 2_000, 5_000])
+
+    def test_large_coarse_grid_uses_only_small_anchors_and_maximum(self):
+        self.assertEqual(
+            generate_candidate_sizes(50_000, 1_000),
+            [1_000, 2_000, 5_000, 50_000],
+        )
 
     def test_returns_no_sizes_when_minimum_is_not_feasible(self):
         self.assertEqual(generate_candidate_sizes(999, 1_000), [])

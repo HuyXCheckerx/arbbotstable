@@ -71,6 +71,8 @@ With these defaults, every size has the same $0.10 net-profit requirement. When 
 
 `MIN_NET_RETURN_BPS` remains an optional eligibility floor. It can reject a quote, but it is not used to rank quotes that pass.
 
+To limit Jupiter API usage, ordinary sizing probes only the minimum, `2x` minimum, `5x` minimum, and exact maximum before refining around the best anchor. For Jupiter-first routes, the second successful wallet-specific verification order is submitted directly as the entry instead of requesting an identical third executable order.
+
 #### USDG reserve drain mode
 
 For `USDC -> USDG on Stable.com -> USDC on Jupiter`, the scanner prefers near-full-drain candidates when the wallet can bring the pool into the refill window. If the wallet cannot reach that window, it falls back to ordinary dynamic sizing instead of discarding the route. The fallback includes the exact wallet-or-pool-limited maximum, including fractional token units, and still selects the eligible size with the highest absolute net profit.
