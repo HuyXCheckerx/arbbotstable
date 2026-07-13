@@ -24,8 +24,8 @@ class DynamicSizingTests(unittest.TestCase):
             usdc_strategy_directions(),
             [
                 ("USDG", "stable_first"),
-                ("USDG", "jupiter_first"),
                 ("PYUSD", "stable_first"),
+                ("USDG", "jupiter_first"),
                 ("PYUSD", "jupiter_first"),
             ],
         )
@@ -246,6 +246,22 @@ class DynamicSizingTests(unittest.TestCase):
             key=lambda size: absolute_profit_key(size, eligible[size]),
         )
         self.assertEqual(selected, 20_000)
+
+    def test_reported_pyusd_quotes_select_50033_despite_lower_return_bps(self):
+        candidates = {
+            43_778: calculate_quote_metrics(43_778, 43_779.862375, 0.006250),
+            50_033: calculate_quote_metrics(50_033, 50_035.098406, 0.006250),
+        }
+        selected = max(
+            candidates,
+            key=lambda size: absolute_profit_key(size, candidates[size]),
+        )
+
+        self.assertLess(
+            candidates[50_033]["net_return_bps"],
+            candidates[43_778]["net_return_bps"],
+        )
+        self.assertEqual(selected, 50_033)
 
     def test_equal_profit_tie_uses_lower_exposure_without_return_ranking(self):
         smaller = calculate_quote_metrics(1_000, 1_000.20, 0.0)

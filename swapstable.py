@@ -262,7 +262,7 @@ def wait_for_token_balance(
 ):
     latest = 0
     for attempt in range(attempts):
-        if attempt > 0 or delay_seconds > 0:
+        if attempt > 0 and delay_seconds > 0:
             time.sleep(delay_seconds)
         try:
             latest = get_token_balance(client, ata)
@@ -803,7 +803,6 @@ def main():
                 state_store.estimated_execution_cost_usd(DEFAULT_EXECUTION_COST_USD)
                 * EXECUTION_COST_SAFETY_MULTIPLIER
             )
-            best_profit_score = None
             best_route = None
             
             for strategy in strategies:
@@ -816,19 +815,41 @@ def main():
                 usdg_drain_mode = venue_order == "stable_first" and token == "USDG"
                 drain_candidate_raws = []
                 if usdg_drain_mode:
+                    min_trade_raw = int(round(MIN_TRADE_SIZE_USD * 10**DECIMALS))
                     drain_candidate_raws = generate_drain_candidate_amounts_raw(
                         pool_usdg_raw,
                         usdc_raw,
-                        int(round(MIN_TRADE_SIZE_USD * 10**DECIMALS)),
+                        min_trade_raw,
                         dust_raw=usdg_drain_min_remainder_raw,
                         max_remainder_raw=USDG_MAX_REMAINDER_RAW,
                     )
                     if not drain_candidate_raws:
                         pool_human = pool_usdg_raw / 10**DECIMALS
+                        safe_capacity_raw = max(
+                            0,
+                            pool_usdg_raw - usdg_drain_min_remainder_raw,
+                        )
+                        required_input_raw = max(
+                            0,
+                            pool_usdg_raw - USDG_MAX_REMAINDER_RAW,
+                        )
+                        if safe_capacity_raw < min_trade_raw:
+                            reason = (
+                                f"only ${safe_capacity_raw / 10**DECIMALS:.6f} is available "
+                                f"above the ${usdg_drain_min_remainder_raw / 10**DECIMALS:.6f} "
+                                f"protected reserve; minimum trade is ${MIN_TRADE_SIZE_USD:.6f}"
+                            )
+                        elif usdc_raw < required_input_raw:
+                            reason = (
+                                f"at least ${required_input_raw / 10**DECIMALS:.6f} USDC is "
+                                f"required to reach the reserve window; wallet has "
+                                f"${usdc_raw / 10**DECIMALS:.6f}"
+                            )
+                        else:
+                            reason = "no input leaves the pool inside the configured reserve window"
                         print(
-                            f"[skip] USDC/USDG (Stable->Jupiter): cannot drain USDG pool "
-                            f"{pool_human:.6f} to <= ${USDG_MAX_REMAINDER_USD:.6f} "
-                            f"with USDC balance ${usdc_raw / 10**DECIMALS:.6f}"
+                            f"[skip] USDC/USDG (Stable->Jupiter): pool has "
+                            f"${pool_human:.6f}; {reason}"
                         )
                         continue
                     coarse_sizes = [raw / 10**DECIMALS for raw in drain_candidate_raws]
@@ -987,15 +1008,16 @@ def main():
                     key=lambda item: absolute_profit_key(item[0], item[2]),
                 )
                 swap_size, quote, metrics = local_best
-                profit_score = absolute_profit_key(swap_size, metrics)
-                if best_profit_score is None or profit_score > best_profit_score:
-                    best_profit_score = profit_score
-                    best_route = (
-                        strategy,
-                        swap_size,
-                        metrics,
-                        route_cost_estimate,
-                    )
+                best_route = (
+                    strategy,
+                    swap_size,
+                    metrics,
+                    route_cost_estimate,
+                )
+                # This route's full coarse/refinement sweep is complete and
+                # local_best is its highest absolute-net-profit candidate.
+                # Execute it now instead of aging the quote on later routes.
+                break
 
             if not best_route:
                 print(f"[!] No profitable arb output found on Jup right now. Waiting for updates...")
@@ -1013,7 +1035,7 @@ def main():
             venue_order = selected_strategy["venue_order"]
             venue_label = "Stable->Jupiter" if venue_order == "stable_first" else "Jupiter->Stable"
             print(
-                f"\n[*] Best USDC route: USDC/{token} ({venue_label}) | "
+                f"\n[*] Selected USDC route: USDC/{token} ({venue_label}) | "
                 f"size {swap_size} | estimated net ${selected_metrics['net_profit_usd']:.6f} | "
                 f"return {selected_metrics['net_return_bps']:.4f} bps"
             )

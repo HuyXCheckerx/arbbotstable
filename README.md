@@ -41,21 +41,21 @@ All arbitrage cycles are anchored in USDC. The scanner evaluates only four strat
 
 ```text
 USDC -> USDG  on Stable.com -> USDC on Jupiter
-USDC -> USDG  on Jupiter    -> USDC on Stable.com
 USDC -> PYUSD on Stable.com -> USDC on Jupiter
+USDC -> USDG  on Jupiter    -> USDC on Stable.com
 USDC -> PYUSD on Jupiter    -> USDC on Stable.com
 ```
 
 USDG↔PYUSD cycles and strategies that begin from existing USDG/PYUSD inventory are not considered. Execution measures the intermediate-token balance before and after the entry and exits only that delta, leaving pre-existing token balances untouched.
 
-The scanner does not assume that the largest available trade is the most profitable. For every feasible direction it:
+The scanner checks the strategies in the order above, prioritizing Stable.com entries before Jupiter entries so a Stable.com rejection cannot strand a Jupiter-acquired intermediate balance. For each feasible direction it:
 
 1. Quotes a bounded grid from `MIN_TRADE_SIZE_USD` to the maximum wallet/pool size.
 2. Refines around the best coarse result.
 3. Subtracts a conservative execution-cost estimate derived from recent observed SOL consumption.
 4. Requires at least `MIN_NET_PROFIT_USD` after that estimated cost.
-5. Revalidates the selected size twice before submitting the Stable.com leg.
-6. Chooses the eligible size with the highest absolute net dollar profit. Lower exposure breaks a tie at six-decimal dollar precision.
+5. Chooses the eligible size with the highest absolute net dollar profit. Lower exposure breaks a tie at six-decimal dollar precision.
+6. Stops scanning later directions, then revalidates the selected size twice before taking first-leg exposure.
 
 Defaults:
 
@@ -67,7 +67,7 @@ DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 ```
 
-With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Among all candidates that pass, the bot selects the one with the highest net dollar profit. For example, $0.20 net on 20,000 outranks $0.14 net on 10,000 even though the smaller trade has a higher percentage return.
+With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Within the first fully sized route that has an eligible candidate, the bot selects the size with the highest net dollar profit and proceeds immediately; it does not age that quote by comparing later routes. For example, $0.20 net on 20,000 outranks $0.14 net on 10,000 even though the smaller trade has a higher percentage return.
 
 `MIN_NET_RETURN_BPS` remains an optional eligibility floor. It can reject a quote, but it is not used to rank quotes that pass.
 

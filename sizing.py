@@ -3,11 +3,11 @@ import re
 
 
 def usdc_strategy_directions(tokens=("USDG", "PYUSD")):
-    """Return the only supported arbitrage cycles: USDC base, two venue orders."""
+    """Return USDC cycles with lower-exposure Stable-first routes first."""
     return [
         (token, venue_order)
-        for token in tokens
         for venue_order in ("stable_first", "jupiter_first")
+        for token in tokens
     ]
 
 
