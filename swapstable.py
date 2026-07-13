@@ -260,15 +260,17 @@ def wait_for_token_balance(
     attempts=15,
     delay_seconds=1.0,
 ):
+    """Check immediately, then retain ``attempts`` delayed retry windows."""
     latest = 0
-    for attempt in range(attempts):
+    total_checks = max(1, int(attempts) + 1)
+    for attempt in range(total_checks):
         if attempt > 0 and delay_seconds > 0:
             time.sleep(delay_seconds)
         try:
             latest = get_token_balance(client, ata)
         except Exception:
             latest = int(fallback_getter()) if fallback_getter else latest
-        print(f"    Balance check {attempt + 1}/{attempts}: {label}={latest}")
+        print(f"    Balance check {attempt + 1}/{total_checks}: {label}={latest}")
         if predicate(latest):
             return latest
     return latest
