@@ -46,27 +46,31 @@ class DynamicSizingTests(unittest.TestCase):
             pool,
             wallet,
             1_000 * 10**6,
-            dust_raw=1,
-            max_remainder_raw=1 * 10**6,
+            dust_raw=1_800_000,
+            max_remainder_raw=1_990_000,
         )
         self.assertEqual(
             candidates,
             [
-                4_999 * 10**6,
-                4_999_900_000,
-                4_999_990_000,
-                4_999_999_999,
+                4_998_010_000,
+                4_998_105_000,
+                4_998_200_000,
             ],
         )
-        self.assertTrue(all(pool - amount <= 1 * 10**6 for amount in candidates))
+        self.assertTrue(
+            all(
+                1_800_000 <= pool - amount <= 1_990_000
+                for amount in candidates
+            )
+        )
 
     def test_usdg_drain_rejects_partial_drain_when_wallet_is_too_small(self):
         candidates = generate_drain_candidate_amounts_raw(
             5_000 * 10**6,
             3_000 * 10**6,
             1_000 * 10**6,
-            dust_raw=1,
-            max_remainder_raw=1 * 10**6,
+            dust_raw=1_800_000,
+            max_remainder_raw=1_990_000,
         )
         self.assertEqual(candidates, [])
 
@@ -74,17 +78,17 @@ class DynamicSizingTests(unittest.TestCase):
         self.assertTrue(
             drain_candidate_is_valid(
                 5_000 * 10**6,
-                4_999 * 10**6,
-                dust_raw=1,
-                max_remainder_raw=1 * 10**6,
+                4_998_200_000,
+                dust_raw=1_800_000,
+                max_remainder_raw=1_990_000,
             )
         )
         self.assertFalse(
             drain_candidate_is_valid(
                 5_000 * 10**6,
-                3_001 * 10**6,
-                dust_raw=1,
-                max_remainder_raw=1 * 10**6,
+                4_998_000_000,
+                dust_raw=1_800_000,
+                max_remainder_raw=1_990_000,
             )
         )
 

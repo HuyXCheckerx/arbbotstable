@@ -73,16 +73,15 @@ With these defaults, every size has the same $0.10 net-profit requirement. When 
 
 For `USDC -> USDG on Stable.com -> USDC on Jupiter`, the scanner no longer chooses a minimum that merely crosses a refill threshold. It only considers near-full-drain candidates, so a profitable partial trade cannot leave the reserve funded and prevent Stable.com from replenishing it.
 
-Sizing remains in raw six-decimal units. With a 5,000 USDG pool and the defaults below, the candidate ladder leaves at most $1 in the pool:
+Sizing remains in raw six-decimal units. Stable.com currently rejects an operation that leaves less than $1.80 USDG, so the drain window is configured between $1.80 and $1.99. This remains below the $2.00 refill trigger:
 
 ```text
-USDG_DRAIN_DUST_RAW=1
-USDG_MAX_REMAINDER_USD=1
+USDG_DRAIN_MIN_REMAINDER_USD=1.80
+USDG_MAX_REMAINDER_USD=1.99
 
-4,999.000000 USDG -> leaves 1.000000
-4,999.900000 USDG -> leaves 0.100000
-4,999.990000 USDG -> leaves 0.010000
-4,999.999999 USDG -> leaves 0.000001
+4,998.010000 USDG -> leaves 1.990000
+4,998.105000 USDG -> leaves 1.895000
+4,998.200000 USDG -> leaves 1.800000
 ```
 
 The route is skipped when the wallet cannot drain the pool below the configured remainder. Every candidate must still meet the absolute `$0.10` net-profit floor. Other strategies retain their normal dynamic sizing.

@@ -6,6 +6,7 @@ import hashlib
 import uuid
 import sys
 import glob
+import re
 
 # Fix for Pterodactyl / Cloud hosts not mapping .local packages correctly
 local_paths = glob.glob("/home/container/.local/lib/python*/site-packages")
@@ -72,8 +73,24 @@ JUP_API_KEY = os.environ.get("JUP_API_KEY", "")
 MIN_TRADE_SIZE_USD = float(os.environ.get("MIN_TRADE_SIZE_USD", "1000"))
 MIN_NET_PROFIT_USD = float(os.environ.get("MIN_NET_PROFIT_USD", "0.10"))
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
-USDG_DRAIN_DUST_RAW = max(1, int(os.environ.get("USDG_DRAIN_DUST_RAW", "1")))
-USDG_MAX_REMAINDER_USD = max(0.0, float(os.environ.get("USDG_MAX_REMAINDER_USD", "1")))
+USDG_DRAIN_MIN_REMAINDER_USD = max(
+    0.0,
+    float(os.environ.get("USDG_DRAIN_MIN_REMAINDER_USD", "1.8")),
+)
+USDG_DRAIN_MIN_REMAINDER_RAW = max(
+    1,
+    int(round(USDG_DRAIN_MIN_REMAINDER_USD * 1_000_000)),
+)
+# Stable.com currently rejects USDG operations that leave less than $1.80.
+# Keep the old raw setting backward-compatible, but never below that floor.
+USDG_DRAIN_DUST_RAW = max(
+    USDG_DRAIN_MIN_REMAINDER_RAW,
+    int(os.environ.get("USDG_DRAIN_DUST_RAW", "1")),
+)
+USDG_MAX_REMAINDER_USD = max(
+    USDG_DRAIN_MIN_REMAINDER_USD,
+    float(os.environ.get("USDG_MAX_REMAINDER_USD", "1.99")),
+)
 USDG_MAX_REMAINDER_RAW = max(
     USDG_DRAIN_DUST_RAW,
     int(round(USDG_MAX_REMAINDER_USD * 1_000_000)),
@@ -488,6 +505,21 @@ def execute_stable_swap(session, client, keypair, asset_from, asset_to, amount_h
     }, timeout=15)
     
     if resp.status_code != 200:
+        try:
+            error_payload = resp.json()
+            details = error_payload.get("details", {}) if isinstance(error_payload, dict) else {}
+            reserve_error = details.get("insufficient_pool_balance")
+            if reserve_error:
+                threshold_match = re.search(r"thresholdYMinusZ=(\d+)", str(reserve_error))
+                if threshold_match:
+                    threshold_raw = int(threshold_match.group(1))
+                    print(
+                        "[!] Stable.com pool reserve floor: "
+                        f"{threshold_raw / 10**DECIMALS:.6f} {asset_to}; "
+                        "increase the drain remainder before retrying."
+                    )
+        except (ValueError, TypeError):
+            pass
         print(f"[!] Stable create order error: {resp.text}")
         return False
         

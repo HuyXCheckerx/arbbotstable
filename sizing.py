@@ -74,7 +74,9 @@ def generate_drain_candidate_amounts_raw(
     if pool - maximum_amount > max_remainder:
         return []
 
-    fallback_remainders = {dust, 10_000, 100_000, max_remainder}
+    fallback_remainders = {dust, max_remainder}
+    if max_remainder > dust:
+        fallback_remainders.add((dust + max_remainder) // 2)
     candidates = {maximum_amount}
     for remainder in fallback_remainders:
         if not dust <= remainder <= max_remainder:
