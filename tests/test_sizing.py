@@ -88,6 +88,18 @@ class DynamicSizingTests(unittest.TestCase):
             )
         )
 
+    def test_usdt_route_preserves_fifty_thousand_usdc_reserve(self):
+        self.assertTrue(
+            stable_pool_can_settle(
+                "jupiter_first", 49_900, 50_000, 100_000, reserve=50_000
+            )
+        )
+        self.assertFalse(
+            stable_pool_can_settle(
+                "jupiter_first", 49_900, 50_000.000001, 100_000, reserve=50_000
+            )
+        )
+
     def test_stable_pool_requirement_depends_on_venue_order(self):
         self.assertTrue(stable_pool_can_settle("stable_first", 5_000, 5_000.20, 5_001))
         self.assertFalse(stable_pool_can_settle("jupiter_first", 5_000, 5_000.20, 5_001))

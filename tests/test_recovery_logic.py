@@ -19,6 +19,14 @@ class RecoveryLogicTests(unittest.TestCase):
             capacity_limited_recovery_amount_raw(2_000_000, 5_000_000),
             2_000_000,
         )
+        self.assertEqual(
+            capacity_limited_recovery_amount_raw(
+                3_000_000_000,
+                52_000_000_000,
+                reserve_raw=50_000_000_000,
+            ),
+            2_000_000_000,
+        )
 
     def test_raw_six_decimal_amount_converts_to_human_tokens(self):
         self.assertEqual(raw_amount_to_human(50_078_301_316), 50_078.301316)

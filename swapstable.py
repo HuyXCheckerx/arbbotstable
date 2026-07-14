@@ -102,6 +102,11 @@ USDG_LOW_RESERVE_THRESHOLD = float(
 PYUSD_LOW_RESERVE_THRESHOLD = float(
     os.environ.get("PYUSD_LOW_RESERVE_THRESHOLD", "0.10")
 )
+USDT_MIN_USDC_RESERVE_USD = max(
+    50_000.0,
+    float(os.environ.get("USDT_MIN_USDC_RESERVE_USD", "50000")),
+)
+USDT_MIN_USDC_RESERVE_RAW = int(round(USDT_MIN_USDC_RESERVE_USD * 1_000_000))
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
 # Stable's reported USDG constraint is 1.8 tokens; keep a default 0.1-token
 # race buffer while remaining below the 2.0-token refill trigger.
@@ -1523,6 +1528,11 @@ def main():
                     "drain" if venue_order == "stable_first" and token == "USDG" else None
                 )
                 usdg_drain_mode = usdg_sizing_mode == "drain"
+                route_stable_reserve_usd = (
+                    USDT_MIN_USDC_RESERVE_USD
+                    if token == "USDT" and venue_order == "jupiter_first"
+                    else usdg_drain_min_remainder_raw / 10**DECIMALS
+                )
                 if usdg_drain_mode:
                     sync_remaining = monitor.seconds_until_increase_settled(
                         "pool_usdg",
@@ -1588,9 +1598,7 @@ def main():
                     effective_min_trade_size = MIN_TRADE_SIZE_USD
                 else:
                     effective_min_trade_size = MIN_TRADE_SIZE_USD
-                    protected_reserve_usd = (
-                        usdg_drain_min_remainder_raw / 10**DECIMALS
-                    )
+                    protected_reserve_usd = route_stable_reserve_usd
                     if (
                         usdc_bal < effective_min_trade_size
                         or pool_to < effective_min_trade_size + protected_reserve_usd
@@ -1602,6 +1610,9 @@ def main():
                     coarse_sizes = generate_candidate_sizes(max_feasible_size, effective_min_trade_size)
                     if not coarse_sizes:
                         continue
+
+                if usdg_drain_mode:
+                    route_stable_reserve_usd = 0
 
                 route_cost_estimate = estimated_execution_cost_usd
                 evaluated = {}
@@ -1656,11 +1667,7 @@ def main():
                         input_human,
                         metrics["output_amount"],
                         pool_to,
-                        reserve=(
-                            0
-                            if usdg_drain_mode
-                            else usdg_drain_min_remainder_raw / 10**DECIMALS
-                        ),
+                        reserve=route_stable_reserve_usd,
                     )
                     eligible = pool_can_settle and is_profitable_candidate(
                         metrics,
@@ -1706,11 +1713,7 @@ def main():
                         result[1]["input_amount"],
                         result[1]["output_amount"],
                         pool_to,
-                        reserve=(
-                            0
-                            if usdg_drain_mode
-                            else usdg_drain_min_remainder_raw / 10**DECIMALS
-                        ),
+                        reserve=route_stable_reserve_usd,
                     )
                 }
                 if eligible_coarse:
@@ -1754,11 +1757,7 @@ def main():
                         metrics["input_amount"],
                         metrics["output_amount"],
                         pool_to,
-                        reserve=(
-                            0
-                            if usdg_drain_mode
-                            else usdg_drain_min_remainder_raw / 10**DECIMALS
-                        ),
+                        reserve=route_stable_reserve_usd,
                     )
                 ]
                 if not eligible_results:
@@ -1776,6 +1775,7 @@ def main():
                     route_cost_estimate,
                     usdg_sizing_mode,
                     route_min_net_profit,
+                    route_stable_reserve_usd,
                 )
                 # This route's full coarse/refinement sweep is complete and
                 # local_best is its highest absolute-net-profit candidate.
@@ -1795,6 +1795,7 @@ def main():
                 selected_cost_estimate,
                 selected_usdg_sizing_mode,
                 selected_min_net_profit,
+                selected_stable_reserve_usd,
             ) = best_route
             token = selected_strategy["token"]
             venue_order = selected_strategy["venue_order"]
@@ -1856,11 +1857,7 @@ def main():
                     swap_size,
                     metrics["output_amount"],
                     selected_strategy["stable_destination_pool"],
-                    reserve=(
-                        0
-                        if selected_usdg_drain_mode
-                        else usdg_drain_min_remainder_raw / 10**DECIMALS
-                    ),
+                    reserve=selected_stable_reserve_usd,
                 )
                 if pool_can_settle and is_profitable_candidate(
                     metrics,
@@ -2280,7 +2277,12 @@ def main():
                         live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
                     except Exception:
                         live_pool_usdc_raw = monitor.get("pool_usdc")
-                    stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
+                    selected_stable_reserve_raw = int(
+                        round(selected_stable_reserve_usd * 10**DECIMALS)
+                    )
+                    stable_capacity_raw = max(
+                        0, live_pool_usdc_raw - selected_stable_reserve_raw
+                    )
                     live_metrics = calculate_route_metrics(
                         swap_size,
                         entry_out_raw / 10**DECIMALS,
@@ -2375,7 +2377,8 @@ def main():
                                 except Exception:
                                     live_pool_usdc_raw = monitor.get("pool_usdc")
                                 stable_capacity_raw = max(
-                                    0, live_pool_usdc_raw - 10**DECIMALS
+                                    0,
+                                    live_pool_usdc_raw - selected_stable_reserve_raw,
                                 )
                                 if not is_profitable_candidate(
                                     retry_metrics,
@@ -2486,7 +2489,10 @@ def main():
                                 live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
                             except Exception:
                                 live_pool_usdc_raw = monitor.get("pool_usdc")
-                            stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
+                            stable_capacity_raw = max(
+                                0,
+                                live_pool_usdc_raw - selected_stable_reserve_raw,
+                            )
                             if received_raw > stable_capacity_raw:
                                 failure_note = "Stable.com USDC pool changed and cannot settle the received amount"
                             else:

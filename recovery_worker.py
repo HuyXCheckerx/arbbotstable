@@ -24,6 +24,7 @@ from recovery_logic import (  # noqa: E402
 from recovery_store import RecoveryStore  # noqa: E402
 from swapstable import (  # noqa: E402
     JUP_API_KEY,
+    POOL_SEED,
     POSITION_TOLERANCE_RAW,
     PRIVATE_KEY,
     PYUSD_MINT,
@@ -37,6 +38,7 @@ from swapstable import (  # noqa: E402
     USDG_MINT_PK,
     USDT_MINT,
     USDT_MINT_PK,
+    USDT_MIN_USDC_RESERVE_RAW,
     BalanceMonitor,
     Client,
     Confirmed,
@@ -44,6 +46,7 @@ from swapstable import (  # noqa: E402
     confirm_transfer_ws_first,
     execute_stable_swap,
     execute_jup_swap,
+    find_pda,
     get_ata,
     get_jup_quote,
     get_submission_signature_status,
@@ -131,12 +134,39 @@ def attempt_stable_recovery(
     token_ata,
     balance_key,
     usdc_ata,
+    pool_usdc_ata,
     actual_raw,
     reason,
 ):
-    """Immediately return the planned amount through Stable.com after a bad Jup quote."""
+    """Return a safe amount through Stable.com after a bad Jupiter quote."""
 
     amount_raw = int(plan["amount_raw"])
+    if token == "USDT":
+        pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
+        safe_amount_raw = capacity_limited_recovery_amount_raw(
+            amount_raw,
+            pool_usdc_raw,
+            reserve_raw=USDT_MIN_USDC_RESERVE_RAW,
+        )
+        if safe_amount_raw <= POSITION_TOLERANCE_RAW:
+            store.mark_watching(
+                plan["id"],
+                f"Waiting for Stable.com USDC liquidity above the protected "
+                f"{USDT_MIN_USDC_RESERVE_RAW / 10**6:,.0f} reserve",
+            )
+            print(
+                f"[wait] USDT recovery cannot use Stable.com: its USDC pool must "
+                f"remain at or above {USDT_MIN_USDC_RESERVE_RAW / 10**6:,.0f} USDC."
+            )
+            return False
+        if safe_amount_raw < amount_raw:
+            amount_raw = safe_amount_raw
+            print(
+                f"[recovery] Limiting this USDT exit to "
+                f"{raw_amount_to_human(amount_raw):.6f} so Stable.com's USDC "
+                f"reserve remains at least "
+                f"{USDT_MIN_USDC_RESERVE_RAW / 10**6:,.0f}."
+            )
     amount_human = raw_amount_to_human(amount_raw)
     if amount_human > STABLE_MAX_RECOVERY_AMOUNT_USD:
         store.mark_manual_review(
@@ -171,6 +201,7 @@ def attempt_stable_recovery(
             partial_raw = capacity_limited_recovery_amount_raw(
                 amount_raw,
                 constraint["available_raw"],
+                reserve_raw=USDT_MIN_USDC_RESERVE_RAW,
             )
             if POSITION_TOLERANCE_RAW < partial_raw < amount_raw:
                 amount_raw = partial_raw
@@ -238,6 +269,8 @@ def main():
     keypair = load_keypair()
     wallet = keypair.pubkey()
     usdc_ata = get_ata(wallet, USDC_MINT_PK, TOKEN_PROGRAM)
+    pool_usdc_pda, _ = find_pda([POOL_SEED, bytes(USDC_MINT_PK)])
+    pool_usdc_ata = get_ata(pool_usdc_pda, USDC_MINT_PK, TOKEN_PROGRAM)
     asset_accounts = {
         name: get_ata(wallet, mint_pk, program)
         for name, (_, mint_pk, program, _) in ASSETS.items()
@@ -314,7 +347,7 @@ def main():
             if not quote or "outAmount" not in quote:
                 attempt_stable_recovery(
                     session, client, keypair, monitor, store, plan, token, token_ata,
-                    balance_key, usdc_ata, actual_raw, "quote unavailable",
+                    balance_key, usdc_ata, pool_usdc_ata, actual_raw, "quote unavailable",
                 )
                 time.sleep(STABLE_FALLBACK_RETRY_SECONDS)
                 continue
@@ -326,7 +359,7 @@ def main():
             if not recovery_quote_is_eligible(metrics, threshold):
                 attempt_stable_recovery(
                     session, client, keypair, monitor, store, plan, token, token_ata,
-                    balance_key, usdc_ata, actual_raw,
+                    balance_key, usdc_ata, pool_usdc_ata, actual_raw,
                     f"Jupiter net ${metrics['net_profit_usd']:.6f} <= ${threshold:.2f}",
                 )
                 time.sleep(STABLE_FALLBACK_RETRY_SECONDS)

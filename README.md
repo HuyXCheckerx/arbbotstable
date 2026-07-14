@@ -50,6 +50,10 @@ USDC -> USDT  on Jupiter    -> USDC on Stable.com
 No Stable.com-first USDT route is generated. The one-way USDT route deducts
 Stable.com's 0.1% USDT/USDC fee during sizing and every quote revalidation;
 for example, 100,000 USDT is valued as 99,900 USDC at settlement.
+It also requires Stable.com's USDC reserve to remain at or above 50,000 after
+the full USDT input is accounted for. This reserve floor is checked during
+sizing, verification, retries, final execution, and recovery; it does not
+apply to USDG or PYUSD routes.
 
 USDG↔PYUSD cycles and strategies that begin from existing USDG/PYUSD inventory are not considered. Execution measures the intermediate-token balance before and after the entry and exits only that delta, leaving pre-existing token balances untouched.
 
