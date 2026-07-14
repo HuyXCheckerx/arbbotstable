@@ -107,6 +107,10 @@ USDT_MIN_USDC_RESERVE_USD = max(
     float(os.environ.get("USDT_MIN_USDC_RESERVE_USD", "50000")),
 )
 USDT_MIN_USDC_RESERVE_RAW = int(round(USDT_MIN_USDC_RESERVE_USD * 1_000_000))
+USDT_MIN_NET_PROFIT_USD = max(
+    5.0,
+    float(os.environ.get("USDT_MIN_NET_PROFIT_USD", "5.00")),
+)
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
 # Stable's reported USDG constraint is 1.8 tokens; keep a default 0.1-token
 # race buffer while remaining below the 2.0-token refill trigger.
@@ -1516,13 +1520,17 @@ def main():
                 if time.monotonic() < stable_reserve_backoff_until.get(route_key, 0):
                     continue
                 pool_to = strategy["stable_destination_pool"]
-                route_min_net_profit = reserve_adjusted_min_profit(
-                    token,
-                    token_configs[token]["stable_pool"],
-                    MIN_NET_PROFIT_USD,
-                    LOW_RESERVE_MIN_NET_PROFIT_USD,
-                    USDG_LOW_RESERVE_THRESHOLD,
-                    PYUSD_LOW_RESERVE_THRESHOLD,
+                route_min_net_profit = (
+                    USDT_MIN_NET_PROFIT_USD
+                    if token == "USDT"
+                    else reserve_adjusted_min_profit(
+                        token,
+                        token_configs[token]["stable_pool"],
+                        MIN_NET_PROFIT_USD,
+                        LOW_RESERVE_MIN_NET_PROFIT_USD,
+                        USDG_LOW_RESERVE_THRESHOLD,
+                        PYUSD_LOW_RESERVE_THRESHOLD,
+                    )
                 )
                 usdg_sizing_mode = (
                     "drain" if venue_order == "stable_first" and token == "USDG" else None

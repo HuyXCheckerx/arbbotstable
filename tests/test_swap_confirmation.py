@@ -46,6 +46,9 @@ class FakePendingStore:
 
 
 class SwapConfirmationTests(unittest.TestCase):
+    def test_usdt_route_profit_floor_is_at_least_five_dollars(self):
+        self.assertGreaterEqual(swapstable.USDT_MIN_NET_PROFIT_USD, 5.0)
+
     def test_jupiter_entry_retries_only_definitive_failures(self):
         for source in ("not_submitted", "signature_error", "expired"):
             self.assertTrue(swapstable.jupiter_entry_retry_is_safe(source))
