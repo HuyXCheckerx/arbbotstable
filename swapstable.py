@@ -57,6 +57,7 @@ from sizing import (
     normalize_drain_window_raw,
     parse_stable_liquidity_constraint,
     parse_stable_reserve_constraint,
+    reserve_adjusted_min_profit,
     stable_pool_can_settle,
     usdc_strategy_directions,
 )
@@ -91,6 +92,15 @@ RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"
 JUP_API_KEY = os.environ.get("JUP_API_KEY", "")
 MIN_TRADE_SIZE_USD = float(os.environ.get("MIN_TRADE_SIZE_USD", "1000"))
 MIN_NET_PROFIT_USD = float(os.environ.get("MIN_NET_PROFIT_USD", "0.10"))
+LOW_RESERVE_MIN_NET_PROFIT_USD = float(
+    os.environ.get("LOW_RESERVE_MIN_NET_PROFIT_USD", "0.05")
+)
+USDG_LOW_RESERVE_THRESHOLD = float(
+    os.environ.get("USDG_LOW_RESERVE_THRESHOLD", "7500")
+)
+PYUSD_LOW_RESERVE_THRESHOLD = float(
+    os.environ.get("PYUSD_LOW_RESERVE_THRESHOLD", "0.10")
+)
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
 # Stable's reported USDG constraint is 1.8 tokens; keep a default 0.1-token
 # race buffer while remaining below the 2.0-token refill trigger.
@@ -1435,6 +1445,14 @@ def main():
                 if time.monotonic() < stable_reserve_backoff_until.get(route_key, 0):
                     continue
                 pool_to = strategy["stable_destination_pool"]
+                route_min_net_profit = reserve_adjusted_min_profit(
+                    token,
+                    token_configs[token]["stable_pool"],
+                    MIN_NET_PROFIT_USD,
+                    LOW_RESERVE_MIN_NET_PROFIT_USD,
+                    USDG_LOW_RESERVE_THRESHOLD,
+                    PYUSD_LOW_RESERVE_THRESHOLD,
+                )
                 usdg_sizing_mode = (
                     "drain" if venue_order == "stable_first" and token == "USDG" else None
                 )
@@ -1574,7 +1592,7 @@ def main():
                     )
                     eligible = pool_can_settle and is_profitable_candidate(
                         metrics,
-                        MIN_NET_PROFIT_USD,
+                        route_min_net_profit,
                         MIN_NET_RETURN_BPS,
                     )
                     if not pool_can_settle:
@@ -1609,7 +1627,7 @@ def main():
                     for size, result in quoted_coarse.items()
                     if is_profitable_candidate(
                         result[1],
-                        MIN_NET_PROFIT_USD,
+                        route_min_net_profit,
                         MIN_NET_RETURN_BPS,
                     ) and stable_pool_can_settle(
                         venue_order,
@@ -1657,7 +1675,7 @@ def main():
                     for quote, metrics in [result]
                     if is_profitable_candidate(
                         metrics,
-                        MIN_NET_PROFIT_USD,
+                        route_min_net_profit,
                         MIN_NET_RETURN_BPS,
                     ) and stable_pool_can_settle(
                         venue_order,
@@ -1685,6 +1703,7 @@ def main():
                     metrics,
                     route_cost_estimate,
                     usdg_sizing_mode,
+                    route_min_net_profit,
                 )
                 # This route's full coarse/refinement sweep is complete and
                 # local_best is its highest absolute-net-profit candidate.
@@ -1703,6 +1722,7 @@ def main():
                 selected_metrics,
                 selected_cost_estimate,
                 selected_usdg_sizing_mode,
+                selected_min_net_profit,
             ) = best_route
             token = selected_strategy["token"]
             venue_order = selected_strategy["venue_order"]
@@ -1766,7 +1786,7 @@ def main():
                 )
                 if pool_can_settle and is_profitable_candidate(
                     metrics,
-                    MIN_NET_PROFIT_USD,
+                    selected_min_net_profit,
                     MIN_NET_RETURN_BPS,
                 ):
                     # The second successful value replaces the first and can
@@ -2187,7 +2207,11 @@ def main():
                         entry_out_raw / 10**DECIMALS,
                         selected_cost_estimate,
                     )
-                    if not is_profitable_candidate(live_metrics, MIN_NET_PROFIT_USD, MIN_NET_RETURN_BPS):
+                    if not is_profitable_candidate(
+                        live_metrics,
+                        selected_min_net_profit,
+                        MIN_NET_RETURN_BPS,
+                    ):
                         failure_note = (
                             "Jupiter entry fell below the net-profit threshold "
                             f"(net ${live_metrics['net_profit_usd']:.6f}, "
@@ -2195,7 +2219,7 @@ def main():
                         )
                         print(
                             f"[skip] Jupiter entry {swap_size} USDC->{token}: {failure_note}; "
-                            f"requires net >= ${MIN_NET_PROFIT_USD:.6f} and return >= "
+                            f"requires net >= ${selected_min_net_profit:.6f} and return >= "
                             f"{MIN_NET_RETURN_BPS:.4f} bps"
                         )
                     elif entry_out_raw > stable_capacity_raw:

@@ -11,6 +11,22 @@ def usdc_strategy_directions(tokens=("USDG", "PYUSD")):
     ]
 
 
+def reserve_adjusted_min_profit(
+    token,
+    reserve_amount,
+    normal_min_profit=0.10,
+    low_reserve_min_profit=0.05,
+    usdg_threshold=7_500.0,
+    pyusd_threshold=0.10,
+):
+    """Lower the route floor while its Stable.com token reserve is scarce."""
+    thresholds = {"USDG": float(usdg_threshold), "PYUSD": float(pyusd_threshold)}
+    threshold = thresholds.get(str(token).upper())
+    if threshold is not None and float(reserve_amount) < threshold:
+        return min(float(normal_min_profit), float(low_reserve_min_profit))
+    return float(normal_min_profit)
+
+
 def stable_pool_can_settle(
     venue_order,
     usdc_principal,

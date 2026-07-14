@@ -15,12 +15,19 @@ from sizing import (
     normalize_drain_window_raw,
     parse_stable_liquidity_constraint,
     parse_stable_reserve_constraint,
+    reserve_adjusted_min_profit,
     stable_pool_can_settle,
     usdc_strategy_directions,
 )
 
 
 class DynamicSizingTests(unittest.TestCase):
+    def test_low_stable_reserves_lower_route_profit_floor(self):
+        self.assertEqual(reserve_adjusted_min_profit("USDG", 7_499.999999), 0.05)
+        self.assertEqual(reserve_adjusted_min_profit("USDG", 7_500), 0.10)
+        self.assertEqual(reserve_adjusted_min_profit("PYUSD", 0.099999), 0.05)
+        self.assertEqual(reserve_adjusted_min_profit("PYUSD", 0.10), 0.10)
+
     def test_partial_usdg_trade_uses_wallet_max_when_full_drain_is_impossible(self):
         self.assertEqual(
             maximum_safe_stable_input_raw(
