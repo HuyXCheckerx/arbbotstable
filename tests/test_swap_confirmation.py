@@ -46,6 +46,27 @@ class FakePendingStore:
 
 
 class SwapConfirmationTests(unittest.TestCase):
+    def test_accounting_snapshot_uses_confirmed_exit_balances_coherently(self):
+        before = {
+            "usdc_raw": 50_605_424_067,
+            "usdg_raw": 0,
+            "pyusd_raw": 0,
+            "usdt_raw": 0,
+        }
+        confirmed = {
+            "user_usdc": 50_605_731_737,
+            "user_usdg": 0,
+        }
+
+        snapshot = swapstable.accounting_raw_snapshot(
+            before, "USDG", confirmed
+        )
+
+        self.assertEqual(snapshot["usdc"], 50_605_731_737)
+        self.assertEqual(snapshot["usdg"], 0)
+        self.assertEqual(snapshot["pyusd"], 0)
+        self.assertEqual(snapshot["usdt"], 0)
+
     def test_usdt_route_profit_floor_is_at_least_five_dollars(self):
         self.assertGreaterEqual(swapstable.USDT_MIN_NET_PROFIT_USD, 5.0)
 

@@ -351,6 +351,24 @@ def jupiter_entry_retry_is_safe(confirmation_source):
     return confirmation_source in {"not_submitted", "signature_error", "expired"}
 
 
+def accounting_raw_snapshot(attempt_before, token=None, confirmed_balances=None):
+    """Build one coherent token snapshot from the trade baseline and confirmation."""
+    snapshot = {
+        "usdc": int(attempt_before["usdc_raw"]),
+        "usdg": int(attempt_before["usdg_raw"]),
+        "pyusd": int(attempt_before["pyusd_raw"]),
+        "usdt": int(attempt_before["usdt_raw"]),
+    }
+    if confirmed_balances is not None:
+        snapshot["usdc"] = int(confirmed_balances["user_usdc"])
+        if token is not None:
+            token_key = str(token).lower()
+            snapshot[token_key] = int(
+                confirmed_balances[f"user_{token_key}"]
+            )
+    return snapshot
+
+
 @dataclass(frozen=True)
 class SwapSubmissionResult:
     submitted: bool
@@ -727,16 +745,22 @@ def confirm_transfer_ws_first(
 
 def print_portfolio(
     session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, usdt_ata,
-    label="", prev=None,
+    label="", prev=None, raw_snapshot=None,
 ):
     GREEN = "\033[92m"
     RED = "\033[91m"
     RESET = "\033[0m"
 
-    usdc_raw = get_token_balance(client, usdc_ata)
-    usdg_raw = get_token_balance(client, usdg_ata)
-    pyusd_raw = get_token_balance(client, pyusd_ata)
-    usdt_raw = get_optional_token_balance(client, usdt_ata)
+    if raw_snapshot is None:
+        usdc_raw = get_token_balance(client, usdc_ata)
+        usdg_raw = get_token_balance(client, usdg_ata)
+        pyusd_raw = get_token_balance(client, pyusd_ata)
+        usdt_raw = get_optional_token_balance(client, usdt_ata)
+    else:
+        usdc_raw = int(raw_snapshot["usdc"])
+        usdg_raw = int(raw_snapshot["usdg"])
+        pyusd_raw = int(raw_snapshot["pyusd"])
+        usdt_raw = int(raw_snapshot["usdt"])
     usdc_bal = usdc_raw / 10**DECIMALS
     usdg_bal = usdg_raw / 10**DECIMALS
     pyusd_bal = pyusd_raw / 10**DECIMALS
@@ -1929,6 +1953,7 @@ def main():
             arb_successful = False
             failure_note = ""
             tolerance_raw = POSITION_TOLERANCE_RAW
+            final_raw_snapshot = accounting_raw_snapshot(attempt_before)
 
             if venue_order == "stable_first":
                 state_store.set_status("executing_stable", "Executing Stable.com entry", route=route_label)
@@ -2176,6 +2201,9 @@ def main():
                     if not entry_confirmed or received_raw <= 0:
                         failure_note = f"{token} entry balance delta was not observed"
                     else:
+                        final_raw_snapshot = accounting_raw_snapshot(
+                            attempt_before, token, entry_balances
+                        )
                         entry_usdc_after_raw = entry_balances["user_usdc"]
                         print(f"[+] Stable.com produced {received_raw / 10**DECIMALS:.6f} {token}")
                         remaining_raw = received_raw
@@ -2226,7 +2254,7 @@ def main():
                                 time.sleep(2)
                                 continue
 
-                            exit_confirmed, _, exit_confirmation_source = confirm_transfer_ws_first(
+                            exit_confirmed, exit_balances, exit_confirmation_source = confirm_transfer_ws_first(
                                 client,
                                 monitor,
                                 {
@@ -2249,6 +2277,9 @@ def main():
                                 pending_store=state_store,
                             )
                             if exit_confirmed:
+                                final_raw_snapshot = accounting_raw_snapshot(
+                                    attempt_before, token, exit_balances
+                                )
                                 arb_successful = True
                                 break
                             if exit_confirmation_source in {"signature_error", "expired"}:
@@ -2477,6 +2508,10 @@ def main():
                                         f"Jupiter entry did not produce a {token} "
                                         "balance delta"
                                     )
+                                else:
+                                    final_raw_snapshot = accounting_raw_snapshot(
+                                        attempt_before, token, entry_balances
+                                    )
 
                             if entry_confirmed:
                                 break
@@ -2525,7 +2560,7 @@ def main():
                                 if not stable_exit_result.may_have_landed:
                                     failure_note = "Stable.com exit failed after Jupiter entry"
                                 else:
-                                    exit_confirmed, _, _ = confirm_transfer_ws_first(
+                                    exit_confirmed, exit_balances, _ = confirm_transfer_ws_first(
                                         client,
                                         monitor,
                                         {
@@ -2548,6 +2583,9 @@ def main():
                                         pending_store=state_store,
                                     )
                                     if exit_confirmed:
+                                        final_raw_snapshot = accounting_raw_snapshot(
+                                            attempt_before, token, exit_balances
+                                        )
                                         arb_successful = True
                                     else:
                                         failure_note = (
@@ -2557,7 +2595,7 @@ def main():
 
             new_port = print_portfolio(
                 session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, usdt_ata,
-                "[*] AFTER ARB", prev=prev_port,
+                "[*] AFTER ARB", prev=prev_port, raw_snapshot=final_raw_snapshot,
             )
             note = "" if arb_successful else (failure_note or f"{token} cycle was not confirmed")
             record = state_store.record_attempt(
