@@ -10,7 +10,7 @@ The dashboard exposes:
 
 - Total and session realized net P&L.
 - Successful arbitrages and all attempted executions.
-- Full USDC, USDG, PYUSD, and SOL wallet balances.
+- Full USDC, USDG, PYUSD, USDT, and SOL wallet balances.
 - Latest observed Stable.com pool balances.
 - Current wallet value and SOL/USD estimate.
 - Exact observed SOL decrease for each attempt and its execution-time USD estimate.
@@ -26,7 +26,7 @@ Machine-readable endpoints:
 For each attempt:
 
 ```text
-stablecoin change = (USDC + USDG + PYUSD after) - (USDC + USDG + PYUSD before)
+stablecoin change = (USDC + USDG + PYUSD + USDT after) - (USDC + USDG + PYUSD + USDT before)
 SOL cost USD      = observed SOL decrease × average execution-time SOL/USD price
 realized net P&L  = stablecoin change - SOL cost USD
 ```
@@ -37,14 +37,19 @@ Accounting persists in `bot_state.json`. On the first upgraded run, the old `pnl
 
 ### Dynamic trade sizing
 
-All arbitrage cycles are anchored in USDC. The scanner evaluates only four strategies:
+All arbitrage cycles are anchored in USDC. The scanner evaluates these five strategies:
 
 ```text
 USDC -> USDG  on Stable.com -> USDC on Jupiter
 USDC -> PYUSD on Stable.com -> USDC on Jupiter
 USDC -> USDG  on Jupiter    -> USDC on Stable.com
 USDC -> PYUSD on Jupiter    -> USDC on Stable.com
+USDC -> USDT  on Jupiter    -> USDC on Stable.com
 ```
+
+No Stable.com-first USDT route is generated. The one-way USDT route deducts
+Stable.com's 0.1% USDT/USDC fee during sizing and every quote revalidation;
+for example, 100,000 USDT is valued as 99,900 USDC at settlement.
 
 USDG↔PYUSD cycles and strategies that begin from existing USDG/PYUSD inventory are not considered. Execution measures the intermediate-token balance before and after the entry and exits only that delta, leaving pre-existing token balances untouched.
 
@@ -97,7 +102,7 @@ Balance confirmation is WebSocket-first at Solana's `confirmed` commitment. The 
 
 Every signed transaction stores its local signature and blockhash atomically in `bot_state.json` before broadcast. If an RPC or Jupiter HTTP response is lost, or the first snapshot is still too early, the bot freezes new submissions and reconciles that signature with delayed WS updates. The lock survives the panel's automatic process restart. It resumes only after the transaction is confirmed/failed or an unrecorded transaction's blockhash has expired, preventing a hidden accepted transaction from being submitted twice. A confirmed transaction with unexpected balances stays locked for operator review instead of being balance-polled indefinitely.
 
-The scanner also refuses every new first leg while the wallet holds more than the normal 0.1-token intermediate tolerance in USDG or PYUSD. This applies equally to a balance detected at startup. It writes one durable recovery plan containing the exact token amount. The separately supervised `recovery_worker.py` first checks the wallet-specific executable Jupiter order. If its conservative net recovery profit is at least `$0.10`, it returns through Jupiter; otherwise (including no Jupiter quote) it immediately submits the exact Stable.com token-to-USDC exit. The Jupiter calculation includes the configured execution-cost reserve and a one-basis-point slippage reserve by default. Both return paths use fresh WebSocket balance revisions for confirmation, with one RPC snapshot fallback. The worker never opens a first leg, never increases the planned amount to match a larger wallet balance, and leaves a manual-review lock if the planned balance changes unexpectedly. The scanner remains locked until the recovery is confirmed.
+The scanner also refuses every new first leg while the wallet holds more than the normal 0.1-token intermediate tolerance in USDG, PYUSD, or USDT. This applies equally to a balance detected at startup. It writes one durable recovery plan containing the exact token amount. The separately supervised `recovery_worker.py` first checks the wallet-specific executable Jupiter order. If its conservative net recovery profit is at least `$0.10`, it returns through Jupiter; otherwise (including no Jupiter quote) it immediately submits the exact Stable.com token-to-USDC exit. The Jupiter calculation includes the configured execution-cost reserve and a one-basis-point slippage reserve by default. Both return paths use fresh WebSocket balance revisions for confirmation, with one RPC snapshot fallback. The worker never opens a first leg, never increases the planned amount to match a larger wallet balance, and leaves a manual-review lock if the planned balance changes unexpectedly. The scanner remains locked until the recovery is confirmed.
 
 Stable.com's create-order service may index a USDG refill after the confirmed on-chain account notification. The bot therefore gives an observed USDG pool increase a short settlement window before quoting that drain route. If the API still reports the old `available` balance, the route receives a short exponential cooldown rather than submitting the same request repeatedly.
 

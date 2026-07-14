@@ -12,7 +12,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_STATE_PATH = BASE_DIR / "bot_state.json"
 DEFAULT_PNL_PATH = BASE_DIR / "pnl.txt"
-STABLE_ASSETS = ("USDC", "USDG", "PYUSD")
+STABLE_ASSETS = ("USDC", "USDG", "PYUSD", "USDT")
 
 
 def utc_now():
@@ -52,12 +52,14 @@ def default_state():
                 "USDC": _empty_asset(),
                 "USDG": _empty_asset(),
                 "PYUSD": _empty_asset(),
+                "USDT": _empty_asset(),
                 "SOL": _empty_asset(),
             },
             "pools": {
                 "USDC": _empty_asset(),
                 "USDG": _empty_asset(),
                 "PYUSD": _empty_asset(),
+                "USDT": _empty_asset(),
             },
         },
         "market": {"sol_usd": 0.0, "stablecoin_valuation": "$1 estimate"},

@@ -6,6 +6,7 @@ from sizing import (
     acquired_delta_is_cleared,
     adjusted_drain_minimum_raw,
     calculate_quote_metrics,
+    calculate_route_metrics,
     drain_candidate_is_valid,
     generate_candidate_sizes,
     generate_drain_candidate_amounts_raw,
@@ -17,6 +18,8 @@ from sizing import (
     parse_stable_reserve_constraint,
     reserve_adjusted_min_profit,
     stable_pool_can_settle,
+    stable_swap_output_amount,
+    stable_swap_output_raw,
     usdc_strategy_directions,
 )
 
@@ -38,7 +41,7 @@ class DynamicSizingTests(unittest.TestCase):
             50_083_578_567,
         )
 
-    def test_strategy_scope_is_usdc_with_two_venue_orders_per_token(self):
+    def test_strategy_scope_adds_only_jupiter_first_usdt(self):
         self.assertEqual(
             usdc_strategy_directions(),
             [
@@ -46,8 +49,25 @@ class DynamicSizingTests(unittest.TestCase):
                 ("PYUSD", "stable_first"),
                 ("USDG", "jupiter_first"),
                 ("PYUSD", "jupiter_first"),
+                ("USDT", "jupiter_first"),
             ],
         )
+
+    def test_usdt_stable_settlement_charges_ten_basis_points(self):
+        self.assertEqual(stable_swap_output_amount("USDT", "USDC", 100_000), 99_900)
+        self.assertEqual(stable_swap_output_raw("USDT", "USDC", 100_000_000_000), 99_900_000_000)
+        self.assertEqual(stable_swap_output_amount("USDG", "USDC", 100_000), 100_000)
+
+    def test_quote_metrics_value_usdt_at_fee_adjusted_stable_output(self):
+        metrics = calculate_route_metrics(
+            100_000,
+            100_100.20,
+            0.01,
+            "USDT",
+            "jupiter_first",
+        )
+        self.assertEqual(metrics["output_amount"], 100_100.20)
+        self.assertAlmostEqual(metrics["net_profit_usd"], 0.0898)
 
     def test_stable_pool_requirement_depends_on_venue_order(self):
         self.assertTrue(stable_pool_can_settle("stable_first", 5_000, 5_000.20, 5_001))

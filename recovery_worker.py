@@ -1,4 +1,4 @@
-"""Return a stranded USDG/PYUSD amount only after a profitable fresh quote.
+"""Return a stranded USDG/PYUSD/USDT amount after a failed arbitrage exit.
 
 This process never opens an arbitrage leg.  It consumes the exact amount in
 ``recovery_state.json`` that the main scanner recorded after a failed exit.
@@ -34,6 +34,8 @@ from swapstable import (  # noqa: E402
     USDC_MINT_PK,
     USDG_MINT,
     USDG_MINT_PK,
+    USDT_MINT,
+    USDT_MINT_PK,
     BalanceMonitor,
     Client,
     Confirmed,
@@ -65,6 +67,7 @@ STABLE_MAX_RECOVERY_AMOUNT_USD = float(
 ASSETS = {
     "USDG": (USDG_MINT, USDG_MINT_PK, TOKEN_2022_PROGRAM, "user_usdg"),
     "PYUSD": (PYUSD_MINT, PYUSD_MINT_PK, TOKEN_2022_PROGRAM, "user_pyusd"),
+    "USDT": (USDT_MINT, USDT_MINT_PK, TOKEN_PROGRAM, "user_usdt"),
 }
 
 

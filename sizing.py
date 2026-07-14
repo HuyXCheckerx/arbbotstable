@@ -2,13 +2,34 @@ import math
 import re
 
 
-def usdc_strategy_directions(tokens=("USDG", "PYUSD")):
-    """Return USDC cycles with lower-exposure Stable-first routes first."""
-    return [
+def usdc_strategy_directions(tokens=("USDG", "PYUSD"), jupiter_first_only=("USDT",)):
+    """Return enabled USDC cycles, including one-way Jupiter-first tokens."""
+    directions = [
         (token, venue_order)
         for venue_order in ("stable_first", "jupiter_first")
         for token in tokens
     ]
+    directions.extend((token, "jupiter_first") for token in jupiter_first_only)
+    return directions
+
+
+def stable_swap_output_amount(asset_from, asset_to, input_amount, usdt_fee_bps=10):
+    """Return Stable.com's fee-adjusted output; USDT/USDC costs 10 bps."""
+    amount = float(input_amount)
+    if {str(asset_from).upper(), str(asset_to).upper()} == {"USDC", "USDT"}:
+        input_raw = int(round(amount * 1_000_000))
+        return stable_swap_output_raw(
+            asset_from, asset_to, input_raw, usdt_fee_bps
+        ) / 1_000_000
+    return amount
+
+
+def stable_swap_output_raw(asset_from, asset_to, input_raw, usdt_fee_bps=10):
+    """Integer version of ``stable_swap_output_amount``, rounded down."""
+    raw = int(input_raw)
+    if {str(asset_from).upper(), str(asset_to).upper()} == {"USDC", "USDT"}:
+        return raw * (10_000 - int(usdt_fee_bps)) // 10_000
+    return raw
 
 
 def reserve_adjusted_min_profit(
@@ -294,21 +315,42 @@ def generate_refinement_sizes(best_size, sampled_sizes, min_trade_size, max_feas
     )
 
 
-def calculate_quote_metrics(input_amount, output_amount, estimated_execution_cost_usd):
+def calculate_quote_metrics(
+    input_amount,
+    output_amount,
+    estimated_execution_cost_usd,
+    output_value_amount=None,
+):
     input_value = float(input_amount)
-    output_value = float(output_amount)
+    output_value = float(
+        output_amount if output_value_amount is None else output_value_amount
+    )
     cost = max(0.0, float(estimated_execution_cost_usd))
     gross_profit = output_value - input_value
     net_profit = gross_profit - cost
     net_return_bps = (net_profit / input_value * 10_000) if input_value > 0 else float("-inf")
     return {
         "input_amount": input_value,
-        "output_amount": output_value,
+        "output_amount": float(output_amount),
+        "output_value_amount": output_value,
         "gross_profit_usd": gross_profit,
         "estimated_execution_cost_usd": cost,
         "net_profit_usd": net_profit,
         "net_return_bps": net_return_bps,
     }
+
+
+def calculate_route_metrics(input_amount, jupiter_output, execution_cost, token, venue_order):
+    """Value a Jupiter quote at the amount the Stable.com exit will return."""
+    output_value = float(jupiter_output)
+    if venue_order == "jupiter_first":
+        output_value = stable_swap_output_amount(token, "USDC", jupiter_output)
+    return calculate_quote_metrics(
+        input_amount,
+        jupiter_output,
+        execution_cost,
+        output_value_amount=output_value,
+    )
 
 
 def is_profitable_candidate(metrics, min_net_profit_usd, min_net_return_bps=0.0):

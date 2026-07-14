@@ -165,14 +165,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .section-code { margin-bottom: 6px; color: var(--metal); }
     .panel-title { margin: 0; font-family: var(--serif); font-size: 17px; font-weight: 400; line-height: 1.2; letter-spacing: .01em; }
     .panel-note { color: var(--muted); font-size: 9px; line-height: 1.4; letter-spacing: .08em; text-align: right; text-transform: uppercase; }
-    .token-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+    .token-grid { display: grid; grid-template-columns: repeat(5, 1fr); }
     .token { min-width: 0; padding: 26px 21px 25px; border-right: 1px solid var(--line); }
     .token:last-child { border-right: 0; }
     .token-name { display: flex; align-items: center; gap: 9px; color: var(--text-soft); font-size: 9px; font-weight: 650; letter-spacing: .12em; }
     .token-icon { width: 7px; height: 7px; border: 1px solid var(--metal); transform: rotate(45deg); opacity: .78; }
     .token-amount { margin-top: 22px; overflow: hidden; font-family: var(--mono); font-size: clamp(18px, 1.8vw, 24px); font-weight: 450; line-height: 1.15; letter-spacing: -.055em; text-overflow: ellipsis; white-space: nowrap; }
     .token-usd { margin-top: 10px; color: var(--muted); font-family: var(--mono); font-size: 10px; }
-    .pool-list { display: grid; grid-template-columns: repeat(3, 1fr); }
+    .pool-list { display: grid; grid-template-columns: repeat(4, 1fr); }
     .pool { min-width: 0; padding: 20px 22px 22px; border-right: 1px solid var(--line); background: var(--surface-inset); }
     .pool:last-child { border-right: 0; }
     .pool strong { display: block; margin-top: 10px; overflow: hidden; font-family: var(--mono); font-size: 16px; font-weight: 450; letter-spacing: -.035em; text-overflow: ellipsis; white-space: nowrap; }
@@ -359,7 +359,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
 
     <footer>
-      <p>Net P&amp;L = change in USDC + USDG + PYUSD balances, valued at $1 each, minus the USD estimate of the wallet's observed SOL decrease during each attempt. This avoids treating ordinary SOL price movement as arbitrage profit.</p>
+      <p>Net P&amp;L = change in USDC + USDG + PYUSD + USDT balances, valued at $1 each, minus the USD estimate of the wallet's observed SOL decrease during each attempt. This avoids treating ordinary SOL price movement as arbitrage profit.</p>
       <p class="footer-mark">Private operations ledger<br>2-second refresh</p>
     </footer>
   </main>
@@ -376,7 +376,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     function renderAssets(wallet, pools) {
       const tokenGrid = $('token-grid');
       tokenGrid.replaceChildren();
-      ['USDC','USDG','PYUSD','SOL'].forEach(asset => {
+      ['USDC','USDG','PYUSD','USDT','SOL'].forEach(asset => {
         const data = wallet[asset] || {};
         const node = document.createElement('div');
         node.className = 'token';
@@ -389,7 +389,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       });
 
       const poolList = $('pool-list'); poolList.replaceChildren();
-      ['USDC','USDG','PYUSD'].forEach(asset => {
+      ['USDC','USDG','PYUSD','USDT'].forEach(asset => {
         const node = document.createElement('div'); node.className = 'pool';
         const label = document.createElement('div'); label.className = 'panel-note'; label.textContent = asset + ' available';
         const value = document.createElement('strong'); value.textContent = number((pools[asset] || {}).amount, 2);

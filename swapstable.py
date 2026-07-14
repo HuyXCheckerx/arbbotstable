@@ -47,7 +47,7 @@ from sizing import (
     acquired_balance_delta,
     acquired_delta_is_cleared,
     adjusted_drain_minimum_raw,
-    calculate_quote_metrics,
+    calculate_route_metrics,
     drain_candidate_is_valid,
     generate_candidate_sizes,
     generate_drain_candidate_amounts_raw,
@@ -59,6 +59,7 @@ from sizing import (
     parse_stable_reserve_constraint,
     reserve_adjusted_min_profit,
     stable_pool_can_settle,
+    stable_swap_output_raw,
     usdc_strategy_directions,
 )
 
@@ -175,11 +176,13 @@ JITO_TIP = 0          # Disabled to keep total fees strictly < 30k lamports
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDG_MINT = "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"
 PYUSD_MINT = "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo"
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 USDC_MINT_PK = Pubkey.from_string(USDC_MINT)
 USDG_MINT_PK = Pubkey.from_string(USDG_MINT)
 PYUSD_MINT_PK = Pubkey.from_string(PYUSD_MINT)
+USDT_MINT_PK = Pubkey.from_string(USDT_MINT)
 
 TOKEN_PROGRAM = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 TOKEN_2022_PROGRAM = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
@@ -318,6 +321,17 @@ def get_token_balance(client, ata):
         if attempt < 2:
             time.sleep(0.25 * (attempt + 1))
     raise RuntimeError(f"Unable to read token balance for {ata} after 3 attempts") from last_error
+
+
+def get_optional_token_balance(client, ata):
+    """Return zero only when a second RPC method confirms the ATA does not exist."""
+    try:
+        return get_token_balance(client, ata)
+    except RuntimeError:
+        account = client.get_account_info(ata, commitment=Confirmed)
+        if account.value is None:
+            return 0
+        raise
 
 
 @dataclass(frozen=True)
@@ -694,7 +708,10 @@ def confirm_transfer_ws_first(
             )
             last_log_at = now
 
-def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, label="", prev=None):
+def print_portfolio(
+    session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, usdt_ata,
+    label="", prev=None,
+):
     GREEN = "\033[92m"
     RED = "\033[91m"
     RESET = "\033[0m"
@@ -702,9 +719,11 @@ def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, labe
     usdc_raw = get_token_balance(client, usdc_ata)
     usdg_raw = get_token_balance(client, usdg_ata)
     pyusd_raw = get_token_balance(client, pyusd_ata)
+    usdt_raw = get_optional_token_balance(client, usdt_ata)
     usdc_bal = usdc_raw / 10**DECIMALS
     usdg_bal = usdg_raw / 10**DECIMALS
     pyusd_bal = pyusd_raw / 10**DECIMALS
+    usdt_bal = usdt_raw / 10**DECIMALS
     sol_bal_resp = client.get_balance(wallet, commitment=Confirmed)
     sol_lamports = int(sol_bal_resp.value or 0)
     sol_bal = sol_lamports / 10**9
@@ -714,7 +733,7 @@ def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, labe
     if q and "outAmount" in q:
         sol_price = int(q["outAmount"]) / 10**DECIMALS
         
-    total_usd = usdc_bal + usdg_bal + pyusd_bal + (sol_bal * sol_price)
+    total_usd = usdc_bal + usdg_bal + pyusd_bal + usdt_bal + (sol_bal * sol_price)
     
     def format_diff(curr, old, decimals=2):
         if old is None:
@@ -729,6 +748,7 @@ def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, labe
     u_diff = format_diff(usdc_bal, prev.get("usdc") if prev else None)
     g_diff = format_diff(usdg_bal, prev.get("usdg") if prev else None)
     p_diff = format_diff(pyusd_bal, prev.get("pyusd") if prev else None)
+    u_t_diff = format_diff(usdt_bal, prev.get("usdt") if prev else None)
     s_diff = format_diff(sol_bal, prev.get("sol") if prev else None, 6)
     t_diff = format_diff(total_usd, prev.get("total") if prev else None)
 
@@ -736,6 +756,7 @@ def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, labe
     print(f"  USDC: {usdc_bal:.2f}{u_diff}")
     print(f"  USDG: {usdg_bal:.2f}{g_diff}")
     print(f"  PYUSD: {pyusd_bal:.2f}{p_diff}")
+    print(f"  USDT: {usdt_bal:.2f}{u_t_diff}")
     print(f"  SOL:  {sol_bal:.6f}{s_diff} (@ ${sol_price:.2f})")
     print(f"  Total Value: ${total_usd:.2f}{t_diff}")
     print("-" * 30)
@@ -744,13 +765,15 @@ def print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, labe
         "usdc": usdc_bal,
         "usdg": usdg_bal,
         "pyusd": pyusd_bal,
+        "usdt": usdt_bal,
         "sol": sol_bal,
         "usdc_raw": usdc_raw,
         "usdg_raw": usdg_raw,
         "pyusd_raw": pyusd_raw,
+        "usdt_raw": usdt_raw,
         "sol_lamports": sol_lamports,
         "sol_price": sol_price,
-        "stablecoin_total": usdc_bal + usdg_bal + pyusd_bal,
+        "stablecoin_total": usdc_bal + usdg_bal + pyusd_bal + usdt_bal,
         "total": total_usd
     }
 
@@ -1051,7 +1074,10 @@ def execute_stable_swap(
         print("[!] Stable swap amount must be positive")
         return StableSwapResult(False)
     amount_human = amount_raw / 10**DECIMALS
+    amount_to_raw = stable_swap_output_raw(asset_from, asset_to, amount_raw)
+    amount_to_human = amount_to_raw / 10**DECIMALS
     amount_str = f"{amount_human:.{DECIMALS}f}".rstrip("0").rstrip(".")
+    amount_to_str = f"{amount_to_human:.{DECIMALS}f}".rstrip("0").rstrip(".")
     
     resp = session.post(f"{STABLE_API}/swap/create/singleChain", json={
         "assetFrom": asset_from,
@@ -1059,7 +1085,7 @@ def execute_stable_swap(
         "chainFrom": str(STABLE_CHAIN_ID),
         "chainTo": str(STABLE_CHAIN_ID),
         "amountFrom": amount_str,
-        "amountTo": amount_str,
+        "amountTo": amount_to_str,
         "addressFrom": str(wallet),
         "addressTo": str(wallet),
         "device": str(uuid.uuid4()),
@@ -1131,6 +1157,7 @@ def execute_stable_swap(
         if asset == "USDC": return USDC_MINT_PK, TOKEN_PROGRAM
         if asset == "USDG": return USDG_MINT_PK, TOKEN_2022_PROGRAM
         if asset == "PYUSD": return PYUSD_MINT_PK, TOKEN_2022_PROGRAM
+        if asset == "USDT": return USDT_MINT_PK, TOKEN_PROGRAM
         return None, None
 
     mint_in, tp_in = get_mint_info(asset_from)
@@ -1251,6 +1278,7 @@ def main():
     usdc_ata = get_ata(wallet, USDC_MINT_PK, TOKEN_PROGRAM)
     usdg_ata = get_ata(wallet, USDG_MINT_PK, TOKEN_2022_PROGRAM)
     pyusd_ata = get_ata(wallet, PYUSD_MINT_PK, TOKEN_2022_PROGRAM)
+    usdt_ata = get_ata(wallet, USDT_MINT_PK, TOKEN_PROGRAM)
     
     pool_usdc_pda, _ = find_pda([POOL_SEED, bytes(USDC_MINT_PK)])
     pool_usdc_ata = get_ata(pool_usdc_pda, USDC_MINT_PK, TOKEN_PROGRAM)
@@ -1261,13 +1289,18 @@ def main():
     pool_pyusd_pda, _ = find_pda([POOL_SEED, bytes(PYUSD_MINT_PK)])
     pool_pyusd_ata = get_ata(pool_pyusd_pda, PYUSD_MINT_PK, TOKEN_2022_PROGRAM)
 
+    pool_usdt_pda, _ = find_pda([POOL_SEED, bytes(USDT_MINT_PK)])
+    pool_usdt_ata = get_ata(pool_usdt_pda, USDT_MINT_PK, TOKEN_PROGRAM)
+
     accounts_to_sub = {
         "user_usdc": str(usdc_ata),
         "user_usdg": str(usdg_ata),
         "user_pyusd": str(pyusd_ata),
+        "user_usdt": str(usdt_ata),
         "pool_usdc": str(pool_usdc_ata),
         "pool_usdg": str(pool_usdg_ata),
         "pool_pyusd": str(pool_pyusd_ata),
+        "pool_usdt": str(pool_usdt_ata),
     }
     monitor = BalanceMonitor(RPC_URL, accounts_to_sub)
     
@@ -1275,24 +1308,31 @@ def main():
     monitor.seed("user_usdc", get_token_balance(client, usdc_ata))
     monitor.seed("user_usdg", get_token_balance(client, usdg_ata))
     monitor.seed("user_pyusd", get_token_balance(client, pyusd_ata))
+    monitor.seed("user_usdt", get_optional_token_balance(client, usdt_ata))
     monitor.seed("pool_usdc", get_token_balance(client, pool_usdc_ata))
     monitor.seed("pool_usdg", get_token_balance(client, pool_usdg_ata))
     monitor.seed("pool_pyusd", get_token_balance(client, pool_pyusd_ata))
+    monitor.seed("pool_usdt", get_token_balance(client, pool_usdt_ata))
     
     print("[*] Starting WebSocket Balance Monitor...")
     monitor.start()
     
-    prev_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] BEFORE ARB")
+    prev_port = print_portfolio(
+        session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, usdt_ata,
+        "[*] BEFORE ARB",
+    )
     state_store.update_snapshot(
         {
             "USDC": prev_port["usdc_raw"],
             "USDG": prev_port["usdg_raw"],
             "PYUSD": prev_port["pyusd_raw"],
+            "USDT": prev_port["usdt_raw"],
         },
         {
             "USDC": monitor.get("pool_usdc"),
             "USDG": monitor.get("pool_usdg"),
             "PYUSD": monitor.get("pool_pyusd"),
+            "USDT": monitor.get("pool_usdt"),
         },
         prev_port["sol_lamports"],
         prev_port["sol_price"],
@@ -1323,6 +1363,11 @@ def main():
                 pyusd_raw = monitor.get("user_pyusd")
 
             try:
+                usdt_raw = get_optional_token_balance(client, usdt_ata)
+            except Exception:
+                usdt_raw = monitor.get("user_usdt")
+
+            try:
                 pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
             except Exception:
                 pool_usdc_raw = monitor.get("pool_usdc")
@@ -1338,12 +1383,19 @@ def main():
             except Exception:
                 pool_pyusd_raw = monitor.get("pool_pyusd")
 
+            try:
+                pool_usdt_raw = get_token_balance(client, pool_usdt_ata)
+            except Exception:
+                pool_usdt_raw = monitor.get("pool_usdt")
+
             usdc_bal = usdc_raw // 10**DECIMALS
             usdg_bal = usdg_raw // 10**DECIMALS
             pyusd_bal = pyusd_raw // 10**DECIMALS
+            usdt_bal = usdt_raw // 10**DECIMALS
             pool_usdc = pool_usdc_raw // 10**DECIMALS
             pool_usdg = pool_usdg_raw // 10**DECIMALS
             pool_pyusd = pool_pyusd_raw // 10**DECIMALS
+            pool_usdt = pool_usdt_raw // 10**DECIMALS
 
             try:
                 current_sol_lamports = int(client.get_balance(wallet, commitment=Confirmed).value or 0)
@@ -1351,14 +1403,14 @@ def main():
                 current_sol_lamports = prev_port["sol_lamports"]
 
             state_store.update_snapshot(
-                {"USDC": usdc_raw, "USDG": usdg_raw, "PYUSD": pyusd_raw},
-                {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw},
+                {"USDC": usdc_raw, "USDG": usdg_raw, "PYUSD": pyusd_raw, "USDT": usdt_raw},
+                {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw, "USDT": pool_usdt_raw},
                 current_sol_lamports,
                 prev_port["sol_price"],
             )
             unresolved_positions = tuple(
                 (symbol, raw)
-                for symbol, raw in (("USDG", usdg_raw), ("PYUSD", pyusd_raw))
+                for symbol, raw in (("USDG", usdg_raw), ("PYUSD", pyusd_raw), ("USDT", usdt_raw))
                 if raw > POSITION_TOLERANCE_RAW
             )
             if unresolved_positions:
@@ -1410,6 +1462,12 @@ def main():
                     "stable_pool": pool_pyusd_raw / 10**DECIMALS,
                     "token_ata": pyusd_ata,
                     "balance_key": "user_pyusd",
+                },
+                "USDT": {
+                    "mint": USDT_MINT,
+                    "stable_pool": pool_usdt_raw / 10**DECIMALS,
+                    "token_ata": usdt_ata,
+                    "balance_key": "user_usdt",
                 },
             }
             strategies = []
@@ -1578,11 +1636,17 @@ def main():
                         evaluated[size] = None
                         return None
                     out_human = int(quote.get("outAmount", 0)) / 10**DECIMALS
-                    metrics = calculate_quote_metrics(input_human, out_human, route_cost_estimate)
+                    metrics = calculate_route_metrics(
+                        input_human,
+                        out_human,
+                        route_cost_estimate,
+                        token,
+                        venue_order,
+                    )
                     pool_can_settle = stable_pool_can_settle(
                         venue_order,
                         input_human,
-                        out_human,
+                        metrics["output_value_amount"],
                         pool_to,
                         reserve=(
                             0
@@ -1632,7 +1696,7 @@ def main():
                     ) and stable_pool_can_settle(
                         venue_order,
                         result[1]["input_amount"],
-                        result[1]["output_amount"],
+                        result[1]["output_value_amount"],
                         pool_to,
                         reserve=(
                             0
@@ -1680,7 +1744,7 @@ def main():
                     ) and stable_pool_can_settle(
                         venue_order,
                         metrics["input_amount"],
-                        metrics["output_amount"],
+                        metrics["output_value_amount"],
                         pool_to,
                         reserve=(
                             0
@@ -1771,12 +1835,18 @@ def main():
                     verify_failed = True
                     break
                 out_human = int(v_quote.get("outAmount", 0)) / 10**DECIMALS
-                metrics = calculate_quote_metrics(swap_size, out_human, selected_cost_estimate)
+                metrics = calculate_route_metrics(
+                    swap_size,
+                    out_human,
+                    selected_cost_estimate,
+                    token,
+                    venue_order,
+                )
                 verification_metrics.append(metrics)
                 pool_can_settle = stable_pool_can_settle(
                     venue_order,
                     swap_size,
-                    out_human,
+                    metrics["output_value_amount"],
                     selected_strategy["stable_destination_pool"],
                     reserve=(
                         0
@@ -1832,6 +1902,7 @@ def main():
                 usdc_ata,
                 usdg_ata,
                 pyusd_ata,
+                usdt_ata,
                 "[*] TRADE START",
                 prev=prev_port,
             )
@@ -2202,10 +2273,15 @@ def main():
                     except Exception:
                         live_pool_usdc_raw = monitor.get("pool_usdc")
                     stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
-                    live_metrics = calculate_quote_metrics(
+                    live_metrics = calculate_route_metrics(
                         swap_size,
                         entry_out_raw / 10**DECIMALS,
                         selected_cost_estimate,
+                        token,
+                        venue_order,
+                    )
+                    entry_settlement_raw = stable_swap_output_raw(
+                        token, "USDC", entry_out_raw
                     )
                     if not is_profitable_candidate(
                         live_metrics,
@@ -2222,10 +2298,10 @@ def main():
                             f"requires net >= ${selected_min_net_profit:.6f} and return >= "
                             f"{MIN_NET_RETURN_BPS:.4f} bps"
                         )
-                    elif entry_out_raw > stable_capacity_raw:
+                    elif entry_settlement_raw > stable_capacity_raw:
                         failure_note = (
                             "Stable.com USDC pool cannot settle the Jupiter output "
-                            f"({entry_out_raw / 10**DECIMALS:.6f} {token} required, "
+                            f"({entry_settlement_raw / 10**DECIMALS:.6f} USDC required, "
                             f"{stable_capacity_raw / 10**DECIMALS:.6f} available)"
                         )
                         print(f"[skip] Jupiter entry {swap_size} USDC->{token}: {failure_note}")
@@ -2277,7 +2353,10 @@ def main():
                                 except Exception:
                                     live_pool_usdc_raw = monitor.get("pool_usdc")
                                 stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
-                                if received_raw > stable_capacity_raw:
+                                received_settlement_raw = stable_swap_output_raw(
+                                    token, "USDC", received_raw
+                                )
+                                if received_settlement_raw > stable_capacity_raw:
                                     failure_note = "Stable.com USDC pool changed and cannot settle the received amount"
                                 else:
                                     state_store.set_status("executing_stable", "Executing Stable.com exit", route=route_label)
@@ -2331,7 +2410,10 @@ def main():
                                                 "clearance and USDC credit were not observed"
                                             )
 
-            new_port = print_portfolio(session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, "[*] AFTER ARB", prev=prev_port)
+            new_port = print_portfolio(
+                session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, usdt_ata,
+                "[*] AFTER ARB", prev=prev_port,
+            )
             note = "" if arb_successful else (failure_note or f"{token} cycle was not confirmed")
             record = state_store.record_attempt(
                 route_label,
@@ -2343,8 +2425,8 @@ def main():
                 note,
             )
             state_store.update_snapshot(
-                {"USDC": new_port["usdc_raw"], "USDG": new_port["usdg_raw"], "PYUSD": new_port["pyusd_raw"]},
-                {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw},
+                {"USDC": new_port["usdc_raw"], "USDG": new_port["usdg_raw"], "PYUSD": new_port["pyusd_raw"], "USDT": new_port["usdt_raw"]},
+                {"USDC": pool_usdc_raw, "USDG": pool_usdg_raw, "PYUSD": pool_pyusd_raw, "USDT": pool_usdt_raw},
                 new_port["sol_lamports"],
                 new_port["sol_price"],
             )

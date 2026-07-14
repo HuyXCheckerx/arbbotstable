@@ -23,6 +23,7 @@ class BotStateStoreTests(unittest.TestCase):
             "usdc": 100.0,
             "usdg": 100.0,
             "pyusd": 100.0,
+            "usdt": 0.0,
             "sol_lamports": 1_000_000_000,
             "sol_price": 100.0,
         }
@@ -30,6 +31,7 @@ class BotStateStoreTests(unittest.TestCase):
             "usdc": 300.5,
             "usdg": 0.0,
             "pyusd": 0.0,
+            "usdt": 0.0,
             "sol_lamports": 999_990_000,
             "sol_price": 100.0,
         }
@@ -54,8 +56,8 @@ class BotStateStoreTests(unittest.TestCase):
         )
 
     def test_failed_attempt_counts_cost_but_not_arb(self):
-        before = {"usdc": 10.0, "usdg": 0.0, "pyusd": 0.0, "sol_lamports": 50_000, "sol_price": 80.0}
-        after = {"usdc": 10.0, "usdg": 0.0, "pyusd": 0.0, "sol_lamports": 45_000, "sol_price": 80.0}
+        before = {"usdc": 10.0, "usdg": 0.0, "pyusd": 0.0, "usdt": 0.0, "sol_lamports": 50_000, "sol_price": 80.0}
+        after = {"usdc": 10.0, "usdg": 0.0, "pyusd": 0.0, "usdt": 0.0, "sol_lamports": 45_000, "sol_price": 80.0}
 
         record = self.store.record_attempt("USDC -> USDG", 10, 0.2, before, after, False, "rejected")
 
@@ -64,13 +66,32 @@ class BotStateStoreTests(unittest.TestCase):
         self.assertEqual(state["performance"]["total_arbs"], 0)
         self.assertEqual(state["performance"]["total_attempts"], 1)
 
+    def test_stranded_usdt_is_counted_in_stablecoin_value(self):
+        before = {
+            "usdc": 100.0, "usdg": 0.0, "pyusd": 0.0, "usdt": 0.0,
+            "sol_lamports": 1_000_000_000, "sol_price": 100.0,
+        }
+        after = {
+            "usdc": 0.0, "usdg": 0.0, "pyusd": 0.0, "usdt": 100.0,
+            "sol_lamports": 999_990_000, "sol_price": 100.0,
+        }
+
+        record = self.store.record_attempt(
+            "USDC -> USDT", 100, 0.0, before, after, False, "awaiting recovery"
+        )
+
+        self.assertEqual(record["stablecoin_change_usd"], 0.0)
+        self.assertAlmostEqual(record["realized_pnl_usd"], -0.001)
+
     def test_incomplete_snapshot_cannot_corrupt_pnl(self):
         before = {
             "usdc": 50_000.0, "usdg": 0.0, "pyusd": 0.0,
+            "usdt": 0.0,
             "sol_lamports": 1_000_000_000, "sol_price": 80.0,
         }
         after = {
             "usdc": None, "usdg": 0.0, "pyusd": 0.0,
+            "usdt": 0.0,
             "sol_lamports": 999_990_000, "sol_price": 80.0,
         }
 
