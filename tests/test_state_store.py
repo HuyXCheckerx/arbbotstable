@@ -80,8 +80,8 @@ class BotStateStoreTests(unittest.TestCase):
             "USDC -> USDT", 100, 0.0, before, after, False, "awaiting recovery"
         )
 
-        self.assertEqual(record["stablecoin_change_usd"], 0.0)
-        self.assertAlmostEqual(record["realized_pnl_usd"], -0.001)
+        self.assertAlmostEqual(record["stablecoin_change_usd"], -0.1)
+        self.assertAlmostEqual(record["realized_pnl_usd"], -0.101)
 
     def test_incomplete_snapshot_cannot_corrupt_pnl(self):
         before = {

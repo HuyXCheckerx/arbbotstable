@@ -155,6 +155,26 @@ class RecoveryStore:
 
         return self._mutate(apply)
 
+    def update_remaining_amount(self, plan_id, amount_raw, error=None):
+        """Continue a recovery plan after a confirmed capacity-limited exit."""
+
+        amount_raw = int(amount_raw)
+        if amount_raw <= 0:
+            raise ValueError("remaining recovery amount must be positive")
+
+        def apply(state):
+            plan = state.get("recovery")
+            if not isinstance(plan, dict) or plan.get("id") != plan_id:
+                return None
+            plan["amount_raw"] = amount_raw
+            plan["status"] = "watching"
+            plan["submission"] = None
+            plan["last_error"] = None if error is None else str(error)
+            plan["updated_at"] = utc_now()
+            return plan
+
+        return self._mutate(apply)
+
     def sync_detected_position(self, token, amount_raw, min_net_profit_usd, route):
         """Adopt a startup-detected balance unless a transaction is pending.
 

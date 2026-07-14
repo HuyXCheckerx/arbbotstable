@@ -137,6 +137,9 @@ USDG_MAX_REMAINDER_USD = USDG_MAX_REMAINDER_RAW / 1_000_000
 DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", "0.005"))
 EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
 QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
+JUPITER_ENTRY_MAX_RETRIES = max(
+    0, int(os.environ.get("JUPITER_ENTRY_MAX_RETRIES", "5"))
+)
 WS_CONFIRM_TIMEOUT_SECONDS = float(os.environ.get("WS_CONFIRM_TIMEOUT_SECONDS", "12"))
 RECOVERY_MIN_NET_PROFIT_USD = float(
     os.environ.get("RECOVERY_MIN_NET_PROFIT_USD", "0.10")
@@ -332,6 +335,11 @@ def get_optional_token_balance(client, ata):
         if account.value is None:
             return 0
         raise
+
+
+def jupiter_entry_retry_is_safe(confirmation_source):
+    """Retry only when the prior order definitively cannot still land."""
+    return confirmation_source in {"not_submitted", "signature_error", "expired"}
 
 
 @dataclass(frozen=True)
@@ -1646,7 +1654,7 @@ def main():
                     pool_can_settle = stable_pool_can_settle(
                         venue_order,
                         input_human,
-                        metrics["output_value_amount"],
+                        metrics["output_amount"],
                         pool_to,
                         reserve=(
                             0
@@ -1696,7 +1704,7 @@ def main():
                     ) and stable_pool_can_settle(
                         venue_order,
                         result[1]["input_amount"],
-                        result[1]["output_value_amount"],
+                        result[1]["output_amount"],
                         pool_to,
                         reserve=(
                             0
@@ -1744,7 +1752,7 @@ def main():
                     ) and stable_pool_can_settle(
                         venue_order,
                         metrics["input_amount"],
-                        metrics["output_value_amount"],
+                        metrics["output_amount"],
                         pool_to,
                         reserve=(
                             0
@@ -1846,7 +1854,7 @@ def main():
                 pool_can_settle = stable_pool_can_settle(
                     venue_order,
                     swap_size,
-                    metrics["output_value_amount"],
+                    metrics["output_amount"],
                     selected_strategy["stable_destination_pool"],
                     reserve=(
                         0
@@ -2280,9 +2288,6 @@ def main():
                         token,
                         venue_order,
                     )
-                    entry_settlement_raw = stable_swap_output_raw(
-                        token, "USDC", entry_out_raw
-                    )
                     if not is_profitable_candidate(
                         live_metrics,
                         selected_min_net_profit,
@@ -2298,117 +2303,243 @@ def main():
                             f"requires net >= ${selected_min_net_profit:.6f} and return >= "
                             f"{MIN_NET_RETURN_BPS:.4f} bps"
                         )
-                    elif entry_settlement_raw > stable_capacity_raw:
+                    elif entry_out_raw > stable_capacity_raw:
                         failure_note = (
                             "Stable.com USDC pool cannot settle the Jupiter output "
-                            f"({entry_settlement_raw / 10**DECIMALS:.6f} USDC required, "
+                            f"({entry_out_raw / 10**DECIMALS:.6f} {token} input required, "
                             f"{stable_capacity_raw / 10**DECIMALS:.6f} available)"
                         )
                         print(f"[skip] Jupiter entry {swap_size} USDC->{token}: {failure_note}")
                     else:
-                        print(f"[*] Jupiter entry: {swap_size} USDC -> {token}")
-                        entry_cursor = monitor.snapshot([balance_key, "user_usdc"])
-                        submission = execute_jup_swap(
-                            session,
-                            client,
-                            keypair,
-                            final_quote,
-                            pending_store=state_store,
-                            submission_label=f"Jupiter USDC->{token} entry",
-                        )
-                        if not submission.may_have_landed:
-                            failure_note = "Jupiter entry submission failed"
-                        else:
-                            entry_confirmed, entry_balances, _ = confirm_transfer_ws_first(
-                                client,
-                                monitor,
-                                {
-                                    balance_key: (
-                                        token_ata,
-                                        lambda balance: balance > intermediate_baseline_raw,
-                                    ),
-                                    "user_usdc": (
-                                        usdc_ata,
-                                        lambda balance: balance < attempt_before["usdc_raw"],
-                                    ),
-                                },
-                                entry_cursor.revisions,
-                                f"Jupiter USDC->{token} entry",
-                                submission=submission,
-                                pending_store=state_store,
-                            )
-                            intermediate_after_raw = entry_balances.get(
-                                balance_key,
-                                intermediate_baseline_raw,
-                            )
-                            received_raw = acquired_balance_delta(
-                                intermediate_after_raw,
-                                intermediate_baseline_raw,
-                            )
-                            if not entry_confirmed or received_raw <= 0:
-                                failure_note = f"Jupiter entry did not produce a {token} balance delta"
-                            else:
+                        entry_quote = final_quote
+                        entry_confirmed = False
+                        entry_balances = {}
+                        received_raw = 0
+                        for retry_index in range(JUPITER_ENTRY_MAX_RETRIES + 1):
+                            if retry_index > 0:
+                                print(
+                                    f"[retry] Requesting fresh Jupiter USDC->{token} order "
+                                    f"{retry_index}/{JUPITER_ENTRY_MAX_RETRIES}."
+                                )
+                                entry_quote = get_jup_quote(
+                                    session,
+                                    selected_strategy["jup_input_mint"],
+                                    selected_strategy["jup_output_mint"],
+                                    probe_amount_raw,
+                                    taker=str(wallet),
+                                )
+                                if not entry_quote:
+                                    failure_note = (
+                                        "Fresh Jupiter entry order unavailable; retries stopped"
+                                    )
+                                    break
+
+                                entry_out_raw = int(entry_quote.get("outAmount", 0))
                                 try:
-                                    live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
+                                    retry_sol_lamports = int(
+                                        client.get_balance(
+                                            wallet, commitment=Confirmed
+                                        ).value
+                                        or 0
+                                    )
+                                except Exception as exc:
+                                    failure_note = (
+                                        "Cannot measure fees already spent by failed Jupiter "
+                                        f"entries; retries stopped: {exc}"
+                                    )
+                                    print(f"[skip] {failure_note}")
+                                    break
+                                sunk_sol_cost_usd = (
+                                    max(
+                                        0,
+                                        attempt_before["sol_lamports"]
+                                        - retry_sol_lamports,
+                                    )
+                                    / 10**9
+                                    * attempt_before["sol_price"]
+                                )
+                                retry_execution_cost = (
+                                    selected_cost_estimate + sunk_sol_cost_usd
+                                )
+                                retry_metrics = calculate_route_metrics(
+                                    swap_size,
+                                    entry_out_raw / 10**DECIMALS,
+                                    retry_execution_cost,
+                                    token,
+                                    venue_order,
+                                )
+                                try:
+                                    live_pool_usdc_raw = get_token_balance(
+                                        client, pool_usdc_ata
+                                    )
                                 except Exception:
                                     live_pool_usdc_raw = monitor.get("pool_usdc")
-                                stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
-                                received_settlement_raw = stable_swap_output_raw(
-                                    token, "USDC", received_raw
+                                stable_capacity_raw = max(
+                                    0, live_pool_usdc_raw - 10**DECIMALS
                                 )
-                                if received_settlement_raw > stable_capacity_raw:
-                                    failure_note = "Stable.com USDC pool changed and cannot settle the received amount"
-                                else:
-                                    state_store.set_status("executing_stable", "Executing Stable.com exit", route=route_label)
-                                    received_human = received_raw / 10**DECIMALS
-                                    print(f"[*] Stable.com exit: {received_human:.6f} {token} -> USDC")
-                                    exit_cursor = monitor.snapshot([balance_key, "user_usdc"])
-                                    # Use the confirmed entry result, not a
-                                    # potentially lagging WS cache, as the
-                                    # starting point for the USDC credit.
-                                    exit_usdc_before_raw = entry_balances["user_usdc"]
-                                    stable_exit_result = execute_stable_swap(
-                                        session,
-                                        client,
-                                        keypair,
-                                        token,
-                                        "USDC",
-                                        received_human,
-                                        pending_store=state_store,
-                                        submission_label=f"Stable.com {token}->USDC exit",
+                                if not is_profitable_candidate(
+                                    retry_metrics,
+                                    selected_min_net_profit,
+                                    MIN_NET_RETURN_BPS,
+                                ):
+                                    failure_note = (
+                                        "Fresh Jupiter entry is no longer profitable "
+                                        f"(net ${retry_metrics['net_profit_usd']:.6f}); "
+                                        "retries stopped"
                                     )
-                                    if not stable_exit_result.may_have_landed:
-                                        failure_note = "Stable.com exit failed after Jupiter entry"
+                                    print(f"[skip] {failure_note}")
+                                    break
+                                if entry_out_raw > stable_capacity_raw:
+                                    failure_note = (
+                                        "Stable.com USDC pool can no longer settle the fresh "
+                                        "Jupiter output; retries stopped"
+                                    )
+                                    print(f"[skip] {failure_note}")
+                                    break
+                                selected_metrics = retry_metrics
+                                print(
+                                    f"[retry] Fresh order remains eligible: net "
+                                    f"${retry_metrics['net_profit_usd']:.6f}, including "
+                                    f"${sunk_sol_cost_usd:.6f} already spent."
+                                )
+
+                            failure_note = ""
+                            attempt_number = retry_index + 1
+                            print(
+                                f"[*] Jupiter entry attempt {attempt_number}/"
+                                f"{JUPITER_ENTRY_MAX_RETRIES + 1}: "
+                                f"{swap_size} USDC -> {token}"
+                            )
+                            entry_cursor = monitor.snapshot(
+                                [balance_key, "user_usdc"]
+                            )
+                            submission = execute_jup_swap(
+                                session,
+                                client,
+                                keypair,
+                                entry_quote,
+                                pending_store=state_store,
+                                submission_label=f"Jupiter USDC->{token} entry",
+                            )
+                            if not submission.may_have_landed:
+                                confirmation_source = "not_submitted"
+                                failure_note = "Jupiter entry submission failed"
+                                entry_balances = {}
+                            else:
+                                (
+                                    entry_confirmed,
+                                    entry_balances,
+                                    confirmation_source,
+                                ) = confirm_transfer_ws_first(
+                                    client,
+                                    monitor,
+                                    {
+                                        balance_key: (
+                                            token_ata,
+                                            lambda balance: balance
+                                            > intermediate_baseline_raw,
+                                        ),
+                                        "user_usdc": (
+                                            usdc_ata,
+                                            lambda balance: balance
+                                            < attempt_before["usdc_raw"],
+                                        ),
+                                    },
+                                    entry_cursor.revisions,
+                                    f"Jupiter USDC->{token} entry",
+                                    submission=submission,
+                                    pending_store=state_store,
+                                )
+                                intermediate_after_raw = entry_balances.get(
+                                    balance_key,
+                                    intermediate_baseline_raw,
+                                )
+                                received_raw = acquired_balance_delta(
+                                    intermediate_after_raw,
+                                    intermediate_baseline_raw,
+                                )
+                                entry_confirmed = (
+                                    entry_confirmed and received_raw > 0
+                                )
+                                if not entry_confirmed:
+                                    failure_note = (
+                                        f"Jupiter entry did not produce a {token} "
+                                        "balance delta"
+                                    )
+
+                            if entry_confirmed:
+                                break
+                            if not jupiter_entry_retry_is_safe(confirmation_source):
+                                failure_note = (
+                                    failure_note
+                                    or "Jupiter entry outcome is ambiguous; retries stopped"
+                                )
+                                break
+                            if retry_index == JUPITER_ENTRY_MAX_RETRIES:
+                                failure_note = (
+                                    f"Jupiter entry failed after {attempt_number} attempts"
+                                )
+                                print(f"[!] {failure_note}")
+
+                        if entry_confirmed:
+                            try:
+                                live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
+                            except Exception:
+                                live_pool_usdc_raw = monitor.get("pool_usdc")
+                            stable_capacity_raw = max(0, live_pool_usdc_raw - 10**DECIMALS)
+                            if received_raw > stable_capacity_raw:
+                                failure_note = "Stable.com USDC pool changed and cannot settle the received amount"
+                            else:
+                                state_store.set_status("executing_stable", "Executing Stable.com exit", route=route_label)
+                                received_human = received_raw / 10**DECIMALS
+                                print(f"[*] Stable.com exit: {received_human:.6f} {token} -> USDC")
+                                exit_cursor = monitor.snapshot([balance_key, "user_usdc"])
+                                # Use the confirmed entry result, not a
+                                # potentially lagging WS cache, as the
+                                # starting point for the USDC credit.
+                                exit_usdc_before_raw = entry_balances["user_usdc"]
+                                stable_exit_result = execute_stable_swap(
+                                    session,
+                                    client,
+                                    keypair,
+                                    token,
+                                    "USDC",
+                                    received_human,
+                                    pending_store=state_store,
+                                    submission_label=f"Stable.com {token}->USDC exit",
+                                )
+                                if not stable_exit_result.may_have_landed:
+                                    failure_note = "Stable.com exit failed after Jupiter entry"
+                                else:
+                                    exit_confirmed, _, _ = confirm_transfer_ws_first(
+                                        client,
+                                        monitor,
+                                        {
+                                            balance_key: (
+                                                token_ata,
+                                                lambda balance: acquired_delta_is_cleared(
+                                                    balance,
+                                                    intermediate_baseline_raw,
+                                                    tolerance_raw,
+                                                ),
+                                            ),
+                                            "user_usdc": (
+                                                usdc_ata,
+                                                lambda balance: balance > exit_usdc_before_raw,
+                                            ),
+                                        },
+                                        exit_cursor.revisions,
+                                        f"Stable.com {token}->USDC exit",
+                                        submission=stable_exit_result.submission,
+                                        pending_store=state_store,
+                                    )
+                                    if exit_confirmed:
+                                        arb_successful = True
                                     else:
-                                        exit_confirmed, _, _ = confirm_transfer_ws_first(
-                                            client,
-                                            monitor,
-                                            {
-                                                balance_key: (
-                                                    token_ata,
-                                                    lambda balance: acquired_delta_is_cleared(
-                                                        balance,
-                                                        intermediate_baseline_raw,
-                                                        tolerance_raw,
-                                                    ),
-                                                ),
-                                                "user_usdc": (
-                                                    usdc_ata,
-                                                    lambda balance: balance > exit_usdc_before_raw,
-                                                ),
-                                            },
-                                            exit_cursor.revisions,
-                                            f"Stable.com {token}->USDC exit",
-                                            submission=stable_exit_result.submission,
-                                            pending_store=state_store,
+                                        failure_note = (
+                                            "Stable.com exit was submitted, but fresh token "
+                                            "clearance and USDC credit were not observed"
                                         )
-                                        if exit_confirmed:
-                                            arb_successful = True
-                                        else:
-                                            failure_note = (
-                                                "Stable.com exit was submitted, but fresh token "
-                                                "clearance and USDC credit were not observed"
-                                            )
 
             new_port = print_portfolio(
                 session, client, wallet, usdc_ata, usdg_ata, pyusd_ata, usdt_ata,

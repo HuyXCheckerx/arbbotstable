@@ -1,6 +1,7 @@
 import unittest
 
 from recovery_logic import (
+    capacity_limited_recovery_amount_raw,
     planned_amount_is_available,
     raw_amount_to_human,
     recovery_quote_is_eligible,
@@ -9,6 +10,16 @@ from recovery_logic import (
 
 
 class RecoveryLogicTests(unittest.TestCase):
+    def test_capacity_limited_recovery_keeps_one_token_reserve(self):
+        self.assertEqual(
+            capacity_limited_recovery_amount_raw(3_125_289_341, 3_124_200_195),
+            3_123_200_195,
+        )
+        self.assertEqual(
+            capacity_limited_recovery_amount_raw(2_000_000, 5_000_000),
+            2_000_000,
+        )
+
     def test_raw_six_decimal_amount_converts_to_human_tokens(self):
         self.assertEqual(raw_amount_to_human(50_078_301_316), 50_078.301316)
 

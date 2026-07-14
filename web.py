@@ -359,7 +359,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
 
     <footer>
-      <p>Net P&amp;L = change in USDC + USDG + PYUSD + USDT balances, valued at $1 each, minus the USD estimate of the wallet's observed SOL decrease during each attempt. This avoids treating ordinary SOL price movement as arbitrage profit.</p>
+      <p>Net P&amp;L = change in USDC + USDG + PYUSD at $1 plus USDT at its 0.999 Stable.com redemption value, minus the USD estimate of observed SOL consumption. This avoids recognizing the USDT exit fee as unrealized profit.</p>
       <p class="footer-mark">Private operations ledger<br>2-second refresh</p>
     </footer>
   </main>

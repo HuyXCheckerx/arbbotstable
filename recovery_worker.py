@@ -16,6 +16,7 @@ import requests
 os.environ.setdefault("BOT_LOG_NAME", "recovery_worker")
 
 from recovery_logic import (  # noqa: E402
+    capacity_limited_recovery_amount_raw,
     raw_amount_to_human,
     recovery_quote_is_eligible,
     recovery_quote_metrics,
@@ -165,9 +166,39 @@ def attempt_stable_recovery(
         submission_label=f"Recovery Stable.com {token}->USDC",
     )
     if not result.may_have_landed:
-        store.mark_watching(plan["id"], "Stable.com recovery exit was not submitted")
-        return False
-    confirmed, _, _ = confirm_transfer_ws_first(
+        constraint = result.liquidity_constraint
+        if token == "USDT" and constraint:
+            partial_raw = capacity_limited_recovery_amount_raw(
+                amount_raw,
+                constraint["available_raw"],
+            )
+            if POSITION_TOLERANCE_RAW < partial_raw < amount_raw:
+                amount_raw = partial_raw
+                amount_human = raw_amount_to_human(amount_raw)
+                print(
+                    f"[recovery] Stable.com capacity is temporarily limited; "
+                    f"returning {amount_human:.6f} USDT now and retaining the "
+                    "confirmed remainder in the recovery plan."
+                )
+                usdc_before = get_token_balance(client, usdc_ata)
+                cursor = monitor.snapshot([balance_key, "user_usdc"])
+                result = execute_stable_swap(
+                    session,
+                    client,
+                    keypair,
+                    token,
+                    "USDC",
+                    amount_human,
+                    pending_store=store,
+                    submission_label=f"Partial recovery Stable.com {token}->USDC",
+                )
+        if not result.may_have_landed:
+            store.mark_watching(
+                plan["id"],
+                "Stable.com recovery exit was not submitted; waiting for capacity",
+            )
+            return False
+    confirmed, balances, _ = confirm_transfer_ws_first(
         client,
         monitor,
         {
@@ -183,8 +214,20 @@ def attempt_stable_recovery(
         pending_store=store,
     )
     if confirmed:
-        store.complete(plan["id"])
-        print(f"[+] Stable.com recovery complete: exact {amount_human:.6f} {token} returned.")
+        remaining_raw = int(balances.get(balance_key, max(0, actual_raw - amount_raw)))
+        if remaining_raw <= POSITION_TOLERANCE_RAW:
+            store.complete(plan["id"])
+            print(f"[+] Stable.com recovery complete: {amount_human:.6f} {token} returned.")
+        else:
+            store.update_remaining_amount(
+                plan["id"],
+                remaining_raw,
+                "Capacity-limited Stable.com recovery is continuing",
+            )
+            print(
+                f"[+] Partial Stable.com recovery confirmed; "
+                f"{raw_amount_to_human(remaining_raw):.6f} {token} remains."
+            )
         return True
     store.mark_watching(plan["id"], "Stable.com recovery exit did not confirm")
     return False

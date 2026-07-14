@@ -69,6 +69,25 @@ class DynamicSizingTests(unittest.TestCase):
         self.assertEqual(metrics["output_amount"], 100_100.20)
         self.assertAlmostEqual(metrics["net_profit_usd"], 0.0898)
 
+    def test_usdt_capacity_uses_full_input_even_when_fee_reduces_output(self):
+        metrics = calculate_route_metrics(
+            3_122,
+            3_125.289341,
+            0.001,
+            "USDT",
+            "jupiter_first",
+        )
+        self.assertGreater(metrics["net_profit_usd"], 0)
+        self.assertFalse(
+            stable_pool_can_settle(
+                "jupiter_first",
+                metrics["input_amount"],
+                metrics["output_amount"],
+                3_124.200195,
+                reserve=1.0,
+            )
+        )
+
     def test_stable_pool_requirement_depends_on_venue_order(self):
         self.assertTrue(stable_pool_can_settle("stable_first", 5_000, 5_000.20, 5_001))
         self.assertFalse(stable_pool_can_settle("jupiter_first", 5_000, 5_000.20, 5_001))

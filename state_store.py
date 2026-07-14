@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_STATE_PATH = BASE_DIR / "bot_state.json"
 DEFAULT_PNL_PATH = BASE_DIR / "pnl.txt"
 STABLE_ASSETS = ("USDC", "USDG", "PYUSD", "USDT")
+PNL_ASSET_VALUES_USD = {"USDC": 1.0, "USDG": 1.0, "PYUSD": 1.0, "USDT": 0.999}
 
 
 def utc_now():
@@ -273,8 +274,14 @@ class BotStateStore:
                             f"Refusing to record P&L with invalid {snapshot_name}.{key}={value}"
                         )
 
-            before_stables = sum(float(before[asset.lower()]) for asset in STABLE_ASSETS)
-            after_stables = sum(float(after[asset.lower()]) for asset in STABLE_ASSETS)
+            before_stables = sum(
+                float(before[asset.lower()]) * PNL_ASSET_VALUES_USD[asset]
+                for asset in STABLE_ASSETS
+            )
+            after_stables = sum(
+                float(after[asset.lower()]) * PNL_ASSET_VALUES_USD[asset]
+                for asset in STABLE_ASSETS
+            )
             stablecoin_change = after_stables - before_stables
             before_lamports = int(before.get("sol_lamports", 0))
             after_lamports = int(after.get("sol_lamports", 0))

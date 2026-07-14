@@ -22,6 +22,10 @@ class RecoveryStoreTests(unittest.TestCase):
             self.assertFalse(store.clear_pending_submission("other"))
             self.assertTrue(store.clear_pending_submission("sig"))
 
+            remaining = store.update_remaining_amount(plan["id"], 2_089_146)
+            self.assertEqual(remaining["amount_raw"], 2_089_146)
+            self.assertEqual(remaining["status"], "watching")
+
             store.mark_manual_review(plan["id"], "balance changed")
             self.assertEqual(store.get_active()["status"], "manual_review")
             self.assertTrue(store.complete(plan["id"]))

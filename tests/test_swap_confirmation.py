@@ -46,6 +46,12 @@ class FakePendingStore:
 
 
 class SwapConfirmationTests(unittest.TestCase):
+    def test_jupiter_entry_retries_only_definitive_failures(self):
+        for source in ("not_submitted", "signature_error", "expired"):
+            self.assertTrue(swapstable.jupiter_entry_retry_is_safe(source))
+        for source in ("rpc_error", "rpc", "ws", "ws_reconciled"):
+            self.assertFalse(swapstable.jupiter_entry_retry_is_safe(source))
+
     def test_stable_result_preserves_ambiguous_submission(self):
         submission = swapstable.SwapSubmissionResult(
             False,

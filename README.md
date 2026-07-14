@@ -26,12 +26,12 @@ Machine-readable endpoints:
 For each attempt:
 
 ```text
-stablecoin change = (USDC + USDG + PYUSD + USDT after) - (USDC + USDG + PYUSD + USDT before)
+stablecoin change = (USDC + USDG + PYUSD at $1 + USDT at $0.999 after) - the same value before
 SOL cost USD      = observed SOL decrease × average execution-time SOL/USD price
 realized net P&L  = stablecoin change - SOL cost USD
 ```
 
-Stablecoins are estimated at $1. The SOL decrease is measured directly from confirmed wallet lamport balances immediately before and after the complete attempt, so it includes base fees, priority fees, and native SOL charged during that attempt. External SOL transfers made from the same wallet during an attempt would also appear as consumption; use a dedicated bot wallet for clean accounting.
+USDC, USDG, and PYUSD are estimated at $1; USDT is valued at its $0.999 Stable.com redemption value so an exposed USDT position does not recognize the 0.1% exit fee as profit. The SOL decrease is measured directly from confirmed wallet lamport balances immediately before and after the complete attempt, so it includes base fees, priority fees, and native SOL charged during that attempt. External SOL transfers made from the same wallet during an attempt would also appear as consumption; use a dedicated bot wallet for clean accounting.
 
 Accounting persists in `bot_state.json`. On the first upgraded run, the old `pnl.txt` value is retained separately as a **prior-method estimate**; it is not mixed into the new realized net P&L because it did not contain exact per-attempt SOL consumption. `pnl.txt` then remains as a backwards-compatible summary of the new method. Both files are intentionally excluded from Git so a server pull does not erase live state.
 
@@ -68,6 +68,7 @@ Defaults:
 MIN_TRADE_SIZE_USD=1000
 MIN_NET_PROFIT_USD=0.10
 MIN_NET_RETURN_BPS=0
+JUPITER_ENTRY_MAX_RETRIES=5
 DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 ```
@@ -77,6 +78,12 @@ With these defaults, every size has the same $0.10 net-profit requirement. When 
 `MIN_NET_RETURN_BPS` remains an optional eligibility floor. It can reject a quote, but it is not used to rank quotes that pass.
 
 To limit Jupiter API usage, ordinary sizing probes only the minimum, `2x` minimum, `5x` minimum, and exact maximum before refining around the best anchor. For Jupiter-first routes, the second successful wallet-specific verification order is submitted directly as the entry instead of requesting an identical third executable order.
+
+If that Jupiter entry definitively fails on-chain, expires without landing, or
+fails before submission, the bot requests up to five fresh executable orders.
+Every retry must still pass the current net-profit and Stable.com pool-capacity
+checks. Its profit calculation also deducts the SOL fees already spent by the
+failed entries. Ambiguous transactions are never retried.
 
 #### USDG reserve drain mode
 
@@ -102,7 +109,7 @@ Balance confirmation is WebSocket-first at Solana's `confirmed` commitment. The 
 
 Every signed transaction stores its local signature and blockhash atomically in `bot_state.json` before broadcast. If an RPC or Jupiter HTTP response is lost, or the first snapshot is still too early, the bot freezes new submissions and reconciles that signature with delayed WS updates. The lock survives the panel's automatic process restart. It resumes only after the transaction is confirmed/failed or an unrecorded transaction's blockhash has expired, preventing a hidden accepted transaction from being submitted twice. A confirmed transaction with unexpected balances stays locked for operator review instead of being balance-polled indefinitely.
 
-The scanner also refuses every new first leg while the wallet holds more than the normal 0.1-token intermediate tolerance in USDG, PYUSD, or USDT. This applies equally to a balance detected at startup. It writes one durable recovery plan containing the exact token amount. The separately supervised `recovery_worker.py` first checks the wallet-specific executable Jupiter order. If its conservative net recovery profit is at least `$0.10`, it returns through Jupiter; otherwise (including no Jupiter quote) it immediately submits the exact Stable.com token-to-USDC exit. The Jupiter calculation includes the configured execution-cost reserve and a one-basis-point slippage reserve by default. Both return paths use fresh WebSocket balance revisions for confirmation, with one RPC snapshot fallback. The worker never opens a first leg, never increases the planned amount to match a larger wallet balance, and leaves a manual-review lock if the planned balance changes unexpectedly. The scanner remains locked until the recovery is confirmed.
+The scanner also refuses every new first leg while the wallet holds more than the normal 0.1-token intermediate tolerance in USDG, PYUSD, or USDT. This applies equally to a balance detected at startup. It writes one durable recovery plan containing the exact token amount. The separately supervised `recovery_worker.py` first checks the wallet-specific executable Jupiter order. If its conservative net recovery profit is at least `$0.10`, it returns through Jupiter; otherwise (including no Jupiter quote) it submits the Stable.com token-to-USDC exit. If Stable.com's USDT capacity is temporarily below the position, the worker safely returns the largest amount that preserves a $1 pool reserve, persists the confirmed remainder, and continues recovery. The Jupiter calculation includes the configured execution-cost reserve and a one-basis-point slippage reserve by default. Both return paths use fresh WebSocket balance revisions for confirmation, with one RPC snapshot fallback. The worker never opens a first leg or increases the planned amount to match a larger wallet balance. The scanner remains locked until the recovery is confirmed.
 
 Stable.com's create-order service may index a USDG refill after the confirmed on-chain account notification. The bot therefore gives an observed USDG pool increase a short settlement window before quoting that drain route. If the API still reports the old `available` balance, the route receives a short exponential cooldown rather than submitting the same request repeatedly.
 
