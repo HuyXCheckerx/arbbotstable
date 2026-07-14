@@ -64,6 +64,23 @@ class BotStateStoreTests(unittest.TestCase):
         self.assertEqual(state["performance"]["total_arbs"], 0)
         self.assertEqual(state["performance"]["total_attempts"], 1)
 
+    def test_incomplete_snapshot_cannot_corrupt_pnl(self):
+        before = {
+            "usdc": 50_000.0, "usdg": 0.0, "pyusd": 0.0,
+            "sol_lamports": 1_000_000_000, "sol_price": 80.0,
+        }
+        after = {
+            "usdc": None, "usdg": 0.0, "pyusd": 0.0,
+            "sol_lamports": 999_990_000, "sol_price": 80.0,
+        }
+
+        with self.assertRaisesRegex(ValueError, "incomplete after snapshot: usdc"):
+            self.store.record_attempt("USDC -> USDG -> USDC", 50_000, 0.2, before, after, True)
+
+        state = read_state(self.state_path)
+        self.assertEqual(state["performance"]["total_attempts"], 0)
+        self.assertEqual(state["performance"]["total_realized_pnl_usd"], 0.0)
+
     def test_snapshot_contains_full_balances_and_atomic_json(self):
         self.store.update_snapshot(
             {"USDC": 1_234_567, "USDG": 2_000_000, "PYUSD": 3_000_000},

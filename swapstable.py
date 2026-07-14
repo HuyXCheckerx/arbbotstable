@@ -296,10 +296,18 @@ def get_ata(owner, mint, token_program=TOKEN_PROGRAM):
     )[0]
 
 def get_token_balance(client, ata):
-    resp = client.get_token_account_balance(ata)
-    if resp.value is None:
-        return 0
-    return int(resp.value.amount)
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = client.get_token_account_balance(ata)
+            if resp.value is not None and resp.value.amount is not None:
+                return int(resp.value.amount)
+            last_error = RuntimeError(f"RPC returned no token balance for {ata}")
+        except Exception as exc:
+            last_error = exc
+        if attempt < 2:
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError(f"Unable to read token balance for {ata} after 3 attempts") from last_error
 
 
 @dataclass(frozen=True)

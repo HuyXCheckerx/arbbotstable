@@ -251,8 +251,28 @@ class BotStateStore:
         note="",
     ):
         with self.lock:
-            before_stables = sum(float(before.get(asset.lower(), 0.0)) for asset in STABLE_ASSETS)
-            after_stables = sum(float(after.get(asset.lower(), 0.0)) for asset in STABLE_ASSETS)
+            required = tuple(asset.lower() for asset in STABLE_ASSETS) + ("sol_lamports", "sol_price")
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                missing = [key for key in required if key not in snapshot or snapshot[key] is None]
+                if missing:
+                    raise ValueError(
+                        f"Refusing to record P&L from incomplete {snapshot_name} snapshot: "
+                        + ", ".join(missing)
+                    )
+                for key in required:
+                    try:
+                        value = float(snapshot[key])
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Refusing to record P&L with invalid {snapshot_name}.{key}"
+                        ) from exc
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError(
+                            f"Refusing to record P&L with invalid {snapshot_name}.{key}={value}"
+                        )
+
+            before_stables = sum(float(before[asset.lower()]) for asset in STABLE_ASSETS)
+            after_stables = sum(float(after[asset.lower()]) for asset in STABLE_ASSETS)
             stablecoin_change = after_stables - before_stables
             before_lamports = int(before.get("sol_lamports", 0))
             after_lamports = int(after.get("sol_lamports", 0))
