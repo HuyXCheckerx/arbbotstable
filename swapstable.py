@@ -1016,6 +1016,11 @@ class StableSwapResult:
     def may_have_landed(self):
         return self.submission.may_have_landed
 
+    @property
+    def pool_constraint(self):
+        """True when the order service rejected liquidity before submission."""
+        return bool(self.reserve_constraint or self.liquidity_constraint)
+
     def __bool__(self):
         return self.ok
 
@@ -2029,6 +2034,14 @@ def main():
                     else:
                         stable_reserve_failure_counts.pop(selected_route_key, None)
                         stable_reserve_backoff_until.pop(selected_route_key, None)
+
+                    # An insufficient_pool_balance response is a quote/liquidity
+                    # condition, not a transaction attempt: no transaction was
+                    # submitted and no wallet balance could have changed. Keep it
+                    # out of the execution ledger and return directly to scanning.
+                    if stable_result.pool_constraint:
+                        state_store.set_status("scanning", "Scanning markets")
+                        continue
                 else:
                     stable_reserve_failure_counts.pop(selected_route_key, None)
                     stable_reserve_backoff_until.pop(selected_route_key, None)
