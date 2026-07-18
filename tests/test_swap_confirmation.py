@@ -46,6 +46,99 @@ class FakePendingStore:
 
 
 class SwapConfirmationTests(unittest.TestCase):
+    def test_strategy_builder_places_both_cross_cycles_before_jupiter_entries(self):
+        token_configs = {
+            token: {
+                "mint": f"{token}-mint",
+                "stable_pool": 100_000,
+                "token_ata": f"{token}-ata",
+                "balance_key": f"user_{token.lower()}",
+            }
+            for token in ("USDG", "PYUSD", "USDT")
+        }
+
+        strategies = swapstable.build_usdc_strategies(
+            token_configs,
+            stable_usdc_pool=200_000,
+            stable_exit_reserve=1.9,
+        )
+
+        self.assertEqual(
+            [
+                (
+                    strategy["route_kind"],
+                    strategy["token"],
+                    strategy["output_token"],
+                    strategy["venue_order"],
+                )
+                for strategy in strategies
+            ],
+            [
+                ("direct", "USDG", "USDC", "stable_first"),
+                ("direct", "PYUSD", "USDC", "stable_first"),
+                ("cross", "USDG", "PYUSD", "stable_first"),
+                ("cross", "PYUSD", "USDG", "stable_first"),
+                ("direct", "USDG", "USDG", "jupiter_first"),
+                ("direct", "PYUSD", "PYUSD", "jupiter_first"),
+                ("direct", "USDT", "USDT", "jupiter_first"),
+            ],
+        )
+        for strategy in strategies[2:4]:
+            self.assertEqual(strategy["stable_exit_pool"], 200_000)
+            self.assertEqual(strategy["stable_exit_reserve"], 1.9)
+
+    def test_jupiter_cap_mode_requests_and_enforces_configured_ceiling(self):
+        with (
+            patch.object(swapstable, "JUPITER_PRIORITY_FEE_MODE", "cap"),
+            patch.object(
+                swapstable,
+                "JUPITER_PRIORITY_FEE_CAP_LAMPORTS",
+                12_345,
+            ),
+        ):
+            self.assertEqual(
+                swapstable.jupiter_order_fee_params(),
+                {
+                    "priorityFeeLamports": "12345",
+                    "broadcastFeeType": "maxCap",
+                },
+            )
+            self.assertEqual(
+                swapstable.jupiter_swap_priority_fee_request(),
+                {
+                    "priorityLevelWithMaxLamports": {
+                        "maxLamports": 12_345,
+                        "priorityLevel": "medium",
+                    }
+                },
+            )
+            with patch.object(
+                swapstable,
+                "cap_jup_priority_fee",
+                return_value=b"capped",
+            ) as cap:
+                self.assertEqual(
+                    swapstable.apply_jup_priority_fee_policy(b"generated"),
+                    b"capped",
+                )
+                cap.assert_called_once_with(b"generated", 12_345)
+
+    def test_jupiter_recommended_mode_preserves_generated_fee(self):
+        with patch.object(
+            swapstable,
+            "JUPITER_PRIORITY_FEE_MODE",
+            "recommended",
+        ):
+            self.assertEqual(swapstable.jupiter_order_fee_params(), {})
+            self.assertIsNone(swapstable.jupiter_swap_priority_fee_request())
+            with patch.object(swapstable, "cap_jup_priority_fee") as cap:
+                tx_bytes = b"jupiter-generated-transaction"
+                self.assertIs(
+                    swapstable.apply_jup_priority_fee_policy(tx_bytes),
+                    tx_bytes,
+                )
+                cap.assert_not_called()
+
     def test_accounting_snapshot_uses_confirmed_exit_balances_coherently(self):
         before = {
             "usdc_raw": 50_605_424_067,
@@ -66,6 +159,29 @@ class SwapConfirmationTests(unittest.TestCase):
         self.assertEqual(snapshot["usdg"], 0)
         self.assertEqual(snapshot["pyusd"], 0)
         self.assertEqual(snapshot["usdt"], 0)
+
+    def test_accounting_snapshot_can_merge_both_cross_route_tokens(self):
+        before = {
+            "usdc_raw": 50_000_000_000,
+            "usdg_raw": 10,
+            "pyusd_raw": 20,
+            "usdt_raw": 0,
+        }
+        confirmed = {
+            "user_usdc": 50_000_200_000,
+            "user_usdg": 11,
+            "user_pyusd": 21,
+        }
+
+        snapshot = swapstable.accounting_raw_snapshot(
+            before,
+            confirmed_balances=confirmed,
+            tokens=("USDG", "PYUSD"),
+        )
+
+        self.assertEqual(snapshot["usdc"], 50_000_200_000)
+        self.assertEqual(snapshot["usdg"], 11)
+        self.assertEqual(snapshot["pyusd"], 21)
 
     def test_usdt_route_profit_floor_is_at_least_five_dollars(self):
         self.assertGreaterEqual(swapstable.USDT_MIN_NET_PROFIT_USD, 5.0)

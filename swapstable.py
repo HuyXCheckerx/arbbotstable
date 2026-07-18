@@ -48,6 +48,8 @@ from sizing import (
     acquired_delta_is_cleared,
     adjusted_drain_minimum_raw,
     calculate_route_metrics,
+    cross_route_pools_can_settle,
+    cross_token_cycles,
     drain_candidate_is_valid,
     generate_candidate_sizes,
     generate_drain_candidate_amounts_raw,
@@ -146,6 +148,10 @@ USDG_MAX_REMAINDER_USD = USDG_MAX_REMAINDER_RAW / 1_000_000
 DEFAULT_EXECUTION_COST_USD = float(os.environ.get("DEFAULT_EXECUTION_COST_USD", "0.005"))
 EXECUTION_COST_SAFETY_MULTIPLIER = float(os.environ.get("EXECUTION_COST_SAFETY_MULTIPLIER", "1.25"))
 QUOTE_SAMPLE_DELAY_SECONDS = float(os.environ.get("QUOTE_SAMPLE_DELAY_SECONDS", "0.15"))
+CROSS_ROUTE_EXECUTION_COST_MULTIPLIER = max(
+    1.0,
+    float(os.environ.get("CROSS_ROUTE_EXECUTION_COST_MULTIPLIER", "1.5")),
+)
 JUPITER_ENTRY_MAX_RETRIES = max(
     0, int(os.environ.get("JUPITER_ENTRY_MAX_RETRIES", "5"))
 )
@@ -179,8 +185,19 @@ def get_jup_headers():
     jup_key_index += 1
     return {"x-api-key": key}
 
-PRIORITY_FEE = 10000  # 10k lamports
-JITO_TIP = 0          # Disabled to keep total fees strictly < 30k lamports
+PRIORITY_FEE = 10000  # Stable.com compute-unit price, in micro-lamports per CU
+JITO_TIP = 0
+JUPITER_PRIORITY_FEE_MODE = os.environ.get(
+    "JUPITER_PRIORITY_FEE_MODE", "cap"
+).strip().lower()
+if JUPITER_PRIORITY_FEE_MODE not in {"cap", "recommended"}:
+    raise ValueError(
+        "JUPITER_PRIORITY_FEE_MODE must be either 'cap' or 'recommended'"
+    )
+JUPITER_PRIORITY_FEE_CAP_LAMPORTS = max(
+    0,
+    int(os.environ.get("JUPITER_PRIORITY_FEE_CAP_LAMPORTS", "10000")),
+)
 
 # ============================================================
 # CONSTANTS
@@ -351,7 +368,12 @@ def jupiter_entry_retry_is_safe(confirmation_source):
     return confirmation_source in {"not_submitted", "signature_error", "expired"}
 
 
-def accounting_raw_snapshot(attempt_before, token=None, confirmed_balances=None):
+def accounting_raw_snapshot(
+    attempt_before,
+    token=None,
+    confirmed_balances=None,
+    tokens=None,
+):
     """Build one coherent token snapshot from the trade baseline and confirmation."""
     snapshot = {
         "usdc": int(attempt_before["usdc_raw"]),
@@ -361,12 +383,76 @@ def accounting_raw_snapshot(attempt_before, token=None, confirmed_balances=None)
     }
     if confirmed_balances is not None:
         snapshot["usdc"] = int(confirmed_balances["user_usdc"])
+        accounting_tokens = list(tokens or ())
         if token is not None:
-            token_key = str(token).lower()
-            snapshot[token_key] = int(
-                confirmed_balances[f"user_{token_key}"]
-            )
+            accounting_tokens.append(token)
+        for accounting_token in dict.fromkeys(accounting_tokens):
+            token_key = str(accounting_token).lower()
+            balance_key = f"user_{token_key}"
+            if balance_key in confirmed_balances:
+                snapshot[token_key] = int(confirmed_balances[balance_key])
     return snapshot
+
+
+def build_usdc_strategies(
+    token_configs,
+    stable_usdc_pool,
+    stable_exit_reserve,
+):
+    """Build direct and cross-token USDC cycles in execution priority order."""
+    strategies = []
+    for token, venue_order in usdc_strategy_directions():
+        config = token_configs[token]
+        stable_first = venue_order == "stable_first"
+        strategies.append(
+            {
+                "route_kind": "direct",
+                "token": token,
+                "output_token": "USDC" if stable_first else token,
+                "venue_order": venue_order,
+                "jup_input_mint": config["mint"] if stable_first else USDC_MINT,
+                "jup_output_mint": USDC_MINT if stable_first else config["mint"],
+                "stable_destination_pool": (
+                    config["stable_pool"]
+                    if stable_first
+                    else stable_usdc_pool
+                ),
+                "token_ata": config["token_ata"],
+                "balance_key": config["balance_key"],
+            }
+        )
+
+    cross_strategies = []
+    for source_token, destination_token in cross_token_cycles():
+        source_config = token_configs[source_token]
+        destination_config = token_configs[destination_token]
+        cross_strategies.append(
+            {
+                "route_kind": "cross",
+                "token": source_token,
+                "output_token": destination_token,
+                "venue_order": "stable_first",
+                "jup_input_mint": source_config["mint"],
+                "jup_output_mint": destination_config["mint"],
+                "stable_destination_pool": source_config["stable_pool"],
+                "stable_exit_pool": stable_usdc_pool,
+                "stable_exit_reserve": stable_exit_reserve,
+                "token_ata": source_config["token_ata"],
+                "balance_key": source_config["balance_key"],
+                "output_token_ata": destination_config["token_ata"],
+                "output_balance_key": destination_config["balance_key"],
+            }
+        )
+    first_jupiter_index = next(
+        (
+            index
+            for index, strategy in enumerate(strategies)
+            if strategy["venue_order"] == "jupiter_first"
+        ),
+        len(strategies),
+    )
+    strategies[first_jupiter_index:first_jupiter_index] = cross_strategies
+    return strategies
 
 
 @dataclass(frozen=True)
@@ -821,6 +907,26 @@ def print_portfolio(
 # ============================================================
 # SWAP EXECUTION logic
 # ============================================================
+def jupiter_order_fee_params():
+    if JUPITER_PRIORITY_FEE_MODE == "recommended":
+        return {}
+    return {
+        "priorityFeeLamports": str(JUPITER_PRIORITY_FEE_CAP_LAMPORTS),
+        "broadcastFeeType": "maxCap",
+    }
+
+
+def jupiter_swap_priority_fee_request():
+    if JUPITER_PRIORITY_FEE_MODE == "recommended":
+        return None
+    return {
+        "priorityLevelWithMaxLamports": {
+            "maxLamports": JUPITER_PRIORITY_FEE_CAP_LAMPORTS,
+            "priorityLevel": "medium",
+        }
+    }
+
+
 def get_jup_quote(session, input_mint, output_mint, amount_raw, taker=None, slippage_bps=0):
     slippage_bps = max(0, int(slippage_bps))
     params = {
@@ -832,7 +938,7 @@ def get_jup_quote(session, input_mint, output_mint, amount_raw, taker=None, slip
     if taker:
         params["taker"] = taker
         params["dynamicComputeUnitLimit"] = "true"
-        params["maxLamports"] = str(PRIORITY_FEE)
+        params.update(jupiter_order_fee_params())
         
     resp = session.get(f"{JUP_API}/order", params=params, headers=get_jup_headers(), timeout=10)
     if resp.status_code == 200:
@@ -906,6 +1012,16 @@ def cap_jup_priority_fee(tx_bytes: bytes, max_fee_lamports: int = 30000) -> byte
         
     return tx_bytes
 
+
+def apply_jup_priority_fee_policy(tx_bytes: bytes) -> bytes:
+    if JUPITER_PRIORITY_FEE_MODE == "recommended":
+        print("[*] Using Jupiter-recommended priority fee without a local cap.")
+        return tx_bytes
+    return cap_jup_priority_fee(
+        tx_bytes,
+        JUPITER_PRIORITY_FEE_CAP_LAMPORTS,
+    )
+
 def execute_jup_swap(
     session,
     client,
@@ -919,7 +1035,7 @@ def execute_jup_swap(
     
     if tx_b64:
         tx_bytes = base64.b64decode(tx_b64)
-        tx_bytes = cap_jup_priority_fee(tx_bytes, PRIORITY_FEE)
+        tx_bytes = apply_jup_priority_fee_policy(tx_bytes)
         tx = VersionedTransaction.from_bytes(tx_bytes)
         signed_tx = VersionedTransaction(tx.message, [keypair])
         signed_tx_b64 = base64.b64encode(bytes(signed_tx)).decode('utf-8')
@@ -1007,19 +1123,23 @@ def execute_jup_swap(
                 error="RPC returned no transaction signature",
             )
 
+    swap_request = {
+        "quoteResponse": quote,
+        "taker": str(keypair.pubkey()),
+        "wrapAndUnwrapSol": False,
+        "jitoTipLamports": JITO_TIP,
+    }
+    priority_fee_request = jupiter_swap_priority_fee_request()
+    if priority_fee_request is not None:
+        swap_request["prioritizationFeeLamports"] = priority_fee_request
+
     try:
-        resp = session.post(f"{JUP_API}/swap", json={
-            "quoteResponse": quote,
-            "taker": str(keypair.pubkey()),
-            "wrapAndUnwrapSol": False,
-            "prioritizationFeeLamports": {
-                "priorityLevelWithMaxLamports": {
-                    "maxLamports": PRIORITY_FEE,
-                    "priorityLevel": "medium",
-                }
-            },
-            "jitoTipLamports": JITO_TIP,
-        }, headers=get_jup_headers(), timeout=15)
+        resp = session.post(
+            f"{JUP_API}/swap",
+            json=swap_request,
+            headers=get_jup_headers(),
+            timeout=15,
+        )
     except requests.RequestException as exc:
         print(f"[!] Jupiter swap transaction request failed before submission: {exc}")
         return SwapSubmissionResult(False, error=str(exc))
@@ -1033,7 +1153,7 @@ def execute_jup_swap(
         return SwapSubmissionResult(False, error="missing swapTransaction")
         
     tx_bytes = base64.b64decode(tx_b64)
-    tx_bytes = cap_jup_priority_fee(tx_bytes, PRIORITY_FEE)
+    tx_bytes = apply_jup_priority_fee_policy(tx_bytes)
     tx = VersionedTransaction.from_bytes(tx_bytes)
     
     signed_tx = VersionedTransaction(tx.message, [keypair])
@@ -1311,6 +1431,13 @@ def main():
 
     wallet = keypair.pubkey()
     print(f"[*] Wallet: {wallet}")
+    if JUPITER_PRIORITY_FEE_MODE == "recommended":
+        print("[*] Jupiter priority fee policy: recommended (no local cap)")
+    else:
+        print(
+            "[*] Jupiter priority fee policy: "
+            f"cap at {JUPITER_PRIORITY_FEE_CAP_LAMPORTS} lamports"
+        )
     state_store = BotStateStore()
     recovery_store = RecoveryStore()
     state_store.start_session(wallet)
@@ -1511,25 +1638,11 @@ def main():
                     "balance_key": "user_usdt",
                 },
             }
-            strategies = []
-            for token, venue_order in usdc_strategy_directions():
-                config = token_configs[token]
-                stable_first = venue_order == "stable_first"
-                strategies.append(
-                    {
-                        "token": token,
-                        "venue_order": venue_order,
-                        "jup_input_mint": config["mint"] if stable_first else USDC_MINT,
-                        "jup_output_mint": USDC_MINT if stable_first else config["mint"],
-                        "stable_destination_pool": (
-                            config["stable_pool"]
-                            if stable_first
-                            else pool_usdc_raw / 10**DECIMALS
-                        ),
-                        "token_ata": config["token_ata"],
-                        "balance_key": config["balance_key"],
-                    }
-                )
+            strategies = build_usdc_strategies(
+                token_configs,
+                pool_usdc_raw / 10**DECIMALS,
+                usdg_drain_min_remainder_raw / 10**DECIMALS,
+            )
             
             estimated_execution_cost_usd = (
                 state_store.estimated_execution_cost_usd(DEFAULT_EXECUTION_COST_USD)
@@ -1539,8 +1652,10 @@ def main():
             
             for strategy in strategies:
                 token = strategy["token"]
+                cross_route = strategy["route_kind"] == "cross"
+                output_token = strategy["output_token"]
                 venue_order = strategy["venue_order"]
-                route_key = (token, venue_order)
+                route_key = (token, venue_order, output_token)
                 if time.monotonic() < stable_reserve_backoff_until.get(route_key, 0):
                     continue
                 pool_to = strategy["stable_destination_pool"]
@@ -1636,9 +1751,16 @@ def main():
                         or pool_to < effective_min_trade_size + protected_reserve_usd
                     ):
                         continue
-                    max_feasible_size = int(
-                        min(usdc_bal, pool_to - protected_reserve_usd)
-                    )
+                    capacity_limits = [
+                        usdc_bal,
+                        pool_to - protected_reserve_usd,
+                    ]
+                    if cross_route:
+                        capacity_limits.append(
+                            strategy["stable_exit_pool"]
+                            - strategy["stable_exit_reserve"]
+                        )
+                    max_feasible_size = int(min(capacity_limits))
                     coarse_sizes = generate_candidate_sizes(max_feasible_size, effective_min_trade_size)
                     if not coarse_sizes:
                         continue
@@ -1646,9 +1768,20 @@ def main():
                 if usdg_drain_mode:
                     route_stable_reserve_usd = 0
 
-                route_cost_estimate = estimated_execution_cost_usd
+                route_cost_estimate = estimated_execution_cost_usd * (
+                    CROSS_ROUTE_EXECUTION_COST_MULTIPLIER
+                    if cross_route
+                    else 1.0
+                )
                 evaluated = {}
-                venue_label = "Stable->Jupiter" if venue_order == "stable_first" else "Jupiter->Stable"
+                if cross_route:
+                    venue_label = "Stable->Jupiter->Stable"
+                else:
+                    venue_label = (
+                        "Stable->Jupiter"
+                        if venue_order == "stable_first"
+                        else "Jupiter->Stable"
+                    )
                 if usdg_drain_mode:
                     print(
                         f"[*] USDG drain sizing USDC/{token} ({venue_label}): "
@@ -1658,10 +1791,29 @@ def main():
                     )
                 else:
                     print(
-                        f"[*] Dynamic sizing USDC/{token} ({venue_label}): "
+                        f"[*] Dynamic sizing USDC/{token}"
+                        f"{('/' + output_token) if cross_route else ''} ({venue_label}): "
                         f"{coarse_sizes[0]}-{coarse_sizes[-1]} tokens | "
                         f"estimated cost ${route_cost_estimate:.6f} | "
                         f"minimum {effective_min_trade_size}"
+                    )
+
+                def route_pools_can_settle(metrics):
+                    if cross_route:
+                        return cross_route_pools_can_settle(
+                            metrics["input_amount"],
+                            metrics["output_amount"],
+                            pool_to,
+                            strategy["stable_exit_pool"],
+                            entry_reserve=route_stable_reserve_usd,
+                            usdc_reserve=strategy["stable_exit_reserve"],
+                        )
+                    return stable_pool_can_settle(
+                        venue_order,
+                        metrics["input_amount"],
+                        metrics["output_amount"],
+                        pool_to,
+                        reserve=route_stable_reserve_usd,
                     )
 
                 def evaluate_size(size):
@@ -1694,13 +1846,7 @@ def main():
                         token,
                         venue_order,
                     )
-                    pool_can_settle = stable_pool_can_settle(
-                        venue_order,
-                        input_human,
-                        metrics["output_amount"],
-                        pool_to,
-                        reserve=route_stable_reserve_usd,
-                    )
+                    pool_can_settle = route_pools_can_settle(metrics)
                     eligible = pool_can_settle and is_profitable_candidate(
                         metrics,
                         route_min_net_profit,
@@ -1710,7 +1856,14 @@ def main():
                         marker = "skip: Stable pool capacity"
                     else:
                         marker = "eligible" if eligible else "skip"
-                    jup_pair = f"{token}->USDC" if venue_order == "stable_first" else f"USDC->{token}"
+                    if cross_route:
+                        jup_pair = f"{token}->{output_token}"
+                    else:
+                        jup_pair = (
+                            f"{token}->USDC"
+                            if venue_order == "stable_first"
+                            else f"USDC->{token}"
+                        )
                     print(
                         f"    {input_human:>12.6f} {jup_pair} -> {out_human:.6f} | "
                         f"gross ${metrics['gross_profit_usd']:+.6f} | "
@@ -1740,13 +1893,7 @@ def main():
                         result[1],
                         route_min_net_profit,
                         MIN_NET_RETURN_BPS,
-                    ) and stable_pool_can_settle(
-                        venue_order,
-                        result[1]["input_amount"],
-                        result[1]["output_amount"],
-                        pool_to,
-                        reserve=route_stable_reserve_usd,
-                    )
+                    ) and route_pools_can_settle(result[1])
                 }
                 if eligible_coarse:
                     coarse_best_size = max(
@@ -1784,13 +1931,7 @@ def main():
                         metrics,
                         route_min_net_profit,
                         MIN_NET_RETURN_BPS,
-                    ) and stable_pool_can_settle(
-                        venue_order,
-                        metrics["input_amount"],
-                        metrics["output_amount"],
-                        pool_to,
-                        reserve=route_stable_reserve_usd,
-                    )
+                    ) and route_pools_can_settle(metrics)
                 ]
                 if not eligible_results:
                     continue
@@ -1830,14 +1971,29 @@ def main():
                 selected_stable_reserve_usd,
             ) = best_route
             token = selected_strategy["token"]
+            cross_route = selected_strategy["route_kind"] == "cross"
+            output_token = selected_strategy["output_token"]
             venue_order = selected_strategy["venue_order"]
-            venue_label = "Stable->Jupiter" if venue_order == "stable_first" else "Jupiter->Stable"
+            if cross_route:
+                venue_label = "Stable->Jupiter->Stable"
+            else:
+                venue_label = (
+                    "Stable->Jupiter"
+                    if venue_order == "stable_first"
+                    else "Jupiter->Stable"
+                )
             print(
-                f"\n[*] Selected USDC route: USDC/{token} ({venue_label}) | "
+                f"\n[*] Selected USDC route: USDC/{token}"
+                f"{('/' + output_token) if cross_route else ''} ({venue_label}) | "
                 f"size {swap_size} | estimated net ${selected_metrics['net_profit_usd']:.6f} | "
                 f"return {selected_metrics['net_return_bps']:.4f} bps"
             )
-            if venue_order == "stable_first":
+            if cross_route:
+                route_label = (
+                    f"USDC -> {token} (Stable) -> {output_token} (Jupiter) "
+                    "-> USDC (Stable)"
+                )
+            elif venue_order == "stable_first":
                 route_label = f"USDC -> {token} (Stable) -> USDC (Jupiter)"
             else:
                 route_label = f"USDC -> {token} (Jupiter) -> USDC (Stable)"
@@ -1884,13 +2040,23 @@ def main():
                     venue_order,
                 )
                 verification_metrics.append(metrics)
-                pool_can_settle = stable_pool_can_settle(
-                    venue_order,
-                    swap_size,
-                    metrics["output_amount"],
-                    selected_strategy["stable_destination_pool"],
-                    reserve=selected_stable_reserve_usd,
-                )
+                if cross_route:
+                    pool_can_settle = cross_route_pools_can_settle(
+                        swap_size,
+                        metrics["output_amount"],
+                        selected_strategy["stable_destination_pool"],
+                        selected_strategy["stable_exit_pool"],
+                        entry_reserve=selected_stable_reserve_usd,
+                        usdc_reserve=selected_strategy["stable_exit_reserve"],
+                    )
+                else:
+                    pool_can_settle = stable_pool_can_settle(
+                        venue_order,
+                        swap_size,
+                        metrics["output_amount"],
+                        selected_strategy["stable_destination_pool"],
+                        reserve=selected_stable_reserve_usd,
+                    )
                 if pool_can_settle and is_profitable_candidate(
                     metrics,
                     selected_min_net_profit,
@@ -1949,6 +2115,17 @@ def main():
                 intermediate_baseline_raw = get_token_balance(client, token_ata)
             except Exception:
                 intermediate_baseline_raw = monitor.get(balance_key)
+            output_token_ata = selected_strategy.get("output_token_ata")
+            output_balance_key = selected_strategy.get("output_balance_key")
+            output_baseline_raw = None
+            if cross_route:
+                try:
+                    output_baseline_raw = get_token_balance(
+                        client,
+                        output_token_ata,
+                    )
+                except Exception:
+                    output_baseline_raw = monitor.get(output_balance_key)
 
             arb_successful = False
             failure_note = ""
@@ -2065,7 +2242,7 @@ def main():
                     pending_store=state_store,
                     submission_label=f"Stable.com USDC->{token} entry",
                 )
-                selected_route_key = (token, venue_order)
+                selected_route_key = (token, venue_order, output_token)
                 if not stable_result.may_have_landed:
                     failure_note = "Stable.com entry failed"
                     reserve_constraint = stable_result.reserve_constraint
@@ -2210,6 +2387,299 @@ def main():
                         for exit_attempt in range(1, 11):
                             if remaining_raw <= tolerance_raw:
                                 arb_successful = True
+                                break
+
+                            if cross_route:
+                                final_quote = get_jup_quote(
+                                    session,
+                                    selected_strategy["jup_input_mint"],
+                                    selected_strategy["jup_output_mint"],
+                                    remaining_raw,
+                                    taker=str(wallet),
+                                )
+                                if not final_quote:
+                                    failure_note = (
+                                        f"Jupiter {token}->{output_token} quote unavailable"
+                                    )
+                                    print(
+                                        f"[!] {failure_note} ({exit_attempt}/10)"
+                                    )
+                                    time.sleep(2)
+                                    continue
+
+                                cross_out_raw = int(final_quote.get("outAmount", 0))
+                                try:
+                                    current_sol_lamports = int(
+                                        client.get_balance(
+                                            wallet,
+                                            commitment=Confirmed,
+                                        ).value
+                                        or 0
+                                    )
+                                except Exception as exc:
+                                    failure_note = (
+                                        "Cannot revalidate cross-route fees before the "
+                                        f"Jupiter conversion: {exc}"
+                                    )
+                                    print(f"[!] {failure_note}")
+                                    break
+                                sunk_sol_cost_usd = (
+                                    max(
+                                        0,
+                                        attempt_before["sol_lamports"]
+                                        - current_sol_lamports,
+                                    )
+                                    / 10**9
+                                    * attempt_before["sol_price"]
+                                )
+                                cross_metrics = calculate_route_metrics(
+                                    swap_size,
+                                    cross_out_raw / 10**DECIMALS,
+                                    selected_cost_estimate + sunk_sol_cost_usd,
+                                    token,
+                                    venue_order,
+                                )
+                                try:
+                                    live_pool_usdc_raw = get_token_balance(
+                                        client,
+                                        pool_usdc_ata,
+                                    )
+                                except Exception:
+                                    live_pool_usdc_raw = monitor.get("pool_usdc")
+                                stable_exit_reserve_raw = int(
+                                    round(
+                                        selected_strategy["stable_exit_reserve"]
+                                        * 10**DECIMALS
+                                    )
+                                )
+                                stable_exit_capacity_raw = max(
+                                    0,
+                                    live_pool_usdc_raw - stable_exit_reserve_raw,
+                                )
+                                if not is_profitable_candidate(
+                                    cross_metrics,
+                                    selected_min_net_profit,
+                                    MIN_NET_RETURN_BPS,
+                                ):
+                                    failure_note = (
+                                        f"Jupiter {token}->{output_token} no longer keeps "
+                                        f"the full cycle profitable (net "
+                                        f"${cross_metrics['net_profit_usd']:.6f})"
+                                    )
+                                    print(
+                                        f"[-] {failure_note} ({exit_attempt}/10); waiting"
+                                    )
+                                    time.sleep(3)
+                                    continue
+                                if cross_out_raw > stable_exit_capacity_raw:
+                                    failure_note = (
+                                        "Stable.com USDC pool cannot settle the expected "
+                                        f"{cross_out_raw / 10**DECIMALS:.6f} "
+                                        f"{output_token} output"
+                                    )
+                                    print(
+                                        f"[-] {failure_note} ({exit_attempt}/10); waiting"
+                                    )
+                                    time.sleep(3)
+                                    continue
+
+                                state_store.set_status(
+                                    "executing_jupiter",
+                                    f"Converting {token} to {output_token} on Jupiter",
+                                    route=route_label,
+                                )
+                                print(
+                                    f"[*] Jupiter middle leg {exit_attempt}/10: "
+                                    f"{remaining_raw / 10**DECIMALS:.6f} {token} -> "
+                                    f"{output_token}"
+                                )
+                                middle_cursor = monitor.snapshot(
+                                    [balance_key, output_balance_key]
+                                )
+                                submission = execute_jup_swap(
+                                    session,
+                                    client,
+                                    keypair,
+                                    final_quote,
+                                    pending_store=state_store,
+                                    submission_label=(
+                                        f"Jupiter {token}->{output_token} middle leg"
+                                    ),
+                                )
+                                if not submission.may_have_landed:
+                                    failure_note = (
+                                        f"Jupiter {token}->{output_token} submission failed"
+                                    )
+                                    print(
+                                        f"[!] {failure_note} ({exit_attempt}/10)"
+                                    )
+                                    time.sleep(2)
+                                    continue
+
+                                (
+                                    middle_confirmed,
+                                    middle_balances,
+                                    middle_confirmation_source,
+                                ) = confirm_transfer_ws_first(
+                                    client,
+                                    monitor,
+                                    {
+                                        balance_key: (
+                                            token_ata,
+                                            lambda balance: acquired_delta_is_cleared(
+                                                balance,
+                                                intermediate_baseline_raw,
+                                                tolerance_raw,
+                                            ),
+                                        ),
+                                        output_balance_key: (
+                                            output_token_ata,
+                                            lambda balance: balance
+                                            > output_baseline_raw,
+                                        ),
+                                    },
+                                    middle_cursor.revisions,
+                                    f"Jupiter {token}->{output_token} middle leg",
+                                    submission=submission,
+                                    pending_store=state_store,
+                                )
+                                converted_raw = acquired_balance_delta(
+                                    middle_balances.get(
+                                        output_balance_key,
+                                        output_baseline_raw,
+                                    ),
+                                    output_baseline_raw,
+                                )
+                                middle_confirmed = (
+                                    middle_confirmed and converted_raw > 0
+                                )
+                                if not middle_confirmed:
+                                    failure_note = (
+                                        f"Jupiter {token}->{output_token} did not produce "
+                                        f"a confirmed {output_token} balance delta"
+                                    )
+                                    if jupiter_entry_retry_is_safe(
+                                        middle_confirmation_source
+                                    ):
+                                        print(
+                                            f"[!] {failure_note}; requesting a fresh order"
+                                        )
+                                        time.sleep(1)
+                                        continue
+                                    break
+
+                                middle_snapshot = {
+                                    "user_usdc": entry_usdc_after_raw,
+                                    balance_key: middle_balances[balance_key],
+                                    output_balance_key: middle_balances[
+                                        output_balance_key
+                                    ],
+                                }
+                                final_raw_snapshot = accounting_raw_snapshot(
+                                    attempt_before,
+                                    confirmed_balances=middle_snapshot,
+                                    tokens=(token, output_token),
+                                )
+                                print(
+                                    f"[+] Jupiter produced "
+                                    f"{converted_raw / 10**DECIMALS:.6f} {output_token}"
+                                )
+
+                                try:
+                                    live_pool_usdc_raw = get_token_balance(
+                                        client,
+                                        pool_usdc_ata,
+                                    )
+                                except Exception:
+                                    live_pool_usdc_raw = monitor.get("pool_usdc")
+                                stable_exit_capacity_raw = max(
+                                    0,
+                                    live_pool_usdc_raw - stable_exit_reserve_raw,
+                                )
+                                if converted_raw > stable_exit_capacity_raw:
+                                    failure_note = (
+                                        "Stable.com USDC pool changed after the Jupiter "
+                                        f"middle leg and cannot settle {converted_raw / 10**DECIMALS:.6f} "
+                                        f"{output_token}"
+                                    )
+                                    break
+
+                                state_store.set_status(
+                                    "executing_stable",
+                                    f"Returning {output_token} to USDC on Stable.com",
+                                    route=route_label,
+                                )
+                                converted_human = converted_raw / 10**DECIMALS
+                                print(
+                                    f"[*] Stable.com final leg: {converted_human:.6f} "
+                                    f"{output_token} -> USDC"
+                                )
+                                stable_exit_cursor = monitor.snapshot(
+                                    [output_balance_key, "user_usdc"]
+                                )
+                                stable_exit_result = execute_stable_swap(
+                                    session,
+                                    client,
+                                    keypair,
+                                    output_token,
+                                    "USDC",
+                                    converted_human,
+                                    pending_store=state_store,
+                                    submission_label=(
+                                        f"Stable.com {output_token}->USDC final leg"
+                                    ),
+                                )
+                                if not stable_exit_result.may_have_landed:
+                                    failure_note = (
+                                        f"Stable.com {output_token}->USDC final leg failed"
+                                    )
+                                    break
+
+                                (
+                                    stable_exit_confirmed,
+                                    stable_exit_balances,
+                                    _,
+                                ) = confirm_transfer_ws_first(
+                                    client,
+                                    monitor,
+                                    {
+                                        output_balance_key: (
+                                            output_token_ata,
+                                            lambda balance: acquired_delta_is_cleared(
+                                                balance,
+                                                output_baseline_raw,
+                                                tolerance_raw,
+                                            ),
+                                        ),
+                                        "user_usdc": (
+                                            usdc_ata,
+                                            lambda balance: balance
+                                            > entry_usdc_after_raw,
+                                        ),
+                                    },
+                                    stable_exit_cursor.revisions,
+                                    f"Stable.com {output_token}->USDC final leg",
+                                    submission=stable_exit_result.submission,
+                                    pending_store=state_store,
+                                )
+                                if stable_exit_confirmed:
+                                    coherent_exit_balances = dict(middle_snapshot)
+                                    coherent_exit_balances.update(
+                                        stable_exit_balances
+                                    )
+                                    final_raw_snapshot = accounting_raw_snapshot(
+                                        attempt_before,
+                                        confirmed_balances=coherent_exit_balances,
+                                        tokens=(token, output_token),
+                                    )
+                                    selected_metrics = cross_metrics
+                                    arb_successful = True
+                                else:
+                                    failure_note = (
+                                        f"Stable.com {output_token}->USDC final leg was "
+                                        "submitted, but fresh token clearance and USDC "
+                                        "credit were not observed"
+                                    )
                                 break
 
                             final_quote = get_jup_quote(
@@ -2616,31 +3086,61 @@ def main():
             if arb_successful:
                 state_store.set_status("scanning", "Scanning markets")
             else:
-                try:
-                    unresolved_raw = acquired_balance_delta(
-                        get_token_balance(client, token_ata),
-                        intermediate_baseline_raw,
-                    )
-                except Exception:
-                    unresolved_raw = acquired_balance_delta(
-                        monitor.get(balance_key),
-                        intermediate_baseline_raw,
-                    )
-                if unresolved_raw > tolerance_raw:
-                    plan = recovery_store.schedule(
+                recovery_positions = [
+                    (
                         token,
+                        token_ata,
+                        balance_key,
+                        intermediate_baseline_raw,
+                    )
+                ]
+                if cross_route:
+                    recovery_positions.append(
+                        (
+                            output_token,
+                            output_token_ata,
+                            output_balance_key,
+                            output_baseline_raw,
+                        )
+                    )
+                unresolved_position = None
+                for (
+                    recovery_token,
+                    recovery_ata,
+                    recovery_balance_key,
+                    recovery_baseline_raw,
+                ) in recovery_positions:
+                    try:
+                        unresolved_raw = acquired_balance_delta(
+                            get_token_balance(client, recovery_ata),
+                            recovery_baseline_raw,
+                        )
+                    except Exception:
+                        unresolved_raw = acquired_balance_delta(
+                            monitor.get(recovery_balance_key),
+                            recovery_baseline_raw,
+                        )
+                    if unresolved_raw > tolerance_raw:
+                        unresolved_position = (recovery_token, unresolved_raw)
+                        break
+
+                if unresolved_position is not None:
+                    recovery_token, unresolved_raw = unresolved_position
+                    plan = recovery_store.schedule(
+                        recovery_token,
                         unresolved_raw,
                         RECOVERY_MIN_NET_PROFIT_USD,
-                        f"Jupiter {token}->USDC recovery",
+                        f"Jupiter {recovery_token}->USDC recovery",
                         note,
                     )
                     print(
-                        f"[recovery] Scheduled exact {unresolved_raw / 10**DECIMALS:.6f} {token} "
+                        f"[recovery] Scheduled exact "
+                        f"{unresolved_raw / 10**DECIMALS:.6f} {recovery_token} "
                         f"return when net profit reaches ${plan['min_net_profit_usd']:.2f}."
                     )
                     state_store.set_status(
                         "recovering",
-                        f"Recovery worker is monitoring {token}",
+                        f"Recovery worker is monitoring {recovery_token}",
                         route=route_label,
                         error=note,
                     )

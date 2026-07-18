@@ -7,6 +7,8 @@ from sizing import (
     adjusted_drain_minimum_raw,
     calculate_quote_metrics,
     calculate_route_metrics,
+    cross_route_pools_can_settle,
+    cross_token_cycles,
     drain_candidate_is_valid,
     generate_candidate_sizes,
     generate_drain_candidate_amounts_raw,
@@ -51,6 +53,44 @@ class DynamicSizingTests(unittest.TestCase):
                 ("PYUSD", "jupiter_first"),
                 ("USDT", "jupiter_first"),
             ],
+        )
+
+    def test_cross_token_cycles_include_both_usdg_pyusd_directions(self):
+        self.assertEqual(
+            cross_token_cycles(),
+            [("USDG", "PYUSD"), ("PYUSD", "USDG")],
+        )
+
+    def test_cross_route_requires_capacity_in_both_stable_pools(self):
+        self.assertTrue(
+            cross_route_pools_can_settle(
+                5_000,
+                5_000.20,
+                entry_token_pool=5_003,
+                usdc_exit_pool=5_003,
+                entry_reserve=1.9,
+                usdc_reserve=1.9,
+            )
+        )
+        self.assertFalse(
+            cross_route_pools_can_settle(
+                5_000,
+                5_000.20,
+                entry_token_pool=5_001,
+                usdc_exit_pool=10_000,
+                entry_reserve=1.9,
+                usdc_reserve=1.9,
+            )
+        )
+        self.assertFalse(
+            cross_route_pools_can_settle(
+                5_000,
+                5_000.20,
+                entry_token_pool=10_000,
+                usdc_exit_pool=5_001,
+                entry_reserve=1.9,
+                usdc_reserve=1.9,
+            )
         )
 
     def test_usdt_stable_settlement_charges_ten_basis_points(self):

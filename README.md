@@ -37,11 +37,13 @@ Accounting persists in `bot_state.json`. On the first upgraded run, the old `pnl
 
 ### Dynamic trade sizing
 
-All arbitrage cycles are anchored in USDC. The scanner evaluates these five strategies:
+All arbitrage cycles are anchored in USDC. The scanner evaluates these seven strategies:
 
 ```text
 USDC -> USDG  on Stable.com -> USDC on Jupiter
 USDC -> PYUSD on Stable.com -> USDC on Jupiter
+USDC -> USDG  on Stable.com -> PYUSD on Jupiter -> USDC on Stable.com
+USDC -> PYUSD on Stable.com -> USDG  on Jupiter -> USDC on Stable.com
 USDC -> USDG  on Jupiter    -> USDC on Stable.com
 USDC -> PYUSD on Jupiter    -> USDC on Stable.com
 USDC -> USDT  on Jupiter    -> USDC on Stable.com
@@ -58,7 +60,15 @@ The USDT cycle has a separate hard minimum net profit of $5.00, checked after
 the 0.1% Stable.com fee and estimated execution costs. USDG and PYUSD retain
 their existing route-specific profit thresholds.
 
-USDG↔PYUSD cycles and strategies that begin from existing USDG/PYUSD inventory are not considered. Execution measures the intermediate-token balance before and after the entry and exits only that delta, leaving pre-existing token balances untouched.
+The USDG↔PYUSD strategies are three-leg cycles and always begin and end in
+USDC; they never start from existing USDG/PYUSD inventory. Before entry, the
+scanner requires capacity both in the Stable.com pool that supplies the first
+token and in the Stable.com USDC pool that settles the final token. It repeats
+the USDC-capacity check immediately before and after the Jupiter middle leg.
+Execution tracks separate baselines for both intermediate tokens and swaps only
+the deltas acquired by the cycle, leaving pre-existing balances untouched. If a
+later leg fails, recovery is scheduled for whichever token is actually left in
+the wallet.
 
 The scanner checks the strategies in the order above, prioritizing Stable.com entries before Jupiter entries so a Stable.com rejection cannot strand a Jupiter-acquired intermediate balance. For each feasible direction it:
 
@@ -76,6 +86,9 @@ MIN_TRADE_SIZE_USD=1000
 MIN_NET_PROFIT_USD=0.10
 MIN_NET_RETURN_BPS=0
 JUPITER_ENTRY_MAX_RETRIES=5
+JUPITER_PRIORITY_FEE_MODE=cap
+JUPITER_PRIORITY_FEE_CAP_LAMPORTS=10000
+CROSS_ROUTE_EXECUTION_COST_MULTIPLIER=1.5
 DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 ```
@@ -84,6 +97,11 @@ With these defaults, every size has the same $0.10 net-profit requirement. When 
 
 `MIN_NET_RETURN_BPS` remains an optional eligibility floor. It can reject a quote, but it is not used to rank quotes that pass.
 
+Three-leg USDG/PYUSD cycles reserve 1.5 times the normal estimated execution
+cost by default because they submit three transactions instead of two. Change
+`CROSS_ROUTE_EXECUTION_COST_MULTIPLIER` only if the observed fee history justifies
+a different conservative multiplier.
+
 To limit Jupiter API usage, ordinary sizing probes only the minimum, `2x` minimum, `5x` minimum, and exact maximum before refining around the best anchor. For Jupiter-first routes, the second successful wallet-specific verification order is submitted directly as the entry instead of requesting an identical third executable order.
 
 If that Jupiter entry definitively fails on-chain, expires without landing, or
@@ -91,6 +109,14 @@ fails before submission, the bot requests up to five fresh executable orders.
 Every retry must still pass the current net-profit and Stable.com pool-capacity
 checks. Its profit calculation also deducts the SOL fees already spent by the
 failed entries. Ambiguous transactions are never retried.
+
+Jupiter priority fees default to `cap` mode, which asks Jupiter to treat
+`JUPITER_PRIORITY_FEE_CAP_LAMPORTS` as a maximum and also enforces that ceiling
+locally before signing. Set `JUPITER_PRIORITY_FEE_MODE=recommended` to omit the
+fee override and sign Jupiter's automatically selected fee unchanged. Recommended
+mode can spend substantially more SOL during congestion. This setting affects
+only Jupiter transactions; the Stable.com leg keeps its existing compute-unit
+price.
 
 #### USDG reserve drain mode
 

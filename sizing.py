@@ -13,6 +13,17 @@ def usdc_strategy_directions(tokens=("USDG", "PYUSD"), jupiter_first_only=("USDT
     return directions
 
 
+def cross_token_cycles(tokens=("USDG", "PYUSD")):
+    """Return ordered Stable->Jupiter->Stable cycles between distinct tokens."""
+    normalized = tuple(str(token).upper() for token in tokens)
+    return [
+        (source, destination)
+        for source in normalized
+        for destination in normalized
+        if source != destination
+    ]
+
+
 def stable_swap_output_amount(asset_from, asset_to, input_amount, usdt_fee_bps=10):
     """Return Stable.com's fee-adjusted output; USDT/USDC costs 10 bps."""
     amount = float(input_amount)
@@ -62,6 +73,23 @@ def stable_pool_can_settle(
     )
     capacity = max(0.0, float(stable_destination_pool) - float(reserve))
     return stable_amount <= capacity
+
+
+def cross_route_pools_can_settle(
+    usdc_principal,
+    jupiter_output,
+    entry_token_pool,
+    usdc_exit_pool,
+    entry_reserve=1,
+    usdc_reserve=1,
+):
+    """Check both Stable.com pools required by a three-leg cross-token cycle."""
+    entry_capacity = max(0.0, float(entry_token_pool) - float(entry_reserve))
+    exit_capacity = max(0.0, float(usdc_exit_pool) - float(usdc_reserve))
+    return (
+        float(usdc_principal) <= entry_capacity
+        and float(jupiter_output) <= exit_capacity
+    )
 
 
 def acquired_balance_delta(current_raw, baseline_raw):
