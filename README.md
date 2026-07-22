@@ -15,6 +15,7 @@ The dashboard exposes:
 - Current wallet value and SOL/USD estimate.
 - Exact observed SOL decrease for each attempt and its execution-time USD estimate.
 - Current execution stage, route, uptime, errors, and recent accounting records.
+- A GitHub-style 52-week calendar showing the realized USDC-equivalent profit for each UTC day.
 
 Machine-readable endpoints:
 
@@ -33,7 +34,7 @@ realized net P&L  = stablecoin change - SOL cost USD
 
 USDC, USDG, and PYUSD are estimated at $1; USDT is valued at its $0.999 Stable.com redemption value so an exposed USDT position does not recognize the 0.1% exit fee as profit. The SOL decrease is measured directly from confirmed wallet lamport balances immediately before and after the complete attempt, so it includes base fees, priority fees, and native SOL charged during that attempt. External SOL transfers made from the same wallet during an attempt would also appear as consumption; use a dedicated bot wallet for clean accounting.
 
-Accounting persists in `bot_state.json`. On the first upgraded run, the old `pnl.txt` value is retained separately as a **prior-method estimate**; it is not mixed into the new realized net P&L because it did not contain exact per-attempt SOL consumption. `pnl.txt` then remains as a backwards-compatible summary of the new method. Both files are intentionally excluded from Git so a server pull does not erase live state.
+Accounting, live dashboard state, and the complete attempt ledger persist in the SQLite database `bot_state.db`. Daily USDC-equivalent profit is calculated from the attempt ledger by UTC day using the same realized net P&L method above. On the first upgraded run, existing `bot_state.json` records are imported into the database. If no JSON state exists, the old `pnl.txt` value is retained separately as a **prior-method estimate**; it is not mixed into the new realized net P&L because it did not contain exact per-attempt SOL consumption. The legacy files are no longer written after migration. Runtime database and legacy state files are intentionally excluded from Git so a server pull does not erase live state.
 
 ### Dynamic trade sizing
 
@@ -140,7 +141,7 @@ The protocol floor is hard-clamped, so legacy or mistaken configuration cannot l
 
 Balance confirmation is WebSocket-first at Solana's `confirmed` commitment. The monitor stores a revision and slot for every subscribed account, and the bot captures those cursors immediately before transaction submission. An entry requires fresh updates showing the intermediate token received and USDC debited. An exit requires fresh updates showing the intermediate token cleared and USDC credited. Events that arrive while a submit call is still returning are consumed immediately; stale cached balances cannot confirm a new transaction. The bot will not take first-leg exposure until all account subscriptions are ready. If no matching event arrives within the configured timeout, it takes one RPC balance snapshot instead of polling 11-16 times.
 
-Every signed transaction stores its local signature and blockhash atomically in `bot_state.json` before broadcast. If an RPC or Jupiter HTTP response is lost, or the first snapshot is still too early, the bot freezes new submissions and reconciles that signature with delayed WS updates. The lock survives the panel's automatic process restart. It resumes only after the transaction is confirmed/failed or an unrecorded transaction's blockhash has expired, preventing a hidden accepted transaction from being submitted twice. A confirmed transaction with unexpected balances stays locked for operator review instead of being balance-polled indefinitely.
+Every signed transaction stores its local signature and blockhash atomically in `bot_state.db` before broadcast. If an RPC or Jupiter HTTP response is lost, or the first snapshot is still too early, the bot freezes new submissions and reconciles that signature with delayed WS updates. The lock survives the panel's automatic process restart. It resumes only after the transaction is confirmed/failed or an unrecorded transaction's blockhash has expired, preventing a hidden accepted transaction from being submitted twice. A confirmed transaction with unexpected balances stays locked for operator review instead of being balance-polled indefinitely.
 
 The scanner also refuses every new first leg while the wallet holds more than the normal 0.1-token intermediate tolerance in USDG, PYUSD, or USDT. This applies equally to a balance detected at startup. It writes one durable recovery plan containing the exact token amount. The separately supervised `recovery_worker.py` first checks the wallet-specific executable Jupiter order. If its conservative net recovery profit is at least `$0.10`, it returns through Jupiter; otherwise (including no Jupiter quote) it submits the Stable.com token-to-USDC exit. If Stable.com's USDT capacity is temporarily below the position, the worker safely returns the largest amount that preserves a $1 pool reserve, persists the confirmed remainder, and continues recovery. The Jupiter calculation includes the configured execution-cost reserve and a one-basis-point slippage reserve by default. Both return paths use fresh WebSocket balance revisions for confirmation, with one RPC snapshot fallback. The worker never opens a first leg or increases the planned amount to match a larger wallet balance. The scanner remains locked until the recovery is confirmed.
 
@@ -178,11 +179,11 @@ git add .
 git commit -m "Initial arbitrage bot"
 ```
 
-Confirm that `.env`, `.local`, `logs`, `bot_state.json`, and `pnl.txt` are not in the commit:
+Confirm that `.env`, `.local`, `logs`, `bot_state.db`, `bot_state.json`, and `pnl.txt` are not in the commit:
 
 ```bash
 git status --ignored
-if git ls-files | grep -Eq '(^|/)(\.env|bot_state\.json|pnl\.txt|logs/)'; then
+if git ls-files | grep -Eq '(^|/)(\.env|bot_state\.db|bot_state\.json|pnl\.txt|logs/)'; then
   echo "STOP: a secret or runtime file is tracked"
   exit 1
 fi
@@ -260,5 +261,5 @@ The container must include `git`, Python, pip, and outbound GitHub access. If Pt
 
 - The dashboard listens on `0.0.0.0`. Put it behind authentication or a private network before exposing it publicly.
 - Logs are written under `logs/` and should be rotated by the host.
-- `bot_state.json` is written atomically so the dashboard never reads a partially written update.
+- `bot_state.db` uses SQLite transactions and write-ahead logging so the dashboard never reads a partially written update.
 - The two exchange legs are separate transactions. Use strict notional limits and supervise the bot until atomic execution or a bounded-loss unwind policy is implemented.

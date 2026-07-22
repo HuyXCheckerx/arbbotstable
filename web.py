@@ -3,11 +3,11 @@ import os
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from state_store import DEFAULT_STATE_PATH, read_state
+from state_store import DEFAULT_DB_PATH, read_dashboard_state, read_state
 
 
 PORT = int(os.environ.get("PORT", 25284))
-STATE_PATH = os.environ.get("BOT_STATE_FILE", str(DEFAULT_STATE_PATH))
+DB_PATH = os.environ.get("BOT_STATE_DB", str(DEFAULT_DB_PATH))
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -189,7 +189,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .detail strong { max-width: 62%; overflow: hidden; font-family: var(--mono); font-size: 10px; font-weight: 500; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
     .error { display: none; margin-top: 17px; padding: 12px 14px; border: 1px solid rgba(213, 124, 117, .24); border-left: 2px solid var(--red); background: #15100f; color: #dda09b; font-family: var(--mono); font-size: 10px; line-height: 1.55; word-break: break-word; }
 
+    .profit-history,
     .activity { grid-column: 1 / -1; }
+    .profit-body { padding: 22px; }
+    .profit-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 24px; border: 1px solid var(--line); background: var(--surface-inset); }
+    .profit-summary-item { min-width: 0; padding: 16px 18px; border-right: 1px solid var(--line); }
+    .profit-summary-item:last-child { border-right: 0; }
+    .profit-summary-item span { display: block; margin-bottom: 8px; color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+    .profit-summary-item strong { overflow: hidden; display: block; color: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+    .profit-scroll { overflow-x: auto; padding-bottom: 5px; }
+    .profit-chart { width: max-content; min-width: 100%; }
+    .profit-months { display: grid; grid-template-columns: repeat(53, 11px); column-gap: 3px; height: 18px; margin-left: 34px; color: var(--muted); font-family: var(--mono); font-size: 8px; }
+    .profit-months span { overflow: visible; white-space: nowrap; }
+    .profit-grid-row { display: flex; align-items: flex-start; gap: 9px; }
+    .profit-weekdays { width: 25px; flex: 0 0 25px; display: grid; grid-template-rows: repeat(7, 11px); row-gap: 3px; color: var(--muted); font-family: var(--mono); font-size: 7px; line-height: 11px; }
+    .profit-cells { display: grid; grid-template-columns: repeat(53, 11px); grid-template-rows: repeat(7, 11px); grid-auto-flow: column; gap: 3px; }
+    .profit-cell { width: 11px; height: 11px; border: 1px solid rgba(223, 220, 207, .06); border-radius: 1px; background: #111614; }
+    .profit-cell.future { opacity: .33; }
+    .profit-cell.level-1 { border-color: rgba(121, 180, 147, .12); background: #193126; }
+    .profit-cell.level-2 { border-color: rgba(121, 180, 147, .18); background: #28523b; }
+    .profit-cell.level-3 { border-color: rgba(121, 180, 147, .25); background: #477d5e; }
+    .profit-cell.level-4 { border-color: rgba(121, 180, 147, .36); background: var(--green); }
+    .profit-cell.loss { border-color: rgba(213, 124, 117, .28); background: #743f3b; }
+    .profit-legend { display: flex; justify-content: flex-end; align-items: center; gap: 7px; margin-top: 15px; color: var(--muted); font-family: var(--mono); font-size: 8px; }
+    .profit-legend .profit-cell { display: inline-block; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; min-width: 930px; border-collapse: collapse; }
     th { padding: 13px 18px; border-bottom: 1px solid var(--line); background: var(--surface-inset); color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .12em; text-align: left; text-transform: uppercase; white-space: nowrap; }
@@ -210,6 +233,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       .overview-primary { min-height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       .summary-metric { min-height: 152px; }
       .workspace { grid-template-columns: 1fr; }
+      .profit-history,
       .activity { grid-column: auto; }
     }
 
@@ -226,6 +250,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       .summary-metric:nth-child(3) { grid-column: 1 / -1; border-left: 0; border-bottom: 0; }
       .summary-metric .eyebrow { min-height: auto; margin-bottom: 20px; }
       .panel-head { padding: 16px 18px; }
+      .profit-body { padding: 18px; }
       .token-grid { grid-template-columns: 1fr 1fr; }
       .token:nth-child(2) { border-right: 0; }
       .token:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
@@ -250,6 +275,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       .pool-list { grid-template-columns: 1fr; }
       .pool { border-right: 0; border-bottom: 1px solid var(--line); }
       .pool:last-child { border-bottom: 0; }
+      .profit-summary { grid-template-columns: 1fr; }
+      .profit-summary-item { border-right: 0; border-bottom: 1px solid var(--line); }
+      .profit-summary-item:last-child { border-bottom: 0; }
       .panel-head > .panel-note { display: none; }
     }
 
@@ -343,9 +371,33 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
       </aside>
 
+      <section class="panel profit-history" aria-labelledby="profit-heading">
+        <div class="panel-head">
+          <div class="panel-heading"><div class="section-code">Profit / 04</div><h2 id="profit-heading" class="panel-title">Daily USDC profit</h2></div>
+          <span class="panel-note">Last 52 weeks &middot; UTC</span>
+        </div>
+        <div class="profit-body">
+          <div class="profit-summary">
+            <div class="profit-summary-item"><span>Period net</span><strong id="profit-period-total">0.00 USDC</strong></div>
+            <div class="profit-summary-item"><span>Profitable days</span><strong id="profitable-days">0</strong></div>
+            <div class="profit-summary-item"><span>Best day</span><strong id="best-profit-day">0.00 USDC</strong></div>
+          </div>
+          <div class="profit-scroll" aria-label="Daily USDC profit calendar">
+            <div class="profit-chart">
+              <div id="profit-months" class="profit-months" aria-hidden="true"></div>
+              <div class="profit-grid-row">
+                <div class="profit-weekdays" aria-hidden="true"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>
+                <div id="profit-cells" class="profit-cells" role="grid" aria-label="Daily realized net profit in USDC"></div>
+              </div>
+            </div>
+          </div>
+          <div class="profit-legend" aria-hidden="true"><span>Loss</span><i class="profit-cell loss"></i><i class="profit-cell"></i><i class="profit-cell level-1"></i><i class="profit-cell level-2"></i><i class="profit-cell level-3"></i><i class="profit-cell level-4"></i><span>More profit</span></div>
+        </div>
+      </section>
+
       <section class="panel activity" aria-labelledby="ledger-heading">
         <div class="panel-head">
-          <div class="panel-heading"><div class="section-code">Ledger / 04</div><h2 id="ledger-heading" class="panel-title">Execution history</h2></div>
+          <div class="panel-heading"><div class="section-code">Ledger / 05</div><h2 id="ledger-heading" class="panel-title">Execution history</h2></div>
           <span class="panel-note">Successful and failed attempts</span>
         </div>
         <div class="table-wrap">
@@ -423,8 +475,77 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       });
     }
 
+    function usdc(value, digits = 2) {
+      const numeric = Number(value || 0);
+      const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(numeric);
+      return `${numeric > 0 ? '+' : ''}${formatted} USDC`;
+    }
+
+    function renderDailyProfit(dailyProfit) {
+      const records = Array.isArray(dailyProfit.days) ? dailyProfit.days : [];
+      const byDate = new Map(records.map(record => [record.date, record]));
+      const today = new Date();
+      const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+      const currentWeekStart = new Date(todayUtc);
+      currentWeekStart.setUTCDate(currentWeekStart.getUTCDate() - currentWeekStart.getUTCDay());
+      const start = new Date(currentWeekStart);
+      start.setUTCDate(start.getUTCDate() - (52 * 7));
+
+      const visible = [];
+      for (let index = 0; index < 371; index += 1) {
+        const date = new Date(start);
+        date.setUTCDate(start.getUTCDate() + index);
+        const key = date.toISOString().slice(0, 10);
+        visible.push({ date, key, record: byDate.get(key) || null });
+      }
+
+      const positiveValues = visible.map(day => Number(day.record?.profit_usdc || 0)).filter(value => value > 0);
+      const maximumProfit = Math.max(0, ...positiveValues);
+      const cells = $('profit-cells'); cells.replaceChildren();
+      visible.forEach(day => {
+        const value = Number(day.record?.profit_usdc || 0);
+        const attempts = Number(day.record?.attempts || 0);
+        const cell = document.createElement('span');
+        cell.className = 'profit-cell';
+        if (day.date > todayUtc) cell.classList.add('future');
+        else if (value < 0) cell.classList.add('loss');
+        else if (value > 0 && maximumProfit > 0) cell.classList.add(`level-${Math.max(1, Math.ceil((value / maximumProfit) * 4))}`);
+        const dateLabel = day.date.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
+        const attemptLabel = `${attempts} attempt${attempts === 1 ? '' : 's'}`;
+        const label = `${dateLabel}: ${usdc(value, 4)} net, ${attemptLabel}`;
+        cell.title = label;
+        cell.setAttribute('role', 'gridcell');
+        cell.setAttribute('aria-label', label);
+        cells.append(cell);
+      });
+
+      const months = $('profit-months'); months.replaceChildren();
+      let previousMonth = -1;
+      for (let week = 0; week < 53; week += 1) {
+        const weekDate = new Date(start);
+        weekDate.setUTCDate(start.getUTCDate() + (week * 7));
+        const month = weekDate.getUTCMonth();
+        if (month === previousMonth) continue;
+        if (week === 0 && weekDate.getUTCDate() > 14) { previousMonth = month; continue; }
+        const label = document.createElement('span');
+        label.textContent = weekDate.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short' });
+        label.style.gridColumn = `${week + 1} / span 4`;
+        months.append(label);
+        previousMonth = month;
+      }
+
+      const recordedDays = visible.filter(day => day.record);
+      const periodTotal = recordedDays.reduce((sum, day) => sum + Number(day.record.profit_usdc || 0), 0);
+      const profitableDays = recordedDays.filter(day => Number(day.record.profit_usdc || 0) > 0).length;
+      const bestDay = recordedDays.reduce((best, day) => Number(day.record.profit_usdc || 0) > Number(best?.record?.profit_usdc || 0) ? day : best, null);
+      text('profit-period-total', usdc(periodTotal)); pnlTone($('profit-period-total'), periodTotal);
+      text('profitable-days', number(profitableDays, 0));
+      text('best-profit-day', usdc(bestDay?.record?.profit_usdc || 0));
+      $('best-profit-day').title = bestDay ? bestDay.date.toLocaleDateString('en-US', { timeZone: 'UTC', dateStyle: 'medium' }) : 'No profitable day recorded';
+    }
+
     function render(state) {
-      const bot = state.bot || {}, performance = state.performance || {}, balances = state.balances || {}, market = state.market || {};
+      const bot = state.bot || {}, performance = state.performance || {}, balances = state.balances || {}, market = state.market || {}, dailyProfit = state.daily_profit || {};
       text('total-pnl', money(performance.total_realized_pnl_usd, 2)); pnlTone($('total-pnl'), performance.total_realized_pnl_usd);
       text('session-pnl', money(performance.session_realized_pnl_usd, 4)); pnlTone($('session-pnl'), performance.session_realized_pnl_usd);
       text('legacy-pnl', money(performance.legacy_balance_change_usd, 4));
@@ -438,7 +559,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       text('sol-price', money(market.sol_usd, 2)); text('wallet', shortWallet(bot.wallet)); $('wallet').title = bot.wallet || '';
       const dot = $('status-dot'); dot.className = 'dot ' + (['scanning','executing_stable','executing_jupiter'].includes(bot.status) ? 'good' : (['starting','recovering','exposed'].includes(bot.status) ? 'warn' : 'bad'));
       const error = $('last-error'); error.textContent = bot.last_error || ''; error.style.display = bot.last_error ? 'block' : 'none';
-      renderAssets(balances.wallet || {}, balances.pools || {}); renderActivity(state.recent_arbs || []);
+      renderAssets(balances.wallet || {}, balances.pools || {}); renderDailyProfit(dailyProfit); renderActivity(state.recent_arbs || []);
       const updateAge = bot.updated_at ? (Date.now() - new Date(bot.updated_at).getTime()) / 1000 : Infinity;
       if (updateAge > 30) {
         $('offline-banner').textContent = 'Bot state is stale. The dashboard is reachable, but the trading process may be stopped.';
@@ -491,11 +612,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/api/state":
-            payload = json.dumps(read_state(STATE_PATH), separators=(",", ":")).encode("utf-8")
+            payload = json.dumps(read_dashboard_state(DB_PATH), separators=(",", ":")).encode("utf-8")
             self._send(200, "application/json; charset=utf-8", payload)
             return
         if path == "/healthz":
-            state = read_state(STATE_PATH)
+            state = read_state(DB_PATH)
             healthy = state_is_fresh(state) and state.get("bot", {}).get("status") != "offline"
             payload = json.dumps({"ok": healthy, "status": state.get("bot", {}).get("status", "offline")}).encode("utf-8")
             self._send(200 if healthy else 503, "application/json; charset=utf-8", payload)
