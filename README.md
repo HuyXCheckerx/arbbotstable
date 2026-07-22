@@ -15,7 +15,7 @@ The dashboard exposes:
 - Current wallet value and SOL/USD estimate.
 - Exact observed SOL decrease for each attempt and its execution-time USD estimate.
 - Current execution stage, route, uptime, errors, and recent accounting records.
-- A GitHub-style 52-week calendar showing the realized USDC-equivalent profit for each UTC day.
+- A GitHub-style 52-week calendar with an exact USDC amount and attempt count when any recorded UTC day is hovered, focused, or selected.
 
 Machine-readable endpoints:
 

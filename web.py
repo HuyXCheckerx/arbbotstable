@@ -197,6 +197,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .profit-summary-item:last-child { border-right: 0; }
     .profit-summary-item span { display: block; margin-bottom: 8px; color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
     .profit-summary-item strong { overflow: hidden; display: block; color: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+    .profit-selection { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(220px, 1fr) minmax(190px, .8fr); align-items: center; gap: 22px; min-height: 72px; padding: 14px 18px; margin-bottom: 22px; border: 1px solid var(--line); border-left-color: var(--line-metal); background: var(--surface-inset); }
+    .profit-selection-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+    .profit-selected-date { color: var(--text); font-family: var(--serif); font-size: 16px; font-weight: 400; }
+    .profit-selected-amount { color: var(--text); font-family: var(--mono); font-size: clamp(18px, 2vw, 25px); font-weight: 500; text-align: center; white-space: nowrap; }
+    .profit-selected-meta { color: var(--muted); font-size: 9px; line-height: 1.55; letter-spacing: .04em; text-align: right; text-transform: uppercase; }
     .profit-scroll { overflow-x: auto; padding-bottom: 5px; }
     .profit-chart { width: max-content; min-width: 100%; }
     .profit-months { display: grid; grid-template-columns: repeat(53, 11px); column-gap: 3px; height: 18px; margin-left: 34px; color: var(--muted); font-family: var(--mono); font-size: 8px; }
@@ -204,7 +209,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .profit-grid-row { display: flex; align-items: flex-start; gap: 9px; }
     .profit-weekdays { width: 25px; flex: 0 0 25px; display: grid; grid-template-rows: repeat(7, 11px); row-gap: 3px; color: var(--muted); font-family: var(--mono); font-size: 7px; line-height: 11px; }
     .profit-cells { display: grid; grid-template-columns: repeat(53, 11px); grid-template-rows: repeat(7, 11px); grid-auto-flow: column; gap: 3px; }
-    .profit-cell { width: 11px; height: 11px; border: 1px solid rgba(223, 220, 207, .06); border-radius: 1px; background: #111614; }
+    .profit-cell { width: 11px; height: 11px; padding: 0; border: 1px solid rgba(223, 220, 207, .06); border-radius: 1px; appearance: none; background: #111614; }
+    button.profit-cell { cursor: pointer; }
+    button.profit-cell:hover { border-color: var(--metal-bright); transform: scale(1.18); }
+    button.profit-cell:focus-visible { z-index: 1; outline: 2px solid var(--metal-bright); outline-offset: 2px; }
+    button.profit-cell.selected { border-color: var(--metal-bright); box-shadow: 0 0 0 1px var(--canvas), 0 0 0 2px var(--metal); }
     .profit-cell.future { opacity: .33; }
     .profit-cell.level-1 { border-color: rgba(121, 180, 147, .12); background: #193126; }
     .profit-cell.level-2 { border-color: rgba(121, 180, 147, .18); background: #28523b; }
@@ -278,6 +287,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       .profit-summary { grid-template-columns: 1fr; }
       .profit-summary-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .profit-summary-item:last-child { border-bottom: 0; }
+      .profit-selection { grid-template-columns: 1fr; gap: 10px; }
+      .profit-selected-amount { text-align: left; }
+      .profit-selected-meta { text-align: left; }
       .panel-head > .panel-note { display: none; }
     }
 
@@ -382,12 +394,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <div class="profit-summary-item"><span>Profitable days</span><strong id="profitable-days">0</strong></div>
             <div class="profit-summary-item"><span>Best day</span><strong id="best-profit-day">0.00 USDC</strong></div>
           </div>
+          <div id="profit-selection" class="profit-selection" aria-live="polite">
+            <div><span class="profit-selection-label">Selected day</span><strong id="selected-profit-date" class="profit-selected-date">No activity recorded</strong></div>
+            <strong id="selected-profit-amount" class="profit-selected-amount">0.0000 USDC</strong>
+            <div id="selected-profit-meta" class="profit-selected-meta">Select any recorded day to view its exact amount</div>
+          </div>
           <div class="profit-scroll" aria-label="Daily USDC profit calendar">
             <div class="profit-chart">
               <div id="profit-months" class="profit-months" aria-hidden="true"></div>
               <div class="profit-grid-row">
                 <div class="profit-weekdays" aria-hidden="true"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>
-                <div id="profit-cells" class="profit-cells" role="grid" aria-label="Daily realized net profit in USDC"></div>
+                <div id="profit-cells" class="profit-cells" role="group" aria-label="Daily realized net profit in USDC"></div>
               </div>
             </div>
           </div>
@@ -481,6 +498,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       return `${numeric > 0 ? '+' : ''}${formatted} USDC`;
     }
 
+    let selectedProfitDate = null;
+
+    function selectProfitDay(day, cell) {
+      selectedProfitDate = day.key;
+      document.querySelectorAll('#profit-cells button.profit-cell').forEach(candidate => {
+        candidate.classList.toggle('selected', candidate === cell);
+        candidate.setAttribute('aria-pressed', candidate === cell ? 'true' : 'false');
+      });
+      const value = Number(day.record?.profit_usdc || 0);
+      const attempts = Number(day.record?.attempts || 0);
+      const successfulArbs = Number(day.record?.successful_arbs || 0);
+      const dateLabel = day.date.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+      text('selected-profit-date', dateLabel);
+      text('selected-profit-amount', usdc(value, 4));
+      pnlTone($('selected-profit-amount'), value);
+      text('selected-profit-meta', attempts ? `${attempts} attempt${attempts === 1 ? '' : 's'} · ${successfulArbs} successful` : 'No attempts recorded for this day');
+    }
+
     function renderDailyProfit(dailyProfit) {
       const records = Array.isArray(dailyProfit.days) ? dailyProfit.days : [];
       const byDate = new Map(records.map(record => [record.date, record]));
@@ -505,8 +540,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       visible.forEach(day => {
         const value = Number(day.record?.profit_usdc || 0);
         const attempts = Number(day.record?.attempts || 0);
-        const cell = document.createElement('span');
+        const isInteractive = Boolean(day.record) && day.date <= todayUtc;
+        const cell = document.createElement(isInteractive ? 'button' : 'span');
+        if (isInteractive) cell.type = 'button';
         cell.className = 'profit-cell';
+        cell.dataset.date = day.key;
         if (day.date > todayUtc) cell.classList.add('future');
         else if (value < 0) cell.classList.add('loss');
         else if (value > 0 && maximumProfit > 0) cell.classList.add(`level-${Math.max(1, Math.ceil((value / maximumProfit) * 4))}`);
@@ -514,10 +552,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const attemptLabel = `${attempts} attempt${attempts === 1 ? '' : 's'}`;
         const label = `${dateLabel}: ${usdc(value, 4)} net, ${attemptLabel}`;
         cell.title = label;
-        cell.setAttribute('role', 'gridcell');
-        cell.setAttribute('aria-label', label);
+        if (isInteractive) {
+          cell.setAttribute('aria-label', label);
+          cell.setAttribute('aria-pressed', 'false');
+          cell.addEventListener('click', () => selectProfitDay(day, cell));
+          cell.addEventListener('focus', () => selectProfitDay(day, cell));
+          cell.addEventListener('mouseenter', () => selectProfitDay(day, cell));
+        } else cell.setAttribute('aria-hidden', 'true');
         cells.append(cell);
       });
+
+      const selectedDay = visible.find(day => day.key === selectedProfitDate && day.date <= todayUtc)
+        || [...visible].reverse().find(day => day.record && day.date <= todayUtc)
+        || visible.find(day => day.key === todayUtc.toISOString().slice(0, 10));
+      if (selectedDay) selectProfitDay(selectedDay, cells.querySelector(`[data-date="${selectedDay.key}"]`));
 
       const months = $('profit-months'); months.replaceChildren();
       let previousMonth = -1;
