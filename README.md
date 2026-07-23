@@ -264,6 +264,18 @@ For Pterodactyl, set the startup command to:
 bash server_start.sh
 ```
 
+### Python-file-only server panels
+
+If the panel only accepts an **App Py File** and does not let you enter a
+startup command, upload `server_start.py` and set it as that file. On its first
+start it creates `.git`, connects to the repository, downloads the tracked
+application files, installs `requirements.txt`, and starts `app.py`.
+
+Set `GIT_REPOSITORY_URL` if your repository URL differs from the default, and
+set `GIT_BRANCH` if you deploy a branch other than `main`. Create the ignored
+`.env` file in the server's project folder before starting the bot. Later
+restarts run a fast-forward Git pull; set `SKIP_GIT_PULL=1` to skip that update.
+
 The container must include `git`, Python, pip, and outbound GitHub access. If Pterodactyl already performs package installation, set `SKIP_GIT_PULL=1` only when you intentionally do not want automatic pulls.
 
 `git pull --ff-only` deliberately refuses to overwrite server-side source edits. Make code changes on the development machine, push them, then pull on the server. Keep server-only secrets and runtime data in the ignored files.
