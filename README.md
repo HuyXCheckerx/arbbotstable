@@ -85,6 +85,7 @@ Defaults:
 ```text
 MIN_TRADE_SIZE_USD=1000
 MIN_NET_PROFIT_USD=0.10
+JUPITER_FIRST_MIN_NET_PROFIT_USD=0.05
 MIN_NET_RETURN_BPS=0
 JUPITER_ENTRY_MAX_RETRIES=5
 JUPITER_PRIORITY_FEE_MODE=cap
@@ -94,7 +95,17 @@ DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 ```
 
-With these defaults, every size has the same $0.10 net-profit requirement. When the estimated cost is $0.00625, any candidate must show at least $0.10625 gross difference. Within the first fully sized route that has an eligible candidate, the bot selects the size with the highest net dollar profit and proceeds immediately; it does not age that quote by comparing later routes. For example, $0.20 net on 20,000 outranks $0.14 net on 10,000 even though the smaller trade has a higher percentage return.
+With these defaults, direct USDG/PYUSD Jupiter-to-Stable routes require $0.05
+net profit because their Stable.com settlement increases the corresponding
+token reserve. Other routes retain their existing thresholds: normally $0.10
+for USDG/PYUSD strategies and at least $5.00 for USDT. The existing low-reserve
+rule can still lower a matching USDG/PYUSD route to $0.05. With an estimated
+cost of $0.00625, a $0.05 candidate must therefore show at least $0.05625 gross
+difference. Within the first fully sized route that has an eligible candidate,
+the bot selects the size with the highest net dollar profit and proceeds
+immediately; it does not age that quote by comparing later routes. For example,
+$0.20 net on 20,000 outranks $0.14 net on 10,000 even though the smaller trade
+has a higher percentage return.
 
 `MIN_NET_RETURN_BPS` remains an optional eligibility floor. It can reject a quote, but it is not used to rank quotes that pass.
 

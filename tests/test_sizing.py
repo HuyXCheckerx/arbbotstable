@@ -19,6 +19,7 @@ from sizing import (
     parse_stable_liquidity_constraint,
     parse_stable_reserve_constraint,
     reserve_adjusted_min_profit,
+    route_min_profit,
     stable_pool_can_settle,
     stable_swap_output_amount,
     stable_swap_output_raw,
@@ -32,6 +33,15 @@ class DynamicSizingTests(unittest.TestCase):
         self.assertEqual(reserve_adjusted_min_profit("USDG", 7_500), 0.10)
         self.assertEqual(reserve_adjusted_min_profit("PYUSD", 0.099999), 0.05)
         self.assertEqual(reserve_adjusted_min_profit("PYUSD", 0.10), 0.10)
+
+    def test_jupiter_first_usdg_and_pyusd_routes_use_refill_profit_floor(self):
+        self.assertEqual(route_min_profit("USDG", "jupiter_first", 50_000), 0.05)
+        self.assertEqual(route_min_profit("PYUSD", "jupiter_first", 50_000), 0.05)
+
+    def test_other_routes_keep_their_existing_profit_floor(self):
+        self.assertEqual(route_min_profit("USDG", "stable_first", 7_500), 0.10)
+        self.assertEqual(route_min_profit("PYUSD", "stable_first", 1), 0.10)
+        self.assertEqual(route_min_profit("USDG", "stable_first", 7_499), 0.05)
 
     def test_partial_usdg_trade_uses_wallet_max_when_full_drain_is_impossible(self):
         self.assertEqual(

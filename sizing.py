@@ -59,6 +59,33 @@ def reserve_adjusted_min_profit(
     return float(normal_min_profit)
 
 
+def route_min_profit(
+    token,
+    venue_order,
+    reserve_amount,
+    normal_min_profit=0.10,
+    low_reserve_min_profit=0.05,
+    jupiter_first_min_profit=0.05,
+    usdg_threshold=7_500.0,
+    pyusd_threshold=0.10,
+):
+    """Return the direct-route floor, rewarding Stable.com reserve refills."""
+    normalized_token = str(token).upper()
+    if (
+        str(venue_order).lower() == "jupiter_first"
+        and normalized_token in {"USDG", "PYUSD"}
+    ):
+        return min(float(normal_min_profit), float(jupiter_first_min_profit))
+    return reserve_adjusted_min_profit(
+        normalized_token,
+        reserve_amount,
+        normal_min_profit,
+        low_reserve_min_profit,
+        usdg_threshold,
+        pyusd_threshold,
+    )
+
+
 def stable_pool_can_settle(
     venue_order,
     usdc_principal,

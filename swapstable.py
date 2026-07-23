@@ -59,7 +59,7 @@ from sizing import (
     normalize_drain_window_raw,
     parse_stable_liquidity_constraint,
     parse_stable_reserve_constraint,
-    reserve_adjusted_min_profit,
+    route_min_profit,
     stable_pool_can_settle,
     stable_swap_output_raw,
     usdc_strategy_directions,
@@ -97,6 +97,9 @@ MIN_TRADE_SIZE_USD = float(os.environ.get("MIN_TRADE_SIZE_USD", "1000"))
 MIN_NET_PROFIT_USD = float(os.environ.get("MIN_NET_PROFIT_USD", "0.10"))
 LOW_RESERVE_MIN_NET_PROFIT_USD = float(
     os.environ.get("LOW_RESERVE_MIN_NET_PROFIT_USD", "0.05")
+)
+JUPITER_FIRST_MIN_NET_PROFIT_USD = float(
+    os.environ.get("JUPITER_FIRST_MIN_NET_PROFIT_USD", "0.05")
 )
 USDG_LOW_RESERVE_THRESHOLD = float(
     os.environ.get("USDG_LOW_RESERVE_THRESHOLD", "7500")
@@ -1662,11 +1665,13 @@ def main():
                 route_min_net_profit = (
                     USDT_MIN_NET_PROFIT_USD
                     if token == "USDT"
-                    else reserve_adjusted_min_profit(
+                    else route_min_profit(
                         token,
+                        venue_order,
                         token_configs[token]["stable_pool"],
                         MIN_NET_PROFIT_USD,
                         LOW_RESERVE_MIN_NET_PROFIT_USD,
+                        JUPITER_FIRST_MIN_NET_PROFIT_USD,
                         USDG_LOW_RESERVE_THRESHOLD,
                         PYUSD_LOW_RESERVE_THRESHOLD,
                     )
