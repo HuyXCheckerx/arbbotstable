@@ -20,8 +20,6 @@ USDG_MINT = "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"
 
 TOKEN_2022_PROGRAM = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
 ASSOCIATED_TOKEN_PROGRAM = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
-PRIORITY_FEE = 10000
-JITO_TIP = 10000
 DECIMALS = 6
 
 def get_ata(owner, mint, token_program):
@@ -90,14 +88,7 @@ def main():
             "userPublicKey": str(wallet),
             "dynamicComputeUnitLimit": True,
             "dynamicSlippage": False,
-            "wrapAndUnwrapSol": False,
-            "prioritizationFeeLamports": {
-                "priorityLevelWithMaxLamports": {
-                    "maxLamports": PRIORITY_FEE,
-                    "priorityLevel": "medium"
-                }
-            },
-            "jitoTipLamports": JITO_TIP
+            "wrapAndUnwrapSol": False
         })
         
         if s_resp.status_code == 200:

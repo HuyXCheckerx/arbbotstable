@@ -17,6 +17,7 @@ import requests
 import asyncio
 import websockets
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from solders.commitment_config import CommitmentLevel
@@ -25,13 +26,16 @@ from solders.pubkey import Pubkey
 from solders.keypair import Keypair
 from solders.signature import Signature
 from solders.system_program import ID as SYSTEM_PROGRAM_ID
-from solders.instruction import Instruction, AccountMeta, CompiledInstruction
+from solders.instruction import Instruction, AccountMeta
 from solders.transaction import VersionedTransaction
-from solders.message import Message, MessageV0
+from solders.message import Message
 from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 from solders.rpc.config import RpcContextConfig
-from solders.rpc.requests import IsBlockhashValid
-from solders.rpc.responses import IsBlockhashValidResp
+from solders.rpc.requests import GetRecentPrioritizationFees, IsBlockhashValid
+from solders.rpc.responses import (
+    GetRecentPrioritizationFeesResp,
+    IsBlockhashValidResp,
+)
 from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from solana.rpc.types import TxOpts
@@ -188,18 +192,14 @@ def get_jup_headers():
     jup_key_index += 1
     return {"x-api-key": key}
 
-PRIORITY_FEE = 10000  # Stable.com compute-unit price, in micro-lamports per CU
-JITO_TIP = 0
-JUPITER_PRIORITY_FEE_MODE = os.environ.get(
-    "JUPITER_PRIORITY_FEE_MODE", "cap"
-).strip().lower()
-if JUPITER_PRIORITY_FEE_MODE not in {"cap", "recommended"}:
-    raise ValueError(
-        "JUPITER_PRIORITY_FEE_MODE must be either 'cap' or 'recommended'"
-    )
-JUPITER_PRIORITY_FEE_CAP_LAMPORTS = max(
+STABLE_PRIORITY_FEE_FALLBACK_MICRO_LAMPORTS = max(
     0,
-    int(os.environ.get("JUPITER_PRIORITY_FEE_CAP_LAMPORTS", "10000")),
+    int(
+        os.environ.get(
+            "STABLE_PRIORITY_FEE_FALLBACK_MICRO_LAMPORTS",
+            "10000",
+        )
+    ),
 )
 
 # ============================================================
@@ -911,23 +911,13 @@ def print_portfolio(
 # SWAP EXECUTION logic
 # ============================================================
 def jupiter_order_fee_params():
-    if JUPITER_PRIORITY_FEE_MODE == "recommended":
-        return {}
-    return {
-        "priorityFeeLamports": str(JUPITER_PRIORITY_FEE_CAP_LAMPORTS),
-        "broadcastFeeType": "maxCap",
-    }
+    """Let Jupiter select the landing fee for its executable order."""
+    return {}
 
 
 def jupiter_swap_priority_fee_request():
-    if JUPITER_PRIORITY_FEE_MODE == "recommended":
-        return None
-    return {
-        "priorityLevelWithMaxLamports": {
-            "maxLamports": JUPITER_PRIORITY_FEE_CAP_LAMPORTS,
-            "priorityLevel": "medium",
-        }
-    }
+    """Omit a fee ceiling so Jupiter can use its recommended fee."""
+    return None
 
 
 def get_jup_quote(session, input_mint, output_mint, amount_raw, taker=None, slippage_bps=0):
@@ -963,67 +953,9 @@ def get_jup_quote(session, input_mint, output_mint, amount_raw, taker=None, slip
     print(f"[!] Jup quote failed: {resp.text}")
     return None
 
-def cap_jup_priority_fee(tx_bytes: bytes, max_fee_lamports: int = 30000) -> bytes:
-    try:
-        tx = VersionedTransaction.from_bytes(tx_bytes)
-        msg = tx.message
-        
-        cb_index = -1
-        for i, pk in enumerate(msg.account_keys):
-            if str(pk) == "ComputeBudget111111111111111111111111111111":
-                cb_index = i
-                break
-                
-        if cb_index == -1:
-            return tx_bytes
-            
-        cu_limit = None
-        cu_price_idx = -1
-        
-        for i, ix in enumerate(msg.instructions):
-            if ix.program_id_index == cb_index:
-                if len(ix.data) == 5 and ix.data[0] == 2:
-                    cu_limit = struct.unpack("<I", ix.data[1:5])[0]
-                elif len(ix.data) == 9 and ix.data[0] == 3:
-                    cu_price_idx = i
-                    
-        if cu_limit is not None and cu_price_idx != -1:
-            old_price = struct.unpack("<Q", msg.instructions[cu_price_idx].data[1:9])[0]
-            current_fee = (cu_limit * old_price) // 10**6
-            print(f"[*] Jupiter generated priority fee: {current_fee} lamports (limit={cu_limit}, price={old_price})")
-            
-            # Always strip old price instructions and enforce our strict cap
-            new_price = (max_fee_lamports * 10**6) // cu_limit
-            new_data = b'\x03' + struct.pack("<Q", new_price)
-            print(f"[*] Jupiter fee strictly capped down to {max_fee_lamports} lamports.")
-            
-            # Filter out all existing set_compute_unit_price instructions
-            new_ixs = []
-            for ix in msg.instructions:
-                if ix.program_id_index == cb_index and len(ix.data) == 9 and ix.data[0] == 3:
-                    continue # Skip old price ix
-                new_ixs.append(ix)
-            
-            # Append our new price ix at the beginning (after limit)
-            new_ixs.insert(1, CompiledInstruction(cb_index, new_data, b''))
-            
-            new_msg = MessageV0(msg.header, msg.account_keys, msg.recent_blockhash, new_ixs, msg.address_table_lookups)
-            new_tx = VersionedTransaction.populate(new_msg, tx.signatures)
-            return bytes(new_tx)
-    except Exception as e:
-        print(f"[!] Error capping Jup fee: {e}")
-        
-    return tx_bytes
-
-
 def apply_jup_priority_fee_policy(tx_bytes: bytes) -> bytes:
-    if JUPITER_PRIORITY_FEE_MODE == "recommended":
-        print("[*] Using Jupiter-recommended priority fee without a local cap.")
-        return tx_bytes
-    return cap_jup_priority_fee(
-        tx_bytes,
-        JUPITER_PRIORITY_FEE_CAP_LAMPORTS,
-    )
+    print("[*] Using Jupiter-recommended priority fee without a local cap.")
+    return tx_bytes
 
 def execute_jup_swap(
     session,
@@ -1130,7 +1062,7 @@ def execute_jup_swap(
         "quoteResponse": quote,
         "taker": str(keypair.pubkey()),
         "wrapAndUnwrapSol": False,
-        "jitoTipLamports": JITO_TIP,
+        "dynamicComputeUnitLimit": True,
     }
     priority_fee_request = jupiter_swap_priority_fee_request()
     if priority_fee_request is not None:
@@ -1222,6 +1154,125 @@ class StableSwapResult:
         return self.ok
 
 
+@dataclass(frozen=True)
+class PreparedStableSwap:
+    transaction: object
+    signature: str
+    blockhash: str
+    prepared_at: float
+
+
+def recommended_stable_priority_fee(client, writable_accounts):
+    """Use the highest recently landed local fee, with no upper ceiling."""
+    unique_accounts = list(dict.fromkeys(writable_accounts))
+    try:
+        request = GetRecentPrioritizationFees(unique_accounts)
+        response = client._provider.make_request(
+            request,
+            GetRecentPrioritizationFeesResp,
+        )
+        recent_fees = [
+            int(sample.prioritization_fee)
+            for sample in response.value
+            if int(sample.prioritization_fee) >= 0
+        ]
+        if recent_fees:
+            selected_fee = max(recent_fees)
+            print(
+                "[*] Stable.com live priority fee: "
+                f"{selected_fee} micro-lamports/CU (highest recent local fee)"
+            )
+            return selected_fee
+    except Exception as exc:
+        print(f"[!] Live Stable.com priority fee unavailable: {exc}")
+
+    print(
+        "[*] Stable.com priority fee fallback: "
+        f"{STABLE_PRIORITY_FEE_FALLBACK_MICRO_LAMPORTS} micro-lamports/CU"
+    )
+    return STABLE_PRIORITY_FEE_FALLBACK_MICRO_LAMPORTS
+
+
+def submit_prepared_stable_swap(
+    client,
+    prepared,
+    pending_store=None,
+    submission_label="Stable.com swap",
+):
+    if isinstance(prepared, StableSwapResult):
+        return prepared
+
+    if pending_store is not None:
+        pending_store.set_pending_submission(
+            prepared.signature,
+            prepared.blockhash,
+            submission_label,
+        )
+
+    try:
+        result = client.send_transaction(
+            prepared.transaction,
+            opts=SUBMIT_ONLY_OPTS,
+        )
+    except Exception as exc:
+        print(
+            "[!] Stable RPC response was ambiguous after submission; "
+            f"reconciling local signature {prepared.signature}: {exc}"
+        )
+        submission = SwapSubmissionResult(
+            False,
+            prepared.signature,
+            prepared.blockhash,
+            ambiguous=True,
+            error=str(exc),
+        )
+        return StableSwapResult(False, submission=submission)
+    if result.value:
+        print(f"[+] Stable Swap Sent: {result.value}")
+        submission = SwapSubmissionResult(
+            True,
+            str(result.value),
+            prepared.blockhash,
+        )
+        return StableSwapResult(True, submission=submission)
+    submission = SwapSubmissionResult(
+        False,
+        prepared.signature,
+        prepared.blockhash,
+        ambiguous=True,
+        error="RPC returned no transaction signature",
+    )
+    return StableSwapResult(False, submission=submission)
+
+
+def prepare_stable_swap_isolated(
+    keypair,
+    asset_from,
+    asset_to,
+    amount_human,
+):
+    """Build and sign a downstream Stable leg on an isolated worker client."""
+    preparation_client = Client(RPC_URL, commitment=Confirmed)
+    try:
+        with requests.Session() as preparation_session:
+            preparation_session.headers.update(
+                {"Content-Type": "application/json"}
+            )
+            return execute_stable_swap(
+                preparation_session,
+                preparation_client,
+                keypair,
+                asset_from,
+                asset_to,
+                amount_human,
+                submit=False,
+            )
+    finally:
+        close_client = getattr(preparation_client, "close", None)
+        if callable(close_client):
+            close_client()
+
+
 def execute_stable_swap(
     session,
     client,
@@ -1231,6 +1282,7 @@ def execute_stable_swap(
     amount_human,
     pending_store=None,
     submission_label="Stable.com swap",
+    submit=True,
 ):
     wallet = keypair.pubkey()
     amount_raw = int(round(float(amount_human) * 10**DECIMALS))
@@ -1371,7 +1423,14 @@ def execute_stable_swap(
     ix = Instruction(program_id=STABLE_PROGRAM_ID, data=bytes(data), accounts=accounts)
     
     cu_limit_ix = set_compute_unit_limit(400_000)
-    cu_price_ix = set_compute_unit_price(PRIORITY_FEE)
+    writable_accounts = [
+        account.pubkey for account in accounts if account.is_writable
+    ]
+    priority_fee = recommended_stable_priority_fee(
+        client,
+        writable_accounts,
+    )
+    cu_price_ix = set_compute_unit_price(priority_fee)
 
     recent_blockhash = client.get_latest_blockhash().value.blockhash
     msg = Message.new_with_blockhash([cu_limit_ix, cu_price_ix, ix], wallet, recent_blockhash)
@@ -1381,40 +1440,20 @@ def execute_stable_swap(
     tx.sign([keypair], recent_blockhash)
     local_signature = str(tx.signatures[0])
     blockhash = str(recent_blockhash)
-    if pending_store is not None:
-        pending_store.set_pending_submission(
-            local_signature,
-            blockhash,
-            submission_label,
-        )
-
-    try:
-        result = client.send_transaction(tx, opts=SUBMIT_ONLY_OPTS)
-    except Exception as exc:
-        print(
-            "[!] Stable RPC response was ambiguous after submission; "
-            f"reconciling local signature {local_signature}: {exc}"
-        )
-        submission = SwapSubmissionResult(
-            False,
-            local_signature,
-            blockhash,
-            ambiguous=True,
-            error=str(exc),
-        )
-        return StableSwapResult(False, submission=submission)
-    if result.value:
-        print(f"[+] Stable Swap Sent: {result.value}")
-        submission = SwapSubmissionResult(True, str(result.value), blockhash)
-        return StableSwapResult(True, submission=submission)
-    submission = SwapSubmissionResult(
-        False,
+    prepared = PreparedStableSwap(
+        tx,
         local_signature,
         blockhash,
-        ambiguous=True,
-        error="RPC returned no transaction signature",
+        time.monotonic(),
     )
-    return StableSwapResult(False, submission=submission)
+    if not submit:
+        return prepared
+    return submit_prepared_stable_swap(
+        client,
+        prepared,
+        pending_store=pending_store,
+        submission_label=submission_label,
+    )
 
 # ============================================================
 # MAIN
@@ -1434,13 +1473,12 @@ def main():
 
     wallet = keypair.pubkey()
     print(f"[*] Wallet: {wallet}")
-    if JUPITER_PRIORITY_FEE_MODE == "recommended":
-        print("[*] Jupiter priority fee policy: recommended (no local cap)")
-    else:
-        print(
-            "[*] Jupiter priority fee policy: "
-            f"cap at {JUPITER_PRIORITY_FEE_CAP_LAMPORTS} lamports"
-        )
+    print("[*] Jupiter priority fee policy: recommended (no local cap)")
+    print("[*] Route execution: dependency-aware threaded leg preparation")
+    route_executor = ThreadPoolExecutor(
+        max_workers=3,
+        thread_name_prefix="route-leg",
+    )
     state_store = BotStateStore()
     recovery_store = RecoveryStore()
     state_store.start_session(wallet)
@@ -1949,6 +1987,7 @@ def main():
                 best_route = (
                     strategy,
                     swap_size,
+                    quote,
                     metrics,
                     route_cost_estimate,
                     usdg_sizing_mode,
@@ -1969,6 +2008,7 @@ def main():
             (
                 selected_strategy,
                 swap_size,
+                selected_jupiter_order,
                 selected_metrics,
                 selected_cost_estimate,
                 selected_usdg_sizing_mode,
@@ -2009,10 +2049,6 @@ def main():
                 monitor.update_event.clear()
                 continue
 
-            print("[*] Revalidating selected size twice before taking first-leg exposure...")
-            verify_failed = False
-            verified_entry_quote = None
-            verification_metrics = [selected_metrics]
             selected_usdg_drain_mode = selected_usdg_sizing_mode == "drain"
             selected_usdg_raw_sizing = selected_usdg_sizing_mode in {"drain", "partial"}
             probe_amount_raw = (
@@ -2020,78 +2056,9 @@ def main():
                 if selected_usdg_raw_sizing
                 else int(swap_size) * 10**DECIMALS
             )
-            for i in range(2):
-                time.sleep(0.5)
-                # Keep validation on the same executable quote path used for
-                # the first-leg transaction; otherwise a generic quote can
-                # pass and the taker-bound order can immediately fail.
-                v_quote = get_jup_quote(
-                    session,
-                    selected_strategy["jup_input_mint"],
-                    selected_strategy["jup_output_mint"],
-                    probe_amount_raw,
-                    taker=str(wallet),
-                )
-                if not v_quote:
-                    print(f"    Verify {i+1}/2: quote unavailable")
-                    verify_failed = True
-                    break
-                out_human = int(v_quote.get("outAmount", 0)) / 10**DECIMALS
-                metrics = calculate_route_metrics(
-                    swap_size,
-                    out_human,
-                    selected_cost_estimate,
-                    token,
-                    venue_order,
-                )
-                verification_metrics.append(metrics)
-                if cross_route:
-                    pool_can_settle = cross_route_pools_can_settle(
-                        swap_size,
-                        metrics["output_amount"],
-                        selected_strategy["stable_destination_pool"],
-                        selected_strategy["stable_exit_pool"],
-                        entry_reserve=selected_stable_reserve_usd,
-                        usdc_reserve=selected_strategy["stable_exit_reserve"],
-                    )
-                else:
-                    pool_can_settle = stable_pool_can_settle(
-                        venue_order,
-                        swap_size,
-                        metrics["output_amount"],
-                        selected_strategy["stable_destination_pool"],
-                        reserve=selected_stable_reserve_usd,
-                    )
-                if pool_can_settle and is_profitable_candidate(
-                    metrics,
-                    selected_min_net_profit,
-                    MIN_NET_RETURN_BPS,
-                ):
-                    # The second successful value replaces the first and can
-                    # be submitted directly for a Jupiter-first route.
-                    verified_entry_quote = v_quote
-                    print(
-                        f"    Verify {i+1}/2: net ${metrics['net_profit_usd']:.6f} "
-                        f"({metrics['net_return_bps']:.4f} bps)"
-                    )
-                else:
-                    reason = "Stable pool capacity" if not pool_can_settle else "profit threshold"
-                    print(
-                        f"    Verify {i+1}/2: rejected by {reason} | "
-                        f"net ${metrics['net_profit_usd']:.6f}"
-                    )
-                    verify_failed = True
-                    break
-
-            if verify_failed:
-                print("[!] Selected size failed net-profit revalidation. Skipping...")
-                time.sleep(1)
-                continue
-
-            # Record the least favorable verified quote as the expected result.
-            selected_metrics = min(
-                verification_metrics,
-                key=lambda metrics: metrics["net_profit_usd"],
+            print(
+                "[*] Using the selected wallet-bound Jupiter order directly; "
+                "pre-entry verification passes are disabled."
             )
 
             if not monitor.is_ready():
@@ -2395,13 +2362,20 @@ def main():
                                 break
 
                             if cross_route:
-                                final_quote = get_jup_quote(
-                                    session,
-                                    selected_strategy["jup_input_mint"],
-                                    selected_strategy["jup_output_mint"],
-                                    remaining_raw,
-                                    taker=str(wallet),
-                                )
+                                if exit_attempt == 1 and remaining_raw == probe_amount_raw:
+                                    final_quote = selected_jupiter_order
+                                    print(
+                                        "[*] Jupiter middle leg was prepared during sizing; "
+                                        "submitting it without another quote request."
+                                    )
+                                else:
+                                    final_quote = get_jup_quote(
+                                        session,
+                                        selected_strategy["jup_input_mint"],
+                                        selected_strategy["jup_output_mint"],
+                                        remaining_raw,
+                                        taker=str(wallet),
+                                    )
                                 if not final_quote:
                                     failure_note = (
                                         f"Jupiter {token}->{output_token} quote unavailable"
@@ -2500,6 +2474,17 @@ def main():
                                 )
                                 middle_cursor = monitor.snapshot(
                                     [balance_key, output_balance_key]
+                                )
+                                stable_exit_future = route_executor.submit(
+                                    prepare_stable_swap_isolated,
+                                    keypair,
+                                    output_token,
+                                    "USDC",
+                                    cross_out_raw / 10**DECIMALS,
+                                )
+                                print(
+                                    "[*] Preparing the Stable.com final leg in parallel "
+                                    "with the Jupiter middle leg."
                                 )
                                 submission = execute_jup_swap(
                                     session,
@@ -2622,13 +2607,55 @@ def main():
                                 stable_exit_cursor = monitor.snapshot(
                                     [output_balance_key, "user_usdc"]
                                 )
-                                stable_exit_result = execute_stable_swap(
-                                    session,
+                                if converted_raw == cross_out_raw:
+                                    try:
+                                        prepared_stable_exit = stable_exit_future.result()
+                                        if not isinstance(
+                                            prepared_stable_exit,
+                                            PreparedStableSwap,
+                                        ):
+                                            raise RuntimeError(
+                                                "Stable.com did not issue the prefetched order"
+                                            )
+                                        if (
+                                            time.monotonic()
+                                            - prepared_stable_exit.prepared_at
+                                            > 45
+                                        ):
+                                            raise RuntimeError(
+                                                "prefetched Stable.com order is too old"
+                                            )
+                                    except Exception as exc:
+                                        print(
+                                            "[!] Parallel Stable.com final-leg preparation "
+                                            f"failed; rebuilding now: {exc}"
+                                        )
+                                        prepared_stable_exit = execute_stable_swap(
+                                            session,
+                                            client,
+                                            keypair,
+                                            output_token,
+                                            "USDC",
+                                            converted_human,
+                                            submit=False,
+                                        )
+                                else:
+                                    print(
+                                        "[*] Jupiter output differed from the prepared amount; "
+                                        "rebuilding the Stable.com final leg for the confirmed balance."
+                                    )
+                                    prepared_stable_exit = execute_stable_swap(
+                                        session,
+                                        client,
+                                        keypair,
+                                        output_token,
+                                        "USDC",
+                                        converted_human,
+                                        submit=False,
+                                    )
+                                stable_exit_result = submit_prepared_stable_swap(
                                     client,
-                                    keypair,
-                                    output_token,
-                                    "USDC",
-                                    converted_human,
+                                    prepared_stable_exit,
                                     pending_store=state_store,
                                     submission_label=(
                                         f"Stable.com {output_token}->USDC final leg"
@@ -2687,13 +2714,20 @@ def main():
                                     )
                                 break
 
-                            final_quote = get_jup_quote(
-                                session,
-                                selected_strategy["jup_input_mint"],
-                                selected_strategy["jup_output_mint"],
-                                remaining_raw,
-                                taker=str(wallet),
-                            )
+                            if exit_attempt == 1 and remaining_raw == probe_amount_raw:
+                                final_quote = selected_jupiter_order
+                                print(
+                                    "[*] Jupiter exit was prepared during sizing; "
+                                    "submitting it without another quote request."
+                                )
+                            else:
+                                final_quote = get_jup_quote(
+                                    session,
+                                    selected_strategy["jup_input_mint"],
+                                    selected_strategy["jup_output_mint"],
+                                    remaining_raw,
+                                    taker=str(wallet),
+                                )
                             if not final_quote:
                                 print(f"[!] Jupiter exit quote unavailable ({exit_attempt}/10)")
                                 time.sleep(2)
@@ -2777,15 +2811,15 @@ def main():
 
             else:
                 state_store.set_status("executing_jupiter", "Executing Jupiter entry", route=route_label)
-                final_quote = verified_entry_quote
+                final_quote = selected_jupiter_order
                 if not final_quote:
-                    failure_note = "Verified Jupiter entry order unavailable"
+                    failure_note = "Selected Jupiter entry order unavailable"
                     print(
                         f"[skip] Jupiter entry {swap_size} USDC->{token}: "
-                        "second verified executable order was unavailable"
+                        "the executable sizing order was unavailable"
                     )
                 else:
-                    print("[*] Reusing verification 2/2 executable order for Jupiter entry.")
+                    print("[*] Submitting the executable Jupiter sizing order directly.")
                     entry_out_raw = int(final_quote.get("outAmount", 0))
                     try:
                         live_pool_usdc_raw = get_token_balance(client, pool_usdc_ata)
@@ -2927,6 +2961,18 @@ def main():
                                 f"{JUPITER_ENTRY_MAX_RETRIES + 1}: "
                                 f"{swap_size} USDC -> {token}"
                             )
+                            stable_exit_expected_raw = entry_out_raw
+                            stable_exit_future = route_executor.submit(
+                                prepare_stable_swap_isolated,
+                                keypair,
+                                token,
+                                "USDC",
+                                stable_exit_expected_raw / 10**DECIMALS,
+                            )
+                            print(
+                                "[*] Preparing the Stable.com exit in parallel "
+                                "with the Jupiter entry."
+                            )
                             entry_cursor = monitor.snapshot(
                                 [balance_key, "user_usdc"]
                             )
@@ -3022,13 +3068,55 @@ def main():
                                 # potentially lagging WS cache, as the
                                 # starting point for the USDC credit.
                                 exit_usdc_before_raw = entry_balances["user_usdc"]
-                                stable_exit_result = execute_stable_swap(
-                                    session,
+                                if received_raw == stable_exit_expected_raw:
+                                    try:
+                                        prepared_stable_exit = stable_exit_future.result()
+                                        if not isinstance(
+                                            prepared_stable_exit,
+                                            PreparedStableSwap,
+                                        ):
+                                            raise RuntimeError(
+                                                "Stable.com did not issue the prefetched order"
+                                            )
+                                        if (
+                                            time.monotonic()
+                                            - prepared_stable_exit.prepared_at
+                                            > 45
+                                        ):
+                                            raise RuntimeError(
+                                                "prefetched Stable.com order is too old"
+                                            )
+                                    except Exception as exc:
+                                        print(
+                                            "[!] Parallel Stable.com exit preparation failed; "
+                                            f"rebuilding now: {exc}"
+                                        )
+                                        prepared_stable_exit = execute_stable_swap(
+                                            session,
+                                            client,
+                                            keypair,
+                                            token,
+                                            "USDC",
+                                            received_human,
+                                            submit=False,
+                                        )
+                                else:
+                                    print(
+                                        "[*] Jupiter output differed from the prepared amount; "
+                                        "rebuilding the Stable.com exit for the confirmed balance."
+                                    )
+                                    prepared_stable_exit = execute_stable_swap(
+                                        session,
+                                        client,
+                                        keypair,
+                                        token,
+                                        "USDC",
+                                        received_human,
+                                        submit=False,
+                                    )
+                                stable_exit_result = submit_prepared_stable_swap(
                                     client,
-                                    keypair,
-                                    token,
-                                    "USDC",
-                                    received_human,
+                                    prepared_stable_exit,
                                     pending_store=state_store,
                                     submission_label=f"Stable.com {token}->USDC exit",
                                 )
