@@ -183,8 +183,8 @@ class SwapConfirmationTests(unittest.TestCase):
         self.assertEqual(snapshot["usdg"], 11)
         self.assertEqual(snapshot["pyusd"], 21)
 
-    def test_usdt_route_profit_floor_is_at_least_five_dollars(self):
-        self.assertGreaterEqual(swapstable.USDT_MIN_NET_PROFIT_USD, 5.0)
+    def test_usdt_route_profit_floor_is_at_least_one_dollar(self):
+        self.assertGreaterEqual(swapstable.USDT_MIN_NET_PROFIT_USD, 1.0)
 
     def test_jupiter_entry_retries_only_definitive_failures(self):
         for source in ("not_submitted", "signature_error", "expired"):

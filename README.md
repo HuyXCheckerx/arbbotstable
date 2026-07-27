@@ -57,7 +57,7 @@ It also requires Stable.com's USDC reserve to remain at or above 50,000 after
 the full USDT input is accounted for. This reserve floor is checked during
 sizing, verification, retries, final execution, and recovery; it does not
 apply to USDG or PYUSD routes.
-The USDT cycle has a separate hard minimum net profit of $5.00, checked after
+The USDT cycle has a separate hard minimum net profit of $1.00, checked after
 the 0.1% Stable.com fee and estimated execution costs. USDG and PYUSD retain
 their existing route-specific profit thresholds.
 
@@ -98,7 +98,7 @@ EXECUTION_COST_SAFETY_MULTIPLIER=1.25
 With these defaults, direct USDG/PYUSD Jupiter-to-Stable routes require $0.05
 net profit because their Stable.com settlement increases the corresponding
 token reserve. Other routes retain their existing thresholds: normally $0.10
-for USDG/PYUSD strategies and at least $5.00 for USDT. The existing low-reserve
+for USDG/PYUSD strategies and at least $1.00 for USDT. The existing low-reserve
 rule can still lower a matching USDG/PYUSD route to $0.05. With an estimated
 cost of $0.00625, a $0.05 candidate must therefore show at least $0.05625 gross
 difference. Within the first fully sized route that has an eligible candidate,

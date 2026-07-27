@@ -113,8 +113,8 @@ USDT_MIN_USDC_RESERVE_USD = max(
 )
 USDT_MIN_USDC_RESERVE_RAW = int(round(USDT_MIN_USDC_RESERVE_USD * 1_000_000))
 USDT_MIN_NET_PROFIT_USD = max(
-    5.0,
-    float(os.environ.get("USDT_MIN_NET_PROFIT_USD", "5.00")),
+    1.0,
+    float(os.environ.get("USDT_MIN_NET_PROFIT_USD", "1.00")),
 )
 MIN_NET_RETURN_BPS = float(os.environ.get("MIN_NET_RETURN_BPS", "0"))
 # Stable's reported USDG constraint is 1.8 tokens; keep a default 0.1-token
