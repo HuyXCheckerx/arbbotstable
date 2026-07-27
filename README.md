@@ -51,11 +51,11 @@ USDC -> USDT  on Jupiter    -> USDC on Stable.com
 ```
 
 No Stable.com-first USDT route is generated. The one-way USDT route deducts
-Stable.com's 0.1% USDT/USDC fee during sizing and retry checks;
+Stable.com's 0.1% USDT/USDC fee during sizing and every quote revalidation;
 for example, 100,000 USDT is valued as 99,900 USDC at settlement.
 It also requires Stable.com's USDC reserve to remain at or above 50,000 after
 the full USDT input is accounted for. This reserve floor is checked during
-sizing, retries, final execution, and recovery; it does not
+sizing, verification, retries, final execution, and recovery; it does not
 apply to USDG or PYUSD routes.
 The USDT cycle has a separate hard minimum net profit of $5.00, checked after
 the 0.1% Stable.com fee and estimated execution costs. USDG and PYUSD retain
@@ -78,7 +78,7 @@ The scanner checks the strategies in the order above, prioritizing Stable.com en
 3. Subtracts a conservative execution-cost estimate derived from recent observed SOL consumption.
 4. Requires at least `MIN_NET_PROFIT_USD` after that estimated cost.
 5. Chooses the eligible size with the highest absolute net dollar profit. Lower exposure breaks a tie at six-decimal dollar precision.
-6. Stops scanning later directions and submits the selected wallet-bound executable order without two additional pre-entry verification passes.
+6. Stops scanning later directions, then revalidates the selected size twice before taking first-leg exposure.
 
 Defaults:
 
@@ -88,7 +88,8 @@ MIN_NET_PROFIT_USD=0.10
 JUPITER_FIRST_MIN_NET_PROFIT_USD=0.05
 MIN_NET_RETURN_BPS=0
 JUPITER_ENTRY_MAX_RETRIES=5
-STABLE_PRIORITY_FEE_FALLBACK_MICRO_LAMPORTS=10000
+JUPITER_PRIORITY_FEE_MODE=cap
+JUPITER_PRIORITY_FEE_CAP_LAMPORTS=10000
 CROSS_ROUTE_EXECUTION_COST_MULTIPLIER=1.5
 DEFAULT_EXECUTION_COST_USD=0.005
 EXECUTION_COST_SAFETY_MULTIPLIER=1.25
@@ -113,7 +114,7 @@ cost by default because they submit three transactions instead of two. Change
 `CROSS_ROUTE_EXECUTION_COST_MULTIPLIER` only if the observed fee history justifies
 a different conservative multiplier.
 
-To limit Jupiter API usage, ordinary sizing probes only the minimum, `2x` minimum, `5x` minimum, and exact maximum before refining around the best anchor. The chosen wallet-specific executable sizing order is submitted directly, with no two-pass quote revalidation.
+To limit Jupiter API usage, ordinary sizing probes only the minimum, `2x` minimum, `5x` minimum, and exact maximum before refining around the best anchor. For Jupiter-first routes, the second successful wallet-specific verification order is submitted directly as the entry instead of requesting an identical third executable order.
 
 If that Jupiter entry definitively fails on-chain, expires without landing, or
 fails before submission, the bot requests up to five fresh executable orders.
@@ -121,20 +122,13 @@ Every retry must still pass the current net-profit and Stable.com pool-capacity
 checks. Its profit calculation also deducts the SOL fees already spent by the
 failed entries. Ambiguous transactions are never retried.
 
-Jupiter priority-fee overrides and local fee rewriting are disabled: executable
-orders retain Jupiter's automatically selected landing fee. Stable.com transactions
-query Solana's recent localized priority fees for their writable accounts and use
-the highest returned compute-unit price, without an upper ceiling. Only an RPC
-failure uses `STABLE_PRIORITY_FEE_FALLBACK_MICRO_LAMPORTS`. Congestion can therefore
-spend substantially more SOL than the previous capped policy.
-
-Route legs remain transactionally dependency-ordered because each later leg spends
-the preceding leg's output. To minimize the gap without racing unavailable balances,
-the bot pipelines them: the chosen Jupiter leg is retained from sizing, and a
-downstream Stable.com transaction is built and signed on a worker thread while the
-preceding Jupiter transaction lands. Once the required balance update is confirmed,
-the prepared transaction is broadcast immediately. If the actual output amount
-differs, the downstream transaction is rebuilt for the confirmed amount.
+Jupiter priority fees default to `cap` mode, which asks Jupiter to treat
+`JUPITER_PRIORITY_FEE_CAP_LAMPORTS` as a maximum and also enforces that ceiling
+locally before signing. Set `JUPITER_PRIORITY_FEE_MODE=recommended` to omit the
+fee override and sign Jupiter's automatically selected fee unchanged. Recommended
+mode can spend substantially more SOL during congestion. This setting affects
+only Jupiter transactions; the Stable.com leg keeps its existing compute-unit
+price.
 
 #### USDG reserve drain mode
 

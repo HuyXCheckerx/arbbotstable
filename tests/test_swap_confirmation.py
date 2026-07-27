@@ -87,53 +87,57 @@ class SwapConfirmationTests(unittest.TestCase):
             self.assertEqual(strategy["stable_exit_pool"], 200_000)
             self.assertEqual(strategy["stable_exit_reserve"], 1.9)
 
-    def test_jupiter_always_preserves_its_recommended_fee(self):
-        self.assertEqual(swapstable.jupiter_order_fee_params(), {})
-        self.assertIsNone(swapstable.jupiter_swap_priority_fee_request())
-        tx_bytes = b"jupiter-generated-transaction"
-        self.assertIs(
-            swapstable.apply_jup_priority_fee_policy(tx_bytes),
-            tx_bytes,
-        )
+    def test_jupiter_cap_mode_requests_and_enforces_configured_ceiling(self):
+        with (
+            patch.object(swapstable, "JUPITER_PRIORITY_FEE_MODE", "cap"),
+            patch.object(
+                swapstable,
+                "JUPITER_PRIORITY_FEE_CAP_LAMPORTS",
+                12_345,
+            ),
+        ):
+            self.assertEqual(
+                swapstable.jupiter_order_fee_params(),
+                {
+                    "priorityFeeLamports": "12345",
+                    "broadcastFeeType": "maxCap",
+                },
+            )
+            self.assertEqual(
+                swapstable.jupiter_swap_priority_fee_request(),
+                {
+                    "priorityLevelWithMaxLamports": {
+                        "maxLamports": 12_345,
+                        "priorityLevel": "medium",
+                    }
+                },
+            )
+            with patch.object(
+                swapstable,
+                "cap_jup_priority_fee",
+                return_value=b"capped",
+            ) as cap:
+                self.assertEqual(
+                    swapstable.apply_jup_priority_fee_policy(b"generated"),
+                    b"capped",
+                )
+                cap.assert_called_once_with(b"generated", 12_345)
 
-    def test_stable_fee_uses_highest_recent_local_landing_fee(self):
-        provider = SimpleNamespace()
-        provider.make_request = lambda *_args: SimpleNamespace(
-            value=[
-                SimpleNamespace(prioritization_fee=1_000),
-                SimpleNamespace(prioritization_fee=25_000),
-                SimpleNamespace(prioritization_fee=8_000),
-            ]
-        )
-        client = SimpleNamespace(_provider=provider)
-
-        selected = swapstable.recommended_stable_priority_fee(
-            client,
-            [swapstable.Pubkey.default()],
-        )
-
-        self.assertEqual(selected, 25_000)
-
-    def test_stable_fee_uses_fallback_only_when_live_fees_are_unavailable(self):
-        provider = SimpleNamespace()
-
-        def unavailable(*_args):
-            raise RuntimeError("RPC unavailable")
-
-        provider.make_request = unavailable
-        client = SimpleNamespace(_provider=provider)
-
+    def test_jupiter_recommended_mode_preserves_generated_fee(self):
         with patch.object(
             swapstable,
-            "STABLE_PRIORITY_FEE_FALLBACK_MICRO_LAMPORTS",
-            12_345,
+            "JUPITER_PRIORITY_FEE_MODE",
+            "recommended",
         ):
-            selected = swapstable.recommended_stable_priority_fee(
-                client,
-                [swapstable.Pubkey.default()],
-            )
-
-        self.assertEqual(selected, 12_345)
+            self.assertEqual(swapstable.jupiter_order_fee_params(), {})
+            self.assertIsNone(swapstable.jupiter_swap_priority_fee_request())
+            with patch.object(swapstable, "cap_jup_priority_fee") as cap:
+                tx_bytes = b"jupiter-generated-transaction"
+                self.assertIs(
+                    swapstable.apply_jup_priority_fee_policy(tx_bytes),
+                    tx_bytes,
+                )
+                cap.assert_not_called()
 
     def test_accounting_snapshot_uses_confirmed_exit_balances_coherently(self):
         before = {
