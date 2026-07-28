@@ -120,12 +120,18 @@ def _migrate_legacy_pnl(state, path):
         return
 
 
-def _connect(db_path):
+def _connect(db_path, timeout_seconds=10):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path, timeout=10, check_same_thread=False)
+    timeout_seconds = max(0.05, float(timeout_seconds))
+    busy_timeout_ms = max(1, int(round(timeout_seconds * 1000)))
+    connection = sqlite3.connect(
+        db_path,
+        timeout=timeout_seconds,
+        check_same_thread=False,
+    )
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 10000")
+    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     return connection
@@ -286,11 +292,16 @@ def _read_state_from_connection(connection):
     return state
 
 
-def read_state(db_path=DEFAULT_DB_PATH, legacy_state_path=None, legacy_pnl_path=None):
+def read_state(
+    db_path=DEFAULT_DB_PATH,
+    legacy_state_path=None,
+    legacy_pnl_path=None,
+    timeout_seconds=10,
+):
     legacy_state_path, legacy_pnl_path = _default_legacy_paths(
         db_path, legacy_state_path, legacy_pnl_path
     )
-    connection = _connect(db_path)
+    connection = _connect(db_path, timeout_seconds=timeout_seconds)
     try:
         _initialize_database(connection, legacy_state_path, legacy_pnl_path)
         return _read_state_from_connection(connection)
@@ -298,49 +309,59 @@ def read_state(db_path=DEFAULT_DB_PATH, legacy_state_path=None, legacy_pnl_path=
         connection.close()
 
 
-def read_daily_profit(db_path=DEFAULT_DB_PATH, days=371, now=None):
+def _read_daily_profit_from_connection(connection, days=371, now=None):
     days = max(1, min(int(days), 3660))
     now = now or datetime.now(timezone.utc)
     start_date = (now.astimezone(timezone.utc).date() - timedelta(days=days - 1)).isoformat()
+    rows = connection.execute(
+        """
+        SELECT
+            substr(timestamp, 1, 10) AS profit_date,
+            SUM(realized_pnl_usd) AS profit_usdc,
+            COUNT(*) AS attempts,
+            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successful_arbs
+        FROM attempts
+        WHERE substr(timestamp, 1, 10) >= ?
+        GROUP BY substr(timestamp, 1, 10)
+        ORDER BY profit_date
+        """,
+        (start_date,),
+    ).fetchall()
+    return [
+        {
+            "date": row["profit_date"],
+            "profit_usdc": row["profit_usdc"],
+            "attempts": row["attempts"],
+            "successful_arbs": row["successful_arbs"],
+        }
+        for row in rows
+    ]
+
+
+def read_daily_profit(db_path=DEFAULT_DB_PATH, days=371, now=None):
     connection = _connect(db_path)
     try:
         legacy_state_path, legacy_pnl_path = _default_legacy_paths(db_path, None, None)
         _initialize_database(connection, legacy_state_path, legacy_pnl_path)
-        rows = connection.execute(
-            """
-            SELECT
-                substr(timestamp, 1, 10) AS profit_date,
-                SUM(realized_pnl_usd) AS profit_usdc,
-                COUNT(*) AS attempts,
-                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successful_arbs
-            FROM attempts
-            WHERE substr(timestamp, 1, 10) >= ?
-            GROUP BY substr(timestamp, 1, 10)
-            ORDER BY profit_date
-            """,
-            (start_date,),
-        ).fetchall()
-        return [
-            {
-                "date": row["profit_date"],
-                "profit_usdc": row["profit_usdc"],
-                "attempts": row["attempts"],
-                "successful_arbs": row["successful_arbs"],
-            }
-            for row in rows
-        ]
+        return _read_daily_profit_from_connection(connection, days, now)
     finally:
         connection.close()
 
 
-def read_dashboard_state(db_path=DEFAULT_DB_PATH, days=371):
-    state = read_state(db_path)
-    state["daily_profit"] = {
-        "currency": "USDC",
-        "timezone": "UTC",
-        "days": read_daily_profit(db_path, days),
-    }
-    return state
+def read_dashboard_state(db_path=DEFAULT_DB_PATH, days=371, timeout_seconds=1):
+    legacy_state_path, legacy_pnl_path = _default_legacy_paths(db_path, None, None)
+    connection = _connect(db_path, timeout_seconds=timeout_seconds)
+    try:
+        _initialize_database(connection, legacy_state_path, legacy_pnl_path)
+        state = _read_state_from_connection(connection)
+        state["daily_profit"] = {
+            "currency": "USDC",
+            "timezone": "UTC",
+            "days": _read_daily_profit_from_connection(connection, days),
+        }
+        return state
+    finally:
+        connection.close()
 
 
 class BotStateStore:

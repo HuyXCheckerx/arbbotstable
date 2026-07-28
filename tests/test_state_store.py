@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import state_store
 from state_store import (
     BotStateStore,
     default_state,
+    read_dashboard_state,
     read_daily_profit,
     read_state,
 )
@@ -254,6 +256,13 @@ class BotStateStoreTests(unittest.TestCase):
         self.assertEqual(days[0]["attempts"], 2)
         self.assertEqual(days[0]["successful_arbs"], 1)
         self.assertAlmostEqual(days[1]["profit_usdc"], 0.5)
+
+    def test_dashboard_state_reads_state_and_profit_with_one_connection(self):
+        with patch("state_store._connect", wraps=state_store._connect) as connect:
+            state = read_dashboard_state(self.db_path)
+
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(state["daily_profit"]["currency"], "USDC")
 
 
 if __name__ == "__main__":

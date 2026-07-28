@@ -1,13 +1,21 @@
 import json
 import os
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from state_store import DEFAULT_DB_PATH, read_dashboard_state, read_state
 
 
 PORT = int(os.environ.get("PORT", 25284))
 DB_PATH = os.environ.get("BOT_STATE_DB", str(DEFAULT_DB_PATH))
+REQUEST_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.environ.get("WEB_REQUEST_TIMEOUT_SECONDS", "10")),
+)
+DB_TIMEOUT_SECONDS = max(
+    0.05,
+    float(os.environ.get("WEB_DB_TIMEOUT_SECONDS", "1")),
+)
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -618,17 +626,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       }
     }
 
+    const REFRESH_INTERVAL_MS = 2000;
+    const REFRESH_TIMEOUT_MS = 5000;
+
     async function refresh() {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
       try {
-        const response = await fetch('/api/state', { cache: 'no-store' });
+        const response = await fetch('/api/state', { cache: 'no-store', signal: controller.signal });
         if (!response.ok) throw new Error('State endpoint unavailable');
         render(await response.json());
       } catch (error) {
         $('offline-banner').style.display = 'block';
         $('status-dot').className = 'dot bad'; text('status-label', 'Disconnected');
+      } finally {
+        clearTimeout(timeout);
+        setTimeout(refresh, REFRESH_INTERVAL_MS);
       }
     }
-    refresh(); setInterval(refresh, 2000);
+    refresh();
   </script>
 </body>
 </html>"""
@@ -646,25 +662,50 @@ def state_is_fresh(state, max_age_seconds=30):
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+
     def log_message(self, format, *args):
         pass
 
     def _send(self, status, content_type, payload):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_state_error(self, endpoint, error):
+        print(f"[!] Dashboard {endpoint} failed: {error}", flush=True)
+        payload = json.dumps(
+            {"ok": False, "error": "dashboard state temporarily unavailable"},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self._send(503, "application/json; charset=utf-8", payload)
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/api/state":
-            payload = json.dumps(read_dashboard_state(DB_PATH), separators=(",", ":")).encode("utf-8")
+            try:
+                state = read_dashboard_state(
+                    DB_PATH,
+                    timeout_seconds=DB_TIMEOUT_SECONDS,
+                )
+            except Exception as error:
+                self._send_state_error("state read", error)
+                return
+            payload = json.dumps(state, separators=(",", ":")).encode("utf-8")
             self._send(200, "application/json; charset=utf-8", payload)
             return
         if path == "/healthz":
-            state = read_state(DB_PATH)
+            try:
+                state = read_state(DB_PATH, timeout_seconds=DB_TIMEOUT_SECONDS)
+            except Exception as error:
+                self._send_state_error("health check", error)
+                return
             healthy = state_is_fresh(state) and state.get("bot", {}).get("status") != "offline"
             payload = json.dumps({"ok": healthy, "status": state.get("bot", {}).get("status", "offline")}).encode("utf-8")
             self._send(200 if healthy else 503, "application/json; charset=utf-8", payload)
@@ -675,9 +716,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
 
 
+class DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+
 def run():
     server_address = ("0.0.0.0", PORT)
-    httpd = HTTPServer(server_address, DashboardHandler)
+    httpd = DashboardServer(server_address, DashboardHandler)
     print(f"[*] Dashboard running on port {PORT}")
     httpd.serve_forever()
 
