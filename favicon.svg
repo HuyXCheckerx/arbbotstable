@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title description">
+  <title id="title">Quant Signal</title>
+  <desc id="description">A stylized letter Q containing an ascending market signal.</desc>
+  <defs>
+    <linearGradient id="gold" x1="12" y1="52" x2="52" y2="12" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A98745"/>
+      <stop offset="1" stop-color="#E1CA94"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#080B0B"/>
+  <rect x="3" y="3" width="58" height="58" rx="13" fill="none" stroke="#C7AA69" stroke-opacity=".5" stroke-width="2"/>
+  <circle cx="31" cy="30" r="19" fill="#0D1110" stroke="url(#gold)" stroke-width="4"/>
+  <path d="M44 43 53 52" fill="none" stroke="url(#gold)" stroke-linecap="round" stroke-width="5"/>
+  <path d="m17 36 9-9 7 6 12-14" fill="none" stroke="#79B493" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.5"/>
+  <circle cx="17" cy="36" r="2.5" fill="#E1CA94"/>
+  <circle cx="26" cy="27" r="2.5" fill="#E1CA94"/>
+  <circle cx="33" cy="33" r="2.5" fill="#E1CA94"/>
+  <circle cx="45" cy="19" r="2.5" fill="#E1CA94"/>
+</svg>

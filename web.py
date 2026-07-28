@@ -2,12 +2,14 @@ import json
 import os
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 
 from state_store import DEFAULT_DB_PATH, read_dashboard_state, read_state
 
 
 PORT = int(os.environ.get("PORT", 25284))
 DB_PATH = os.environ.get("BOT_STATE_DB", str(DEFAULT_DB_PATH))
+FAVICON_PATH = Path(__file__).with_name("favicon.svg")
 REQUEST_TIMEOUT_SECONDS = max(
     1.0,
     float(os.environ.get("WEB_REQUEST_TIMEOUT_SECONDS", "10")),
@@ -24,6 +26,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#080b0b">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>Stable Execution &mdash; Arbitrage Operations</title>
   <style>
     :root {
@@ -688,6 +691,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path in ("/favicon.svg", "/favicon.ico"):
+            try:
+                payload = FAVICON_PATH.read_bytes()
+            except OSError as error:
+                print(f"[!] Dashboard favicon read failed: {error}", flush=True)
+                self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
+                return
+            self._send(200, "image/svg+xml", payload)
+            return
         if path == "/api/state":
             try:
                 state = read_dashboard_state(

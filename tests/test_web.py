@@ -1,6 +1,7 @@
 import http.client
 import threading
 import unittest
+import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
 import web
@@ -68,6 +69,15 @@ class DashboardServerTests(unittest.TestCase):
     def test_browser_polling_is_sequential_and_time_bounded(self):
         self.assertIn("AbortController", web.HTML_TEMPLATE)
         self.assertNotIn("setInterval(refresh", web.HTML_TEMPLATE)
+
+    def test_quant_logo_is_served_as_the_favicon(self):
+        status, headers, body = self.request("/favicon.svg")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/svg+xml")
+        self.assertEqual(int(headers["Content-Length"]), len(body))
+        self.assertEqual(ET.fromstring(body).tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertIn('href="/favicon.svg"', web.HTML_TEMPLATE)
 
 
 if __name__ == "__main__":
