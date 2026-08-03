@@ -19,6 +19,7 @@ logs/
 # Local dependencies and Python artifacts.
 .local/
 .venv-eth/
+node_modules/
 .cache/
 __pycache__/
 *.py[cod]

@@ -1,0 +1,23 @@
+{
+  "name": "arbbot-solana-flash-arb",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "solana:flash": "tsx solana_flash_arb.ts",
+    "solana:quote": "tsx solana_flash_arb.ts --quote-only",
+    "solana:test": "node --import tsx --test tests/solana_flash_arb.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@0dotxyz/p0-ts-sdk": "2.5.3",
+    "@solana/spl-token": "0.4.14",
+    "@solana/web3.js": "1.98.4",
+    "bs58": "6.0.0",
+    "dotenv": "17.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.1.0",
+    "tsx": "4.23.1",
+    "typescript": "5.9.2"
+  }
+}
