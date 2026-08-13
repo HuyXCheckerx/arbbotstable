@@ -1,6 +1,14 @@
 import tempfile
 import unittest
+import sys
 from pathlib import Path
+SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+for sub in ("core", "recovery", "engines", "web", "deployers"):
+    subpath = str(SRC_DIR / sub)
+    if subpath not in sys.path:
+        sys.path.insert(0, subpath)
 
 from recovery_store import RecoveryStore
 

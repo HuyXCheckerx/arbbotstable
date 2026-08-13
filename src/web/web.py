@@ -3,6 +3,14 @@ import os
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+import sys
+SRC_DIR = Path(__file__).resolve().parent.parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+for sub in ("core", "recovery", "engines", "web", "deployers"):
+    subpath = str(SRC_DIR / sub)
+    if subpath not in sys.path:
+        sys.path.insert(0, subpath)
 
 from state_store import DEFAULT_DB_PATH, read_dashboard_state, read_state
 

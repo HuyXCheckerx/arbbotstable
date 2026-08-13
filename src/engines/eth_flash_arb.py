@@ -1,0 +1,1458 @@
+#!/usr/bin/env python3
+"""Build and simulate a Morpho-funded Matcha -> Stable.com Ethereum arbitrage.
+
+The default mode never signs or broadcasts. A deployed
+MorphoMatchaStableArb contract is required because an atomic flash loan cannot
+be executed from an EOA or from Python alone.
+"""
+
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Any, Iterable
+import uuid
+
+try:
+    import requests
+except ImportError:  # Allows helpers and --help to run before dependencies install.
+    requests = None
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # Reported with the other runtime dependencies when used.
+    load_dotenv = None
+
+if load_dotenv is not None:
+    # Route configuration belongs to this project's .env. Override stale shell
+    # exports so `python3 eth_flash_arb.py` behaves consistently in every shell.
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+
+
+CHAIN_ID = 1
+STABLE_CHAIN_ID = "101"
+DECIMALS = 6
+USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+PYUSD = "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"
+MORPHO = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
+STABLE_POOL = "0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da"
+MATCHA_BASE_URL = "https://meta.matcha.xyz"
+STABLE_BASE_URL = "https://api-defi.stable.com"
+BINANCE_ETH_PRICE_URL = (
+    "https://data-api.binance.vision/api/v3/ticker/price?symbol=ETHUSDC"
+)
+MATCHA_AGGREGATORS = (
+    "0x",
+    "Lightning",
+    "1inch",
+    "Barter",
+    "Bebop",
+    "Bitget",
+    "KyberSwap",
+    "OKX",
+    "ParaSwap",
+    "Enso",
+)
+LOAN_TOKENS = {
+    "USDC": USDC,
+    "PYUSD": PYUSD,
+}
+INTERMEDIATE_SYMBOL = "USDT"
+INTERMEDIATE_TOKEN = USDT
+MAX_CAPACITY_SIZING_ATTEMPTS = 5
+
+EXECUTOR_ABI = [
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
+            {
+                "components": [
+                    {"internalType": "address", "name": "target", "type": "address"},
+                    {
+                        "internalType": "address",
+                        "name": "allowanceTarget",
+                        "type": "address",
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "sellAmount",
+                        "type": "uint256",
+                    },
+                    {"internalType": "uint256", "name": "value", "type": "uint256"},
+                    {"internalType": "bytes", "name": "data", "type": "bytes"},
+                ],
+                "internalType": "struct MorphoMatchaStableArb.MatchaRoute",
+                "name": "matcha",
+                "type": "tuple",
+            },
+            {
+                "components": [
+                    {
+                        "internalType": "uint256",
+                        "name": "amountIn",
+                        "type": "uint256",
+                    },
+                    {"internalType": "uint64", "name": "deadline", "type": "uint64"},
+                    {"internalType": "uint256", "name": "nonce", "type": "uint256"},
+                    {
+                        "internalType": "bytes",
+                        "name": "maintainerSignature",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "executionFeeNative",
+                        "type": "uint256",
+                    },
+                ],
+                "internalType": "struct MorphoMatchaStableArb.StableOrder",
+                "name": "stable",
+                "type": "tuple",
+            },
+            {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+        ],
+        "name": "executeArbitrage",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
+            {
+                "internalType": "address",
+                "name": "loanToken",
+                "type": "address",
+            },
+            {
+                "components": [
+                    {"internalType": "address", "name": "target", "type": "address"},
+                    {
+                        "internalType": "address",
+                        "name": "allowanceTarget",
+                        "type": "address",
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "sellAmount",
+                        "type": "uint256",
+                    },
+                    {"internalType": "uint256", "name": "value", "type": "uint256"},
+                    {"internalType": "bytes", "name": "data", "type": "bytes"},
+                ],
+                "internalType": "struct MorphoMatchaStableArb.MatchaRoute",
+                "name": "matcha",
+                "type": "tuple",
+            },
+            {
+                "components": [
+                    {
+                        "internalType": "uint256",
+                        "name": "amountIn",
+                        "type": "uint256",
+                    },
+                    {"internalType": "uint64", "name": "deadline", "type": "uint64"},
+                    {"internalType": "uint256", "name": "nonce", "type": "uint256"},
+                    {
+                        "internalType": "bytes",
+                        "name": "maintainerSignature",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "executionFeeNative",
+                        "type": "uint256",
+                    },
+                ],
+                "internalType": "struct MorphoMatchaStableArb.StableOrder",
+                "name": "stable",
+                "type": "tuple",
+            },
+            {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+        ],
+        "name": "executeArbitrageWithLoanToken",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "token", "type": "address"},
+        ],
+        "name": "supportsLoanToken",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+
+class ArbError(RuntimeError):
+    pass
+
+
+class RetryableArbError(ArbError):
+    pass
+
+
+class QuoteStaleError(RetryableArbError):
+    pass
+
+
+class TransientRpcError(RetryableArbError):
+    pass
+
+
+def classify_atomic_simulation_error(exc: Exception) -> ArbError:
+    detail = str(exc)
+    lowered = detail.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "read timed out",
+            "connect timeout",
+            "connection reset",
+            "max retries exceeded",
+            "too many requests",
+            "status 429",
+            "status 502",
+            "status 503",
+            "status 504",
+        )
+    ):
+        return TransientRpcError("Ethereum RPC temporarily failed during simulation")
+    if "064a4ec6" in lowered:
+        return QuoteStaleError(
+            "Matcha route became stale: aggregator output fell below its "
+            "minimum return"
+        )
+    if "3e0aa470" in lowered:
+        return QuoteStaleError(
+            "Matcha route became stale: output fell below the Stable order input"
+        )
+    return ArbError(f"atomic mainnet simulation reverted: {detail}")
+
+
+def ensure_project_runtime() -> None:
+    missing = []
+    if requests is None:
+        missing.append("requests")
+    if load_dotenv is None:
+        missing.append("python-dotenv")
+    try:
+        import web3  # noqa: F401
+    except ImportError:
+        missing.append("web3")
+    if not missing:
+        return
+
+    project_python = Path(__file__).resolve().parent / ".venv-eth" / "bin" / "python"
+    project_environment = project_python.parent.parent
+    if (
+        project_python.is_file()
+        and Path(sys.prefix).resolve() != project_environment.resolve()
+    ):
+        os.execv(str(project_python), [str(project_python), *sys.argv])
+    raise ArbError(
+        "missing Ethereum dependencies: "
+        + ", ".join(missing)
+        + "; run python3 -m venv .venv-eth && "
+        ".venv-eth/bin/python -m pip install -r requirements-eth.txt"
+    )
+
+
+@dataclass(frozen=True)
+class MatchaQuote:
+    aggregator: str
+    target: str
+    allowance_target: str
+    data: str
+    value: int
+    sell_amount: int
+    buy_amount: int
+    gas: int | None = None
+    gas_price: int | None = None
+
+    def contract_tuple(self) -> tuple[str, str, int, int, bytes]:
+        return (
+            self.target,
+            self.allowance_target,
+            self.sell_amount,
+            self.value,
+            bytes.fromhex(self.data[2:]),
+        )
+
+
+@dataclass(frozen=True)
+class StableQuote:
+    amount_in: int
+    amount_out: int
+    token_fee: int | None
+    capacity: Decimal | None
+    minimum: Decimal | None
+    maximum: Decimal | None
+
+
+@dataclass(frozen=True)
+class StableOrder:
+    amount_in: int
+    deadline: int
+    nonce: int
+    maintainer_signature: str
+    execution_fee_native: int
+    order_id: str | None = None
+
+    def contract_tuple(self) -> tuple[int, int, int, bytes, int]:
+        return (
+            self.amount_in,
+            self.deadline,
+            self.nonce,
+            bytes.fromhex(self.maintainer_signature[2:]),
+            self.execution_fee_native,
+        )
+
+
+def amount_to_raw(value: str | Decimal) -> int:
+    try:
+        amount = Decimal(value)
+    except (InvalidOperation, TypeError) as exc:
+        raise ArbError(f"invalid token amount: {value!r}") from exc
+    scaled = amount * (Decimal(10) ** DECIMALS)
+    if amount <= 0 or scaled != scaled.to_integral_value():
+        raise ArbError("token amount must be positive with at most 6 decimals")
+    return int(scaled)
+
+
+def minimum_output_after_slippage(amount: int, slippage_bps: int) -> int:
+    if amount <= 0 or not 0 <= slippage_bps < 10_000:
+        raise ArbError("invalid amount or slippage")
+    return amount * (10_000 - slippage_bps) // 10_000
+
+
+def capacity_limited_loan_amount(
+    loan_amount: int,
+    stable_amount_in: int,
+    capacity_raw: int,
+) -> int:
+    """Scale the loan so Stable's input fits its reported token balance."""
+    if loan_amount <= 0 or stable_amount_in <= 0 or capacity_raw <= 0:
+        raise ArbError("invalid Stable.com capacity sizing values")
+    if stable_amount_in <= capacity_raw:
+        return loan_amount
+    adjusted = loan_amount * capacity_raw // stable_amount_in
+    if adjusted <= 0 or adjusted >= loan_amount:
+        raise ArbError("Stable.com capacity is too small to size this route")
+    return adjusted
+
+
+def parse_binance_eth_usdc_price(payload: Any) -> Decimal:
+    if not isinstance(payload, dict) or payload.get("symbol") != "ETHUSDC":
+        raise ArbError("Binance returned an unexpected ETHUSDC price response")
+    try:
+        price = Decimal(str(payload.get("price")))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ArbError("Binance returned an invalid ETHUSDC price") from exc
+    if not price.is_finite() or price <= 0:
+        raise ArbError("Binance returned a non-positive ETHUSDC price")
+    return price
+
+
+def buffered_eth_usd_price(price: Decimal, buffer_bps: int) -> Decimal:
+    if price <= 0 or not 0 <= buffer_bps <= 1_000:
+        raise ArbError("invalid ETH price or price buffer")
+    buffered = price * Decimal(10_000 + buffer_bps) / Decimal(10_000)
+    return buffered.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+
+
+def raw_to_amount(value: int) -> str:
+    if value < 0:
+        raise ArbError("raw token amount cannot be negative")
+    text = f"{Decimal(value) / (Decimal(10) ** DECIMALS):.{DECIMALS}f}"
+    return text.rstrip("0").rstrip(".") or "0"
+
+
+def raw_to_signed_amount(value: int) -> str:
+    return f"-{raw_to_amount(-value)}" if value < 0 else raw_to_amount(value)
+
+
+def parse_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or value is None:
+        raise ArbError(f"missing or invalid {label}")
+    try:
+        if isinstance(value, str) and value.lower().startswith("0x"):
+            return int(value, 16)
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ArbError(f"missing or invalid {label}") from exc
+
+
+def is_address(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 42 or not value.startswith("0x"):
+        return False
+    try:
+        int(value[2:], 16)
+    except ValueError:
+        return False
+    return True
+
+
+def is_hex_data(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("0x") or len(value) < 10:
+        return False
+    try:
+        bytes.fromhex(value[2:])
+    except ValueError:
+        return False
+    return True
+
+
+def dictionaries(value: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from dictionaries(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from dictionaries(nested)
+
+
+def first_key(value: Any, names: Iterable[str]) -> Any:
+    wanted = tuple(names)
+    for item in dictionaries(value):
+        for name in wanted:
+            if name in item and item[name] not in (None, ""):
+                return item[name]
+    return None
+
+
+def unwrap_data(payload: Any) -> Any:
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        return payload["data"]
+    return payload
+
+
+def parse_matcha_quote(
+    aggregator: str,
+    payload: Any,
+    expected_sell_amount: int,
+) -> MatchaQuote:
+    roots = [payload]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        roots.insert(0, payload["data"])
+
+    holder: dict[str, Any] | None = None
+    for root in roots:
+        if not isinstance(root, dict):
+            continue
+        candidate = root.get("allowanceHolder")
+        if isinstance(candidate, dict):
+            holder = candidate
+            break
+    if holder is None:
+        raise ArbError(f"{aggregator}: response has no allowanceHolder route")
+
+    simulation = holder.get("simulation")
+    if not isinstance(simulation, dict) or str(simulation.get("result", "")).lower() != "success":
+        raise ArbError(f"{aggregator}: allowance-holder simulation was not successful")
+
+    quote = holder.get("quote")
+    if not isinstance(quote, dict):
+        raise ArbError(f"{aggregator}: response has no executable quote")
+    transaction = quote.get("transaction")
+    tx = transaction if isinstance(transaction, dict) else quote
+
+    target = tx.get("to") or quote.get("to")
+    allowance_target = quote.get("allowanceTarget") or holder.get("allowanceTarget")
+    call_data = tx.get("data") or quote.get("data")
+    if not is_address(target) or not is_address(allowance_target) or not is_hex_data(call_data):
+        raise ArbError(f"{aggregator}: incomplete target, allowance target, or calldata")
+
+    sell_amount = parse_integer(quote.get("sellAmount"), f"{aggregator} sellAmount")
+    buy_amount = parse_integer(quote.get("buyAmount"), f"{aggregator} buyAmount")
+    if sell_amount != expected_sell_amount:
+        raise ArbError(
+            f"{aggregator}: sell amount changed from {expected_sell_amount} to {sell_amount}"
+        )
+    if buy_amount <= 0:
+        raise ArbError(f"{aggregator}: non-positive buy amount")
+
+    gas_value = quote.get("gas") or tx.get("gas")
+    gas_price_value = quote.get("gasPrice") or tx.get("gasPrice")
+    return MatchaQuote(
+        aggregator=aggregator,
+        target=target,
+        allowance_target=allowance_target,
+        data=call_data,
+        value=parse_integer(tx.get("value", quote.get("value", 0)), "Matcha value"),
+        sell_amount=sell_amount,
+        buy_amount=buy_amount,
+        gas=parse_integer(gas_value, "Matcha gas") if gas_value is not None else None,
+        gas_price=(
+            parse_integer(gas_price_value, "Matcha gasPrice")
+            if gas_price_value is not None
+            else None
+        ),
+    )
+
+
+def select_best_matcha_quote(
+    responses: Iterable[tuple[str, Any]],
+    expected_sell_amount: int,
+) -> MatchaQuote:
+    valid: list[MatchaQuote] = []
+    errors: list[str] = []
+    for aggregator, response in responses:
+        try:
+            valid.append(parse_matcha_quote(aggregator, response, expected_sell_amount))
+        except ArbError as exc:
+            errors.append(str(exc))
+    if not valid:
+        detail = "; ".join(errors) if errors else "no aggregator responses"
+        raise ArbError(f"Matcha returned no executable simulated quote: {detail}")
+    return max(valid, key=lambda quote: (quote.buy_amount, -(quote.gas or 0)))
+
+
+def _stable_raw_amount(
+    value: Any,
+    label: str,
+    fractional_rounding: str | None = None,
+) -> int:
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ArbError(f"invalid Stable.com {label}") from exc
+    if decimal_value < 0:
+        raise ArbError(f"invalid Stable.com {label}")
+    scaled = decimal_value * (Decimal(10) ** DECIMALS)
+    if scaled != scaled.to_integral_value():
+        if fractional_rounding is None:
+            raise ArbError(f"Stable.com {label} has more than 6 decimals")
+        scaled = scaled.to_integral_value(rounding=fractional_rounding)
+    return int(scaled)
+
+
+def parse_stable_quote(payload: Any, amount_in: int) -> StableQuote:
+    amount_out_value = first_key(payload, ("amountTo", "amountOut", "outputAmount"))
+    if amount_out_value is None:
+        raise ArbError("Stable.com status response has no output amount")
+    token_fee_value = first_key(payload, ("tokenFee", "protocolFee"))
+    # Stable currently returns the accepted input-token pool size as asset.balance.
+    # Keep the older names for compatibility with previous response shapes.
+    capacity_value = first_key(
+        payload,
+        ("available", "capacity", "liquidity", "balance"),
+    )
+    minimum_value = first_key(payload, ("min", "minimum"))
+    maximum_value = first_key(payload, ("max", "maximum"))
+
+    def optional_decimal(value: Any) -> Decimal | None:
+        try:
+            parsed = Decimal(str(value)) if value is not None else None
+        except InvalidOperation:
+            return None
+        return parsed if parsed is not None and parsed >= 0 else None
+
+    return StableQuote(
+        amount_in=amount_in,
+        amount_out=_stable_raw_amount(
+            amount_out_value,
+            "output amount",
+            fractional_rounding=ROUND_DOWN,
+        ),
+        token_fee=(
+            _stable_raw_amount(
+                token_fee_value,
+                "token fee",
+                fractional_rounding=ROUND_CEILING,
+            )
+            if token_fee_value is not None
+            else None
+        ),
+        capacity=optional_decimal(capacity_value),
+        minimum=optional_decimal(minimum_value),
+        maximum=optional_decimal(maximum_value),
+    )
+
+
+def parse_stable_order(payload: Any, expected_amount_in: int) -> StableOrder:
+    order = unwrap_data(payload)
+    if not isinstance(order, dict):
+        raise ArbError("Stable.com create response is not an object")
+    signature = order.get("maintainerSignature")
+    if not isinstance(signature, str):
+        raise ArbError("Stable.com order has no maintainer signature")
+    signature = signature if signature.startswith("0x") else f"0x{signature}"
+    try:
+        signature_bytes = bytes.fromhex(signature[2:])
+    except ValueError as exc:
+        raise ArbError("Stable.com maintainer signature is not hex") from exc
+    if len(signature_bytes) != 65:
+        raise ArbError("Ethereum Stable.com signature must be 65 bytes")
+
+    amount_value = order.get("amountFrom", order.get("amountIn"))
+    if amount_value is not None:
+        returned_amount = _stable_raw_amount(amount_value, "order input amount")
+        if returned_amount != expected_amount_in:
+            raise ArbError("Stable.com changed the signed input amount")
+
+    deadline = parse_integer(order.get("deadline"), "Stable.com deadline")
+    if deadline <= int(time.time()):
+        raise ArbError("Stable.com returned an expired order")
+    return StableOrder(
+        amount_in=expected_amount_in,
+        deadline=deadline,
+        nonce=parse_integer(order.get("nonce"), "Stable.com nonce"),
+        maintainer_signature=signature,
+        execution_fee_native=parse_integer(
+            order.get("executionFeeNative", order.get("nativeFee", 0)),
+            "Stable.com execution fee",
+        ),
+        order_id=str(order["orderId"]) if order.get("orderId") is not None else None,
+    )
+
+
+class HttpJsonClient:
+    def __init__(self, timeout: float, user_agent: str):
+        if requests is None:
+            raise ArbError("requests is required; install requirements-eth.txt")
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/json",
+                "user-agent": user_agent,
+            }
+        )
+
+    def get(self, url: str, *, headers: dict[str, str] | None = None) -> Any:
+        try:
+            response = self.session.get(url, headers=headers, timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise ArbError(f"GET {url} failed: {exc}") from exc
+        return self._decode(response, url)
+
+    def post(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        try:
+            response = self.session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise ArbError(f"POST {url} failed: {exc}") from exc
+        return self._decode(response, url)
+
+    @staticmethod
+    def _decode(response: requests.Response, url: str) -> Any:
+        if response.status_code >= 400:
+            cloudflare = (
+                " Cloudflare may be blocking this undocumented API."
+                if response.status_code == 403
+                else ""
+            )
+            raise ArbError(f"{url} returned HTTP {response.status_code}.{cloudflare}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise ArbError(f"{url} returned non-JSON content") from exc
+
+
+class MatchaClient:
+    def __init__(self, http: HttpJsonClient, base_url: str = MATCHA_BASE_URL):
+        self.http = http
+        self.base_url = base_url.rstrip("/")
+        self.headers = {
+            "origin": "https://meta.matcha.xyz",
+            "referer": "https://meta.matcha.xyz/",
+        }
+
+    def gas_price(self) -> int:
+        payload = self.http.get(
+            f"{self.base_url}/api/gas?chainId={CHAIN_ID}",
+            headers=self.headers,
+        )
+        value = first_key(payload, ("price", "gasPrice", "fast", "standard"))
+        return parse_integer(value, "Matcha gas price")
+
+    def quotes(
+        self,
+        executor: str,
+        sell_amount: int,
+        slippage_bps: int,
+        aggregators: Iterable[str],
+        sell_token_address: str = USDC,
+        buy_token_address: str = USDT,
+    ) -> list[tuple[str, Any]]:
+        gas_price = self.gas_price()
+        competition = self.http.post(
+            f"{self.base_url}/api/competitions",
+            {
+                "chainId": CHAIN_ID,
+                "isAllowanceHolderFlow": True,
+                "gasPrice": str(gas_price),
+                "sellTokenAddress": sell_token_address.lower(),
+                "sellTokenDecimals": DECIMALS,
+                "buyTokenAddress": buy_token_address.lower(),
+                "buyTokenDecimals": DECIMALS,
+                "sellAmount": str(sell_amount),
+                "slippageBps": slippage_bps,
+                "slippagePpm": slippage_bps * 100,
+                "taker": executor,
+            },
+            headers=self.headers,
+        )
+        competition_id = first_key(competition, ("competitionId", "id"))
+        if not competition_id:
+            raise ArbError("Matcha competition response has no competitionId")
+
+        def fetch(aggregator: str) -> tuple[str, Any]:
+            response = self.http.post(
+                f"{self.base_url}/api/quotes?aggregator={aggregator}",
+                {"competitionId": competition_id, "aggregator": aggregator},
+                headers=self.headers,
+            )
+            return aggregator, response
+
+        responses: list[tuple[str, Any]] = []
+        errors: list[str] = []
+        selected = tuple(aggregators)
+        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as pool:
+            futures = {pool.submit(fetch, name): name for name in selected}
+            for future in as_completed(futures):
+                try:
+                    responses.append(future.result())
+                except ArbError as exc:
+                    errors.append(f"{futures[future]}: {exc}")
+        if not responses:
+            raise ArbError("all Matcha quote requests failed: " + "; ".join(errors))
+        return responses
+
+
+class StableClient:
+    def __init__(self, http: HttpJsonClient, base_url: str = STABLE_BASE_URL):
+        self.http = http
+        self.base_url = base_url.rstrip("/")
+        self.headers = {
+            "accept-language": "en-US,en;q=0.9",
+            "origin": "https://stable.com",
+            "priority": "u=1, i",
+            "referer": "https://stable.com/",
+            "sec-ch-ua": (
+                '"Not;A=Brand";v="8", "Chromium";v="150", '
+                '"Google Chrome";v="150"'
+            ),
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+        }
+
+    @staticmethod
+    def _base_payload(
+        executor: str,
+        asset_from: str,
+        asset_to: str,
+        amount_in: int,
+    ) -> dict[str, Any]:
+        return {
+            "assetFrom": asset_from,
+            "assetTo": asset_to,
+            "chainFrom": STABLE_CHAIN_ID,
+            "chainTo": STABLE_CHAIN_ID,
+            "amountFrom": raw_to_amount(amount_in),
+            "addressFrom": executor,
+            "addressTo": executor,
+            "gasLess": False,
+        }
+
+    def quote(
+        self,
+        executor: str,
+        asset_from: str,
+        asset_to: str,
+        amount_in: int,
+    ) -> StableQuote:
+        payload = self.http.post(
+            f"{self.base_url}/swap/status",
+            self._base_payload(executor, asset_from, asset_to, amount_in),
+            headers=self.headers,
+        )
+        return parse_stable_quote(payload, amount_in)
+
+    def create_order(
+        self,
+        executor: str,
+        asset_from: str,
+        asset_to: str,
+        amount_in: int,
+        amount_out: int,
+    ) -> StableOrder:
+        request = self._base_payload(executor, asset_from, asset_to, amount_in)
+        request.update(
+            {
+                "amountTo": raw_to_amount(amount_out),
+                "device": str(uuid.uuid4()),
+            }
+        )
+        payload = self.http.post(
+            f"{self.base_url}/swap/create/singleChain",
+            request,
+            headers=self.headers,
+        )
+        return parse_stable_order(payload, amount_in)
+
+
+def require_web3():
+    try:
+        from web3 import Web3
+    except ImportError as exc:
+        raise ArbError("web3 is required; install requirements-eth.txt") from exc
+    return Web3
+
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return "0x" + value.hex()
+    if hasattr(value, "hex") and callable(value.hex):
+        text = value.hex()
+        return text if str(text).startswith("0x") else f"0x{text}"
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def require_executor_loan_support(
+    rpc_url: str,
+    rpc_timeout: float,
+    executor_address: str,
+    loan_token: str,
+) -> None:
+    """Fail before creating a Stable order when PYUSD support is not deployed."""
+    if loan_token.lower() == USDC.lower():
+        return
+    Web3 = require_web3()
+    web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
+    try:
+        if web3.eth.chain_id != CHAIN_ID:
+            raise ArbError("Ethereum mainnet is required")
+        executor = Web3.to_checksum_address(executor_address)
+        if len(web3.eth.get_code(executor)) == 0:
+            raise ArbError("executor address has no deployed bytecode")
+        contract = web3.eth.contract(address=executor, abi=EXECUTOR_ABI)
+        supported = contract.functions.supportsLoanToken(
+            Web3.to_checksum_address(loan_token)
+        ).call()
+    except ArbError:
+        raise
+    except Exception as exc:
+        raise ArbError(
+            "PYUSD borrowing requires the upgraded executor; deploy the updated "
+            "contract and set ETH_EXECUTOR_ADDRESS to its address"
+        ) from exc
+    if not supported:
+        raise ArbError("executor does not support PYUSD borrowing")
+
+
+def prepare_transaction(
+    rpc_url: str,
+    rpc_timeout: float,
+    executor_address: str,
+    operator_address: str,
+    loan_amount: int,
+    loan_token: str,
+    matcha: MatchaQuote,
+    stable: StableOrder,
+    min_profit: int,
+    gas_limit_multiplier: Decimal,
+    max_fee_gwei: Decimal | None,
+) -> tuple[Any, dict[str, Any], int, int]:
+    Web3 = require_web3()
+    web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
+    try:
+        rpc_chain_id = web3.eth.chain_id
+    except Exception as exc:
+        detail = str(exc).replace(rpc_url, "<redacted RPC URL>")
+        raise TransientRpcError(
+            f"cannot connect to ETH_RPC_URL ({type(exc).__name__}: {detail})"
+        ) from exc
+    if rpc_chain_id != CHAIN_ID:
+        raise ArbError(f"RPC chain ID is {rpc_chain_id}; Ethereum mainnet is required")
+
+    executor = Web3.to_checksum_address(executor_address)
+    operator = Web3.to_checksum_address(operator_address)
+    code = web3.eth.get_code(executor)
+    if len(code) == 0:
+        raise ArbError("executor address has no deployed bytecode")
+    contract = web3.eth.contract(address=executor, abi=EXECUTOR_ABI)
+    contract_owner = contract.functions.owner().call()
+    if Web3.to_checksum_address(contract_owner) != operator:
+        raise ArbError(f"operator is not executor owner ({contract_owner})")
+
+    matcha_arguments = matcha.contract_tuple()
+    matcha_arguments = (
+        Web3.to_checksum_address(matcha_arguments[0]),
+        Web3.to_checksum_address(matcha_arguments[1]),
+        *matcha_arguments[2:],
+    )
+    if loan_token.lower() == USDC.lower():
+        # Keep USDC routes compatible with the already-deployed executor. The
+        # upgraded executor retains this legacy entry point.
+        function = contract.functions.executeArbitrage(
+            loan_amount,
+            matcha_arguments,
+            stable.contract_tuple(),
+            min_profit,
+        )
+    else:
+        checksum_loan_token = Web3.to_checksum_address(loan_token)
+        try:
+            supported = contract.functions.supportsLoanToken(
+                checksum_loan_token
+            ).call()
+        except Exception as exc:
+            raise ArbError(
+                "PYUSD borrowing requires the upgraded executor; deploy the updated contract "
+                "and set ETH_EXECUTOR_ADDRESS to its address"
+            ) from exc
+        if not supported:
+            raise ArbError("executor does not support the selected loan token")
+        function = contract.functions.executeArbitrageWithLoanToken(
+            loan_amount,
+            checksum_loan_token,
+            matcha_arguments,
+            stable.contract_tuple(),
+            min_profit,
+        )
+    native_value = matcha.value + stable.execution_fee_native
+    call_parameters = {"from": operator, "value": native_value}
+    try:
+        function.call(call_parameters)
+        estimated_gas = function.estimate_gas(call_parameters)
+    except Exception as exc:
+        raise classify_atomic_simulation_error(exc) from exc
+
+    gas_limit = int((Decimal(estimated_gas) * gas_limit_multiplier).to_integral_value(rounding=ROUND_CEILING))
+    latest = web3.eth.get_block("latest")
+    priority_fee = int(web3.to_wei(Decimal("0.05"), "gwei"))
+    try:
+        priority_fee = int(web3.eth.max_priority_fee)
+    except Exception:
+        pass
+    if max_fee_gwei is not None:
+        max_fee_per_gas = int(web3.to_wei(max_fee_gwei, "gwei"))
+    else:
+        base_fee = int(latest.get("baseFeePerGas", web3.eth.gas_price))
+        max_fee_per_gas = base_fee * 2 + priority_fee
+    if max_fee_per_gas < priority_fee:
+        raise ArbError("max fee per gas is below the priority fee")
+
+    transaction = function.build_transaction(
+        {
+            "from": operator,
+            "chainId": CHAIN_ID,
+            "nonce": web3.eth.get_transaction_count(operator, "pending"),
+            "gas": gas_limit,
+            "maxFeePerGas": max_fee_per_gas,
+            "maxPriorityFeePerGas": priority_fee,
+            "value": native_value,
+        }
+    )
+    return web3, transaction, estimated_gas, max_fee_per_gas
+
+
+def gas_cost_usdc_raw(gas_limit: int, max_fee_per_gas: int, eth_usd: Decimal) -> int:
+    return wei_cost_usdc_raw(gas_limit * max_fee_per_gas, eth_usd)
+
+
+def wei_cost_usdc_raw(value_wei: int, eth_usd: Decimal) -> int:
+    cost = Decimal(value_wei) / (Decimal(10) ** 18) * eth_usd * (Decimal(10) ** DECIMALS)
+    return int(cost.to_integral_value(rounding=ROUND_CEILING))
+
+
+def parser() -> argparse.ArgumentParser:
+    def setting(name: str, fallback: str | None = None) -> str | None:
+        value = os.getenv(name)
+        return value if value not in (None, "") else fallback
+
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--executor", default=setting("ETH_EXECUTOR_ADDRESS"))
+    result.add_argument("--operator", default=setting("ETH_OPERATOR_ADDRESS"))
+    result.add_argument("--rpc-url", default=setting("ETH_RPC_URL"))
+    result.add_argument(
+        "--amount",
+        "--amount-usdc",
+        dest="amount",
+        default=setting("ETH_ARB_AMOUNT", setting("ETH_ARB_AMOUNT_USDC", "50000")),
+        help="maximum loan amount; automatically reduced to Stable's pool capacity",
+    )
+    result.add_argument(
+        "--loan-token",
+        type=str.upper,
+        choices=tuple(LOAN_TOKENS),
+        default=setting("ETH_ARB_LOAN_TOKEN", "USDC").upper(),
+        help="token borrowed from Morpho and repaid after the USDT round trip",
+    )
+    result.add_argument(
+        "--stable-capacity-buffer",
+        default=setting("ETH_ARB_STABLE_CAPACITY_BUFFER", "1"),
+        help="USDT left below Stable's reported input-pool maximum",
+    )
+    result.add_argument(
+        "--slippage-bps",
+        type=int,
+        default=setting("ETH_ARB_SLIPPAGE_BPS", "5"),
+    )
+    result.add_argument(
+        "--min-profit",
+        "--min-profit-usdc",
+        dest="min_profit",
+        default=setting(
+            "ETH_ARB_MIN_PROFIT",
+            setting("ETH_ARB_MIN_PROFIT_USDC", "1"),
+        ),
+    )
+    result.add_argument(
+        "--min-net-profit",
+        "--min-net-profit-usdc",
+        dest="min_net_profit",
+        default=setting(
+            "ETH_ARB_MIN_NET_PROFIT",
+            setting("ETH_ARB_MIN_NET_PROFIT_USDC", "1"),
+        ),
+    )
+    result.add_argument(
+        "--eth-usd",
+        type=Decimal,
+        default=setting("ETH_ARB_ETH_USD"),
+        help="optional minimum ETH/USD; a live Binance price is always fetched",
+    )
+    result.add_argument(
+        "--timeout",
+        type=float,
+        default=setting("ETH_ARB_HTTP_TIMEOUT_SECONDS", "20"),
+    )
+    result.add_argument(
+        "--quote-attempts",
+        type=int,
+        default=setting("ETH_ARB_QUOTE_ATTEMPTS", "3"),
+        help="retry only transient stale-route simulation failures",
+    )
+    result.add_argument(
+        "--rpc-timeout",
+        type=float,
+        default=setting("ETH_ARB_RPC_TIMEOUT_SECONDS", "90"),
+        help="timeout in seconds for complex Ethereum RPC simulations",
+    )
+    result.add_argument(
+        "--aggregators",
+        default=setting("ETH_ARB_AGGREGATORS", ",".join(MATCHA_AGGREGATORS)),
+    )
+    result.add_argument(
+        "--gas-limit-multiplier",
+        type=Decimal,
+        default=setting("ETH_ARB_GAS_LIMIT_MULTIPLIER", "1.20"),
+    )
+    result.add_argument(
+        "--max-fee-gwei",
+        type=Decimal,
+        default=setting("ETH_ARB_MAX_FEE_GWEI"),
+    )
+    result.add_argument(
+        "--matcha-base-url",
+        default=setting("ETH_ARB_MATCHA_BASE_URL", MATCHA_BASE_URL),
+    )
+    result.add_argument(
+        "--stable-base-url",
+        default=setting("ETH_ARB_STABLE_BASE_URL", STABLE_BASE_URL),
+    )
+    result.add_argument(
+        "--eth-price-url",
+        default=setting("ETH_ARB_ETH_PRICE_URL", BINANCE_ETH_PRICE_URL),
+    )
+    result.add_argument(
+        "--eth-price-buffer-bps",
+        type=int,
+        default=setting("ETH_ARB_ETH_PRICE_BUFFER_BPS", "100"),
+        help="upward safety buffer applied to live ETHUSDC for gas accounting",
+    )
+    result.add_argument(
+        "--output",
+        default=setting("ETH_ARB_OUTPUT_PATH"),
+        help="optional path for the dry-run JSON plan",
+    )
+    result.add_argument("--send", action="store_true", help="sign and broadcast after all checks")
+    result.add_argument(
+        "--confirm-mainnet",
+        help="must equal EXECUTE_ATOMIC_ARB when --send is used",
+    )
+    return result
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    if not is_address(args.executor):
+        raise ArbError("--executor must be the deployed executor contract address")
+    if not args.rpc_url:
+        raise ArbError("--rpc-url or ETH_RPC_URL is required for atomic simulation")
+    if not 0 <= args.slippage_bps <= 100:
+        raise ArbError("--slippage-bps must be between 0 and 100")
+    if not 1 <= args.quote_attempts <= 10:
+        raise ArbError("--quote-attempts must be between 1 and 10")
+    if not 1 <= args.rpc_timeout <= 300:
+        raise ArbError("--rpc-timeout must be between 1 and 300 seconds")
+    if not 0 <= args.eth_price_buffer_bps <= 1_000:
+        raise ArbError("--eth-price-buffer-bps must be between 0 and 1000")
+    if args.gas_limit_multiplier < 1:
+        raise ArbError("--gas-limit-multiplier must be at least 1")
+
+    requested_loan_amount = amount_to_raw(args.amount)
+    loan_amount = requested_loan_amount
+    min_profit = amount_to_raw(args.min_profit)
+    min_net_profit = amount_to_raw(args.min_net_profit)
+    loan_symbol = args.loan_token
+    loan_token = LOAN_TOKENS[loan_symbol]
+    capacity_buffer = amount_to_raw(args.stable_capacity_buffer)
+
+    private_key = os.getenv("ETH_OPERATOR_PRIVATE_KEY")
+    operator = args.operator
+    if args.send:
+        if args.confirm_mainnet != "EXECUTE_ATOMIC_ARB":
+            raise ArbError("--send requires --confirm-mainnet EXECUTE_ATOMIC_ARB")
+        if not private_key:
+            raise ArbError("ETH_OPERATOR_PRIVATE_KEY is required only for --send")
+        Web3 = require_web3()
+        derived = Web3().eth.account.from_key(private_key).address
+        if operator and operator.lower() != derived.lower():
+            raise ArbError("--operator does not match ETH_OPERATOR_PRIVATE_KEY")
+        operator = derived
+    if not is_address(operator):
+        raise ArbError("--operator or ETH_OPERATOR_ADDRESS is required")
+
+    require_executor_loan_support(
+        args.rpc_url,
+        args.rpc_timeout,
+        args.executor,
+        loan_token,
+    )
+
+    user_agent = os.getenv(
+        "ETH_QUOTE_USER_AGENT",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    )
+    http = HttpJsonClient(args.timeout, user_agent)
+    matcha_client = MatchaClient(http, args.matcha_base_url)
+    stable_client = StableClient(http, args.stable_base_url)
+    live_eth_usd = parse_binance_eth_usdc_price(http.get(args.eth_price_url))
+    gas_accounting_eth_usd = buffered_eth_usd_price(
+        live_eth_usd,
+        args.eth_price_buffer_bps,
+    )
+    if args.eth_usd is not None:
+        if args.eth_usd <= 0:
+            raise ArbError("--eth-usd must be positive when provided")
+        gas_accounting_eth_usd = max(gas_accounting_eth_usd, args.eth_usd)
+
+    aggregators = tuple(name.strip() for name in args.aggregators.split(",") if name.strip())
+    if not aggregators:
+        raise ArbError("at least one Matcha aggregator is required")
+    capacity_adjusted = False
+    capacity_raw: int | None = None
+    stable_minimum_raw: int | None = None
+    stable_maximum_raw: int | None = None
+    for sizing_attempt in range(1, MAX_CAPACITY_SIZING_ATTEMPTS + 1):
+        matcha_responses = matcha_client.quotes(
+            args.executor,
+            loan_amount,
+            args.slippage_bps,
+            aggregators,
+            sell_token_address=loan_token,
+            buy_token_address=INTERMEDIATE_TOKEN,
+        )
+        matcha = select_best_matcha_quote(matcha_responses, loan_amount)
+
+        # Matcha's buyAmount is indicative. Its calldata only guarantees the
+        # slippage-adjusted minimum, so sign Stable for that minimum and return
+        # any better fill as intermediate-token dust.
+        stable_amount_in = minimum_output_after_slippage(
+            matcha.buy_amount,
+            args.slippage_bps,
+        )
+        stable_quote = stable_client.quote(
+            args.executor,
+            INTERMEDIATE_SYMBOL,
+            loan_symbol,
+            stable_amount_in,
+        )
+        capacity_raw = (
+            _stable_raw_amount(
+                stable_quote.capacity,
+                "capacity",
+                fractional_rounding=ROUND_DOWN,
+            )
+            if stable_quote.capacity is not None
+            else None
+        )
+        stable_minimum_raw = (
+            _stable_raw_amount(
+                stable_quote.minimum,
+                "minimum",
+                fractional_rounding=ROUND_CEILING,
+            )
+            if stable_quote.minimum is not None
+            else None
+        )
+        stable_maximum_raw = (
+            _stable_raw_amount(
+                stable_quote.maximum,
+                "maximum",
+                fractional_rounding=ROUND_DOWN,
+            )
+            if stable_quote.maximum is not None
+            else None
+        )
+        usable_capacity_raw = (
+            capacity_raw - capacity_buffer if capacity_raw is not None else None
+        )
+        if stable_maximum_raw is not None:
+            usable_capacity_raw = (
+                min(usable_capacity_raw, stable_maximum_raw)
+                if usable_capacity_raw is not None
+                else stable_maximum_raw
+            )
+        if usable_capacity_raw is not None and usable_capacity_raw <= 0:
+            raise ArbError("Stable.com capacity is below the configured safety buffer")
+        if (
+            usable_capacity_raw is not None
+            and stable_minimum_raw is not None
+            and usable_capacity_raw < stable_minimum_raw
+        ):
+            raise ArbError(
+                "Stable.com pool capacity is below its minimum order: "
+                f"{raw_to_amount(usable_capacity_raw)} {INTERMEDIATE_SYMBOL} < "
+                f"{raw_to_amount(stable_minimum_raw)} {INTERMEDIATE_SYMBOL}"
+            )
+        if (
+            usable_capacity_raw is None
+            or stable_quote.amount_in <= usable_capacity_raw
+        ):
+            break
+
+        adjusted_loan_amount = capacity_limited_loan_amount(
+            loan_amount,
+            stable_quote.amount_in,
+            usable_capacity_raw,
+        )
+        print(
+            f"Stable.com capacity reduced the {loan_symbol} loan from "
+            f"{raw_to_amount(loan_amount)} to "
+            f"{raw_to_amount(adjusted_loan_amount)}; requesting fresh quotes...",
+            file=sys.stderr,
+        )
+        loan_amount = adjusted_loan_amount
+        capacity_adjusted = True
+    else:
+        raise ArbError(
+            "Stable.com capacity kept changing; could not size an executable route"
+        )
+
+    if (
+        stable_minimum_raw is not None
+        and stable_quote.amount_in < stable_minimum_raw
+    ):
+        raise ArbError(
+            "Stable.com order is below its minimum: "
+            f"{raw_to_amount(stable_quote.amount_in)} {INTERMEDIATE_SYMBOL} < "
+            f"{raw_to_amount(stable_minimum_raw)} {INTERMEDIATE_SYMBOL}"
+        )
+
+    gross_profit = stable_quote.amount_out - loan_amount
+    print("\n--- QUOTE BREAKDOWN ---", file=sys.stderr)
+    print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
+    print(f"Leg 1 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {INTERMEDIATE_SYMBOL}", file=sys.stderr)
+    print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {INTERMEDIATE_SYMBOL} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
+    print(f"Gross Profit:            {raw_to_signed_amount(gross_profit)} {loan_symbol}", file=sys.stderr)
+    print("-----------------------\n", file=sys.stderr)
+
+    if gross_profit < min_profit:
+        raise ArbError(
+            "quoted route is below the on-chain profit floor: "
+            f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
+            f"{raw_to_amount(min_profit)} {loan_symbol}"
+        )
+    stable_order = stable_client.create_order(
+        args.executor,
+        INTERMEDIATE_SYMBOL,
+        loan_symbol,
+        stable_quote.amount_in,
+        stable_quote.amount_out,
+    )
+
+    web3, transaction, estimated_gas, max_fee_per_gas = prepare_transaction(
+        args.rpc_url,
+        args.rpc_timeout,
+        args.executor,
+        operator,
+        loan_amount,
+        loan_token,
+        matcha,
+        stable_order,
+        min_profit,
+        args.gas_limit_multiplier,
+        args.max_fee_gwei,
+    )
+    gas_limit = int(transaction["gas"])
+    max_gas_cost = gas_cost_usdc_raw(
+        gas_limit,
+        max_fee_per_gas,
+        gas_accounting_eth_usd,
+    )
+    native_value = matcha.value + stable_order.execution_fee_native
+    native_execution_cost = wei_cost_usdc_raw(
+        native_value,
+        gas_accounting_eth_usd,
+    )
+    maximum_execution_cost = max_gas_cost + native_execution_cost
+    predicted_net = gross_profit - maximum_execution_cost
+
+    plan = {
+        "mode": "broadcast" if args.send else "dry-run",
+        "chainId": CHAIN_ID,
+        "flashLoanProvider": MORPHO,
+        "executor": args.executor,
+        "operator": operator,
+        "loanToken": {
+            "symbol": loan_symbol,
+            "address": loan_token,
+        },
+        "intermediateToken": {
+            "symbol": INTERMEDIATE_SYMBOL,
+            "address": INTERMEDIATE_TOKEN,
+        },
+        "requestedLoanAmount": raw_to_amount(requested_loan_amount),
+        "ethPrice": {
+            "source": "Binance ETHUSDC",
+            "marketUsd": str(live_eth_usd),
+            "bufferBps": args.eth_price_buffer_bps,
+            "gasAccountingUsd": str(gas_accounting_eth_usd),
+        },
+        "loanAmount": raw_to_amount(loan_amount),
+        "capacityAdjusted": capacity_adjusted,
+        "matcha": {
+            "aggregator": matcha.aggregator,
+            "sellLoanToken": raw_to_amount(matcha.sell_amount),
+            "buyIntermediate": raw_to_amount(matcha.buy_amount),
+            "target": matcha.target,
+            "allowanceTarget": matcha.allowance_target,
+        },
+        "stable": {
+            "pool": STABLE_POOL,
+            "sellIntermediate": raw_to_amount(stable_quote.amount_in),
+            "buyLoanToken": raw_to_amount(stable_quote.amount_out),
+            "tokenFee": (
+                raw_to_amount(stable_quote.token_fee)
+                if stable_quote.token_fee is not None
+                else None
+            ),
+            "capacityIntermediate": (
+                raw_to_amount(capacity_raw) if capacity_raw is not None else None
+            ),
+            "capacityBufferIntermediate": raw_to_amount(capacity_buffer),
+            "minimumIntermediate": (
+                raw_to_amount(stable_minimum_raw)
+                if stable_minimum_raw is not None
+                else None
+            ),
+            "maximumIntermediate": (
+                raw_to_amount(stable_maximum_raw)
+                if stable_maximum_raw is not None
+                else None
+            ),
+            "orderId": stable_order.order_id,
+            "deadline": stable_order.deadline,
+        },
+        "grossProfit": raw_to_amount(gross_profit),
+        "minimumProfit": raw_to_amount(min_profit),
+        "estimatedGas": estimated_gas,
+        "gasLimit": gas_limit,
+        "maxFeePerGasWei": max_fee_per_gas,
+        "maxGasCostUsd": raw_to_amount(max_gas_cost),
+        "nativeExecutionCostUsd": raw_to_amount(native_execution_cost),
+        "maximumExecutionCostUsd": raw_to_amount(maximum_execution_cost),
+        "predictedNetProfit": raw_to_signed_amount(predicted_net),
+        "transaction": json_safe(transaction),
+    }
+
+    if args.send:
+        if predicted_net < min_net_profit:
+            raise ArbError(
+                "route is below the maximum-gas net-profit floor: "
+                f"{raw_to_signed_amount(predicted_net or 0)} {loan_symbol} < "
+                f"{raw_to_amount(min_net_profit)} {loan_symbol}"
+            )
+        signed = web3.eth.account.sign_transaction(transaction, private_key)
+        transaction_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+        plan["transactionHash"] = transaction_hash.hex()
+
+    return plan
+
+
+def main() -> int:
+    try:
+        ensure_project_runtime()
+        args = parser().parse_args()
+        for attempt in range(1, args.quote_attempts + 1):
+            try:
+                plan = run(args)
+                break
+            except RetryableArbError as exc:
+                if attempt == args.quote_attempts:
+                    raise ArbError(
+                        f"{exc}; exhausted {args.quote_attempts} fresh quote attempts"
+                    ) from exc
+                print(
+                    f"Transient route/RPC failure on attempt "
+                    f"{attempt}/{args.quote_attempts}: {exc}; "
+                    "requesting fresh quotes...",
+                    file=sys.stderr,
+                )
+        rendered = json.dumps(plan, indent=2, sort_keys=True)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as output:
+                output.write(rendered + "\n")
+        print(rendered)
+        if not args.send:
+            print("\nDry run only: no transaction was signed or broadcast.", file=sys.stderr)
+        return 0
+    except ArbError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

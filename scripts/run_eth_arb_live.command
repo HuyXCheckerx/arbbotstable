@@ -29,7 +29,7 @@ if [[ -x ".venv-eth/bin/python" ]]; then
   python_command=".venv-eth/bin/python"
 fi
 
-exec "$python_command" eth_flash_arb.py \
+exec "$python_command" ../src/engines/eth_flash_arb.py \
   --loan-token "$loan_token" \
   --send \
   --confirm-mainnet EXECUTE_ATOMIC_ARB

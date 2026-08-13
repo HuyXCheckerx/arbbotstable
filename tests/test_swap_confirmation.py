@@ -1,8 +1,18 @@
 import os
+import sys
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+for sub in ("core", "recovery", "engines", "web", "deployers"):
+    subpath = str(SRC_DIR / sub)
+    if subpath not in sys.path:
+        sys.path.insert(0, subpath)
 
 os.environ.setdefault("SOLANA_PRIVATE_KEY", "[]")
 

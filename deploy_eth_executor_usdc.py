@@ -2,5 +2,5 @@
 import runpy
 from pathlib import Path
 
-target = Path(__file__).resolve().parent / "src" / "deployers" / "deploy_eth_executor.py"
+target = Path(__file__).resolve().parent / "src" / "deployers" / "deploy_eth_executor_usdc.py"
 runpy.run_path(str(target), run_name="__main__")

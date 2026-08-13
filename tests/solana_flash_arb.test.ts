@@ -13,7 +13,7 @@ import {
   parseDecimalToRawCeil,
   parseDecimalToRawFloor,
   parseUiAmountToRaw,
-} from "../solana_flash_arb.js";
+} from "../src/engines/solana_flash_arb.js";
 import { PublicKey } from "@solana/web3.js";
 
 test("uses the Solana mainnet-beta genesis hash", () => {
