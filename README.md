@@ -4,7 +4,7 @@ Solana stablecoin arbitrage bot with a live operational dashboard. The bot monit
 
 ## Dashboard
 
-Run `python3 app.py`, then open `http://SERVER_IP:25284` or the port configured in `.env`.
+Run `python3 app.py`, then open `http://SERVER_IP:25284` or the port configured in `.env`. The root entrypoint supervises the scanner, recovery worker, and dashboard from their canonical locations under `src/`.
 
 The dashboard exposes:
 
@@ -20,7 +20,11 @@ The dashboard exposes:
 Machine-readable endpoints:
 
 - `GET /api/state` — complete dashboard state.
-- `GET /healthz` — returns HTTP 200 when bot state was updated recently, otherwise 503.
+- `GET /api/logs` — recent quote/execution output and runner status.
+- `POST /api/run` — validated quote or execution request; live requests require the explicit `EXECUTE LIVE ARB` confirmation.
+- `GET /healthz` — returns HTTP 200 while the scanner reports an active status, otherwise 503.
+
+The browser UI is split into `src/web/templates/dashboard.html`, `src/web/static/dashboard.css`, and `src/web/static/dashboard.js`. The server rejects overlapping runs and unsupported chain/pair combinations. Keep the dashboard behind authentication or a private network because an authorized live request can broadcast a mainnet transaction.
 
 ### P&L method
 

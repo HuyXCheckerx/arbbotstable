@@ -26,7 +26,7 @@ except ImportError as exc:
     ) from exc
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_DIR / ".env", override=True)
 
 STABLE_POOL = "0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da"
@@ -494,10 +494,17 @@ def parse_stable_order(
 ) -> StableOrder:
     order = unwrap_data(payload)
     if not isinstance(order, dict):
-        raise ArbError("Stable.com create response is not an object")
+        raise ArbError(f"Stable.com create response is not an object: {payload!r}")
+    err = first_key(order, ("error", "message", "msg", "reason", "detail")) or (
+        first_key(payload, ("error", "message", "msg", "reason", "detail"))
+        if isinstance(payload, dict)
+        else None
+    )
     signature = order.get("maintainerSignature")
     if not isinstance(signature, str):
-        raise ArbError("Stable.com order has no maintainer signature")
+        if err:
+            raise ArbError(f"Stable.com create order failed: {err}")
+        raise ArbError(f"Stable.com order has no maintainer signature: {order!r}")
     signature = signature if signature.startswith("0x") else f"0x{signature}"
     try:
         signature_bytes = bytes.fromhex(signature[2:])
@@ -564,13 +571,13 @@ class HttpJsonClient:
 
     @staticmethod
     def _decode(response: requests.Response, url: str) -> Any:
+        excerpt = " ".join(response.text.split())[:400]
         if response.status_code >= 400:
             if response.status_code == 403:
                 raise ArbError(
                     f"{url} returned HTTP 403; this website API may require a "
                     "browser session or may be blocking terminal traffic"
                 )
-            excerpt = " ".join(response.text.split())[:400]
             message = f"{url} returned HTTP {response.status_code}"
             if excerpt:
                 message += f": {excerpt}"
@@ -578,9 +585,13 @@ class HttpJsonClient:
                 raise RetryableArbError(message)
             raise ArbError(message)
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as exc:
-            raise ArbError(f"{url} returned non-JSON content") from exc
+            detail = f": {excerpt}" if excerpt else ""
+            raise ArbError(f"{url} returned non-JSON content{detail}") from exc
+        if payload is None:
+            raise RetryableArbError(f"{url} returned an empty JSON response")
+        return payload
 
 
 class MatchaClient:

@@ -1,9 +1,17 @@
+from __future__ import annotations
+
 import json
 import os
-from datetime import datetime, timezone
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from pathlib import Path
+import subprocess
 import sys
+import threading
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+
 SRC_DIR = Path(__file__).resolve().parent.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -12,12 +20,18 @@ for sub in ("core", "recovery", "engines", "web", "deployers"):
     if subpath not in sys.path:
         sys.path.insert(0, subpath)
 
-from state_store import DEFAULT_DB_PATH, read_dashboard_state, read_state
+from state_store import DEFAULT_DB_PATH, read_dashboard_state  # noqa: E402
 
 
-PORT = int(os.environ.get("PORT", 25284))
+WEB_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = WEB_DIR.parents[1]
+STATIC_DIR = WEB_DIR / "static"
+TEMPLATE_PATH = WEB_DIR / "templates" / "dashboard.html"
+FAVICON_PATH = WEB_DIR / "favicon.svg"
+
+PORT = int(os.environ.get("PORT", "25284"))
+HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 DB_PATH = os.environ.get("BOT_STATE_DB", str(DEFAULT_DB_PATH))
-FAVICON_PATH = Path(__file__).with_name("favicon.svg")
 REQUEST_TIMEOUT_SECONDS = max(
     1.0,
     float(os.environ.get("WEB_REQUEST_TIMEOUT_SECONDS", "10")),
@@ -26,724 +40,477 @@ DB_TIMEOUT_SECONDS = max(
     0.05,
     float(os.environ.get("WEB_DB_TIMEOUT_SECONDS", "1")),
 )
+QUOTE_TIMEOUT_SECONDS = max(
+    10.0,
+    float(os.environ.get("WEB_QUOTE_TIMEOUT_SECONDS", "60")),
+)
+LIVE_TIMEOUT_SECONDS = max(
+    QUOTE_TIMEOUT_SECONDS,
+    float(os.environ.get("WEB_LIVE_TIMEOUT_SECONDS", "240")),
+)
+MAX_REQUEST_BYTES = 64 * 1024
+LIVE_CONFIRMATION = "EXECUTE LIVE ARB"
 
-HTML_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#080b0b">
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <title>Stable Execution &mdash; Arbitrage Operations</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --canvas: #080b0b;
-      --surface: #0d1110;
-      --surface-raised: #111614;
-      --surface-inset: #0a0e0d;
-      --line: rgba(223, 220, 207, .12);
-      --line-soft: rgba(223, 220, 207, .075);
-      --line-metal: rgba(204, 177, 112, .34);
-      --text: #efeee8;
-      --text-soft: #b3b6b0;
-      --muted: #767e79;
-      --metal: #c7aa69;
-      --metal-bright: #e1ca94;
-      --green: #79b493;
-      --red: #d57c75;
-      --amber: #d0a75e;
-      --radius: 2px;
-      --sans: "Aptos", "Segoe UI Variable", "Segoe UI", Helvetica, Arial, sans-serif;
-      --serif: "Iowan Old Style", Baskerville, "Palatino Linotype", Georgia, serif;
-      --mono: "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
-    }
+SUPPORTED_PAIRS = {
+    "ethereum": {"PYUSD/USDC", "USDT/USDC"},
+    "solana": {"PYUSD/USDC", "USDT/USDC"},
+    "polygon": {"USDT/USDC"},
+    "bsc": {"USDT/USDC"},
+}
 
-    * { box-sizing: border-box; }
-    html { min-width: 320px; background: var(--canvas); }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--canvas);
-      color: var(--text);
-      font-family: var(--sans);
-      font-variant-numeric: tabular-nums;
-      -webkit-font-smoothing: antialiased;
-      text-rendering: optimizeLegibility;
-    }
+STATIC_ASSETS = {
+    "/static/dashboard.css": (STATIC_DIR / "dashboard.css", "text/css; charset=utf-8"),
+    "/static/dashboard.js": (
+        STATIC_DIR / "dashboard.js",
+        "text/javascript; charset=utf-8",
+    ),
+}
 
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0 0 auto;
-      z-index: 10;
-      height: 2px;
-      background: var(--metal);
-      opacity: .78;
-    }
+# Kept as a module attribute for lightweight tests and embedders.
+HTML_TEMPLATE = TEMPLATE_PATH.read_text(encoding="utf-8")
 
-    .shell { width: min(1460px, calc(100% - 64px)); margin: 0 auto; padding: 34px 0 48px; }
-    .masthead {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 32px;
-      min-height: 62px;
-      padding-bottom: 24px;
-      margin-bottom: 24px;
-      border-bottom: 1px solid var(--line);
-    }
-    .brand-lockup { display: flex; align-items: center; gap: 16px; min-width: 0; }
-    .monogram {
-      position: relative;
-      width: 42px;
-      height: 42px;
-      flex: 0 0 auto;
-      display: grid;
-      place-items: center;
-      border: 1px solid var(--line-metal);
-      color: var(--metal-bright);
-      font: 600 10px/1 var(--sans);
-      letter-spacing: .16em;
-      text-indent: .16em;
-    }
-    .monogram::after {
-      content: "";
-      position: absolute;
-      right: -1px;
-      bottom: -1px;
-      width: 8px;
-      height: 8px;
-      border-right: 1px solid var(--metal);
-      border-bottom: 1px solid var(--metal);
-    }
-    .brand-overline,
-    .meta-label,
-    .section-code,
-    .section-label,
-    .eyebrow {
-      color: var(--muted);
-      font-size: 9px;
-      font-weight: 600;
-      line-height: 1.3;
-      letter-spacing: .16em;
-      text-transform: uppercase;
-    }
-    .brand-overline { margin-bottom: 5px; color: var(--metal); }
-    .brand-copy h1 { margin: 0; font-family: var(--serif); font-size: clamp(20px, 2vw, 25px); font-weight: 400; line-height: 1.05; letter-spacing: .015em; }
-    .header-meta { display: flex; align-items: stretch; gap: 0; flex: 0 0 auto; }
-    .live-meta,
-    .sync-meta { min-height: 42px; display: flex; flex-direction: column; justify-content: center; }
-    .live-meta { padding-right: 24px; border-right: 1px solid var(--line); }
-    .sync-meta { min-width: 166px; padding-left: 24px; align-items: flex-end; }
-    .status-pill { display: inline-flex; align-items: center; gap: 10px; color: var(--text); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
-    #updated-at { margin-top: 5px; color: var(--text-soft); font-family: var(--mono); font-size: 10px; }
-    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 3px rgba(118, 126, 121, .1); }
-    .dot.good { background: var(--green); }
-    .dot.warn { background: var(--amber); }
-    .dot.bad { background: var(--red); }
-
-    .offline-banner { display: none; margin: 0 0 18px; padding: 12px 15px; border: 1px solid rgba(213, 124, 117, .28); border-left: 2px solid var(--red); background: #15100f; color: #e0a19c; font-size: 11px; line-height: 1.5; }
-    .overview {
-      display: grid;
-      grid-template-columns: minmax(420px, 1.15fr) minmax(650px, 1fr);
-      margin-bottom: 18px;
-      border: 1px solid var(--line);
-      border-top-color: var(--line-metal);
-      border-radius: var(--radius);
-      background: var(--surface);
-      box-shadow: 0 18px 56px rgba(0, 0, 0, .19);
-      overflow: hidden;
-    }
-    .overview-primary { min-height: 238px; padding: 30px 34px 28px; border-right: 1px solid var(--line); background: var(--surface-inset); }
-    .overview-caption { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 33px; }
-    .ledger-mark { color: var(--metal); font-size: 9px; font-weight: 600; letter-spacing: .13em; text-transform: uppercase; }
-    .overview-primary .eyebrow { margin-bottom: 10px; }
-    .pnl { font-family: var(--serif); font-size: clamp(48px, 5.6vw, 76px); line-height: .92; font-weight: 400; letter-spacing: -.045em; white-space: nowrap; }
-    .positive { color: var(--green) !important; }
-    .negative { color: var(--red) !important; }
-    .pnl-breakdown { display: flex; align-items: center; flex-wrap: wrap; gap: 15px 28px; margin-top: 27px; }
-    .breakdown-item { min-width: 130px; }
-    .breakdown-item + .breakdown-item { padding-left: 28px; border-left: 1px solid var(--line); }
-    .breakdown-item span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
-    .breakdown-item strong { font-family: var(--mono); font-size: 12px; font-weight: 500; }
-    .overview-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .summary-metric { min-width: 0; padding: 31px 23px 25px; border-left: 1px solid var(--line); }
-    .summary-metric:first-child { border-left: 0; }
-    .summary-metric .eyebrow { min-height: 25px; margin-bottom: 28px; }
-    .metric { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--serif); font-size: clamp(27px, 2.4vw, 35px); font-weight: 400; line-height: 1; letter-spacing: -.035em; text-overflow: ellipsis; white-space: nowrap; }
-    .metric-mono { font-family: var(--mono); font-size: clamp(20px, 2vw, 27px); letter-spacing: -.045em; }
-    .subvalue { margin-top: 17px; color: var(--muted); font-size: 10px; line-height: 1.5; }
-    .subvalue span { color: var(--text-soft); }
-
-    .workspace { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(330px, .62fr); align-items: start; gap: 18px; }
-    .panel { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: 0 14px 44px rgba(0, 0, 0, .13); overflow: hidden; }
-    .panel-head { min-height: 69px; padding: 17px 22px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
-    .panel-heading { min-width: 0; }
-    .section-code { margin-bottom: 6px; color: var(--metal); }
-    .panel-title { margin: 0; font-family: var(--serif); font-size: 17px; font-weight: 400; line-height: 1.2; letter-spacing: .01em; }
-    .panel-note { color: var(--muted); font-size: 9px; line-height: 1.4; letter-spacing: .08em; text-align: right; text-transform: uppercase; }
-    .token-grid { display: grid; grid-template-columns: repeat(5, 1fr); }
-    .token { min-width: 0; padding: 26px 21px 25px; border-right: 1px solid var(--line); }
-    .token:last-child { border-right: 0; }
-    .token-name { display: flex; align-items: center; gap: 9px; color: var(--text-soft); font-size: 9px; font-weight: 650; letter-spacing: .12em; }
-    .token-icon { width: 7px; height: 7px; border: 1px solid var(--metal); transform: rotate(45deg); opacity: .78; }
-    .token-amount { margin-top: 22px; overflow: hidden; font-family: var(--mono); font-size: clamp(18px, 1.8vw, 24px); font-weight: 450; line-height: 1.15; letter-spacing: -.055em; text-overflow: ellipsis; white-space: nowrap; }
-    .token-usd { margin-top: 10px; color: var(--muted); font-family: var(--mono); font-size: 10px; }
-    .pool-list { display: grid; grid-template-columns: repeat(4, 1fr); }
-    .pool { min-width: 0; padding: 20px 22px 22px; border-right: 1px solid var(--line); background: var(--surface-inset); }
-    .pool:last-child { border-right: 0; }
-    .pool strong { display: block; margin-top: 10px; overflow: hidden; font-family: var(--mono); font-size: 16px; font-weight: 450; letter-spacing: -.035em; text-overflow: ellipsis; white-space: nowrap; }
-
-    .execution { padding: 22px; }
-    .route { position: relative; margin-bottom: 18px; padding: 18px 18px 17px; border: 1px solid var(--line); border-left-color: var(--line-metal); background: var(--surface-inset); overflow: hidden; }
-    .route::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--metal); opacity: .65; }
-    .route .eyebrow { margin-bottom: 9px; }
-    .route-value { color: var(--metal-bright); font-family: var(--serif); font-size: 19px; font-weight: 400; line-height: 1.25; word-break: break-word; }
-    .detail-list { display: grid; gap: 0; }
-    .detail { display: flex; justify-content: space-between; align-items: baseline; gap: 18px; min-height: 43px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
-    .detail:last-child { border-bottom: 0; }
-    .detail span { color: var(--muted); font-size: 10px; }
-    .detail strong { max-width: 62%; overflow: hidden; font-family: var(--mono); font-size: 10px; font-weight: 500; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-    .error { display: none; margin-top: 17px; padding: 12px 14px; border: 1px solid rgba(213, 124, 117, .24); border-left: 2px solid var(--red); background: #15100f; color: #dda09b; font-family: var(--mono); font-size: 10px; line-height: 1.55; word-break: break-word; }
-
-    .profit-history,
-    .activity { grid-column: 1 / -1; }
-    .profit-body { padding: 22px; }
-    .profit-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 24px; border: 1px solid var(--line); background: var(--surface-inset); }
-    .profit-summary-item { min-width: 0; padding: 16px 18px; border-right: 1px solid var(--line); }
-    .profit-summary-item:last-child { border-right: 0; }
-    .profit-summary-item span { display: block; margin-bottom: 8px; color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
-    .profit-summary-item strong { overflow: hidden; display: block; color: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-    .profit-selection { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(220px, 1fr) minmax(190px, .8fr); align-items: center; gap: 22px; min-height: 72px; padding: 14px 18px; margin-bottom: 22px; border: 1px solid var(--line); border-left-color: var(--line-metal); background: var(--surface-inset); }
-    .profit-selection-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
-    .profit-selected-date { color: var(--text); font-family: var(--serif); font-size: 16px; font-weight: 400; }
-    .profit-selected-amount { color: var(--text); font-family: var(--mono); font-size: clamp(18px, 2vw, 25px); font-weight: 500; text-align: center; white-space: nowrap; }
-    .profit-selected-meta { color: var(--muted); font-size: 9px; line-height: 1.55; letter-spacing: .04em; text-align: right; text-transform: uppercase; }
-    .profit-scroll { overflow-x: auto; padding-bottom: 5px; }
-    .profit-chart { width: max-content; min-width: 100%; }
-    .profit-months { display: grid; grid-template-columns: repeat(53, 11px); column-gap: 3px; height: 18px; margin-left: 34px; color: var(--muted); font-family: var(--mono); font-size: 8px; }
-    .profit-months span { overflow: visible; white-space: nowrap; }
-    .profit-grid-row { display: flex; align-items: flex-start; gap: 9px; }
-    .profit-weekdays { width: 25px; flex: 0 0 25px; display: grid; grid-template-rows: repeat(7, 11px); row-gap: 3px; color: var(--muted); font-family: var(--mono); font-size: 7px; line-height: 11px; }
-    .profit-cells { display: grid; grid-template-columns: repeat(53, 11px); grid-template-rows: repeat(7, 11px); grid-auto-flow: column; gap: 3px; }
-    .profit-cell { width: 11px; height: 11px; padding: 0; border: 1px solid rgba(223, 220, 207, .06); border-radius: 1px; appearance: none; background: #111614; }
-    button.profit-cell { cursor: pointer; }
-    button.profit-cell:hover { border-color: var(--metal-bright); transform: scale(1.18); }
-    button.profit-cell:focus-visible { z-index: 1; outline: 2px solid var(--metal-bright); outline-offset: 2px; }
-    button.profit-cell.selected { border-color: var(--metal-bright); box-shadow: 0 0 0 1px var(--canvas), 0 0 0 2px var(--metal); }
-    .profit-cell.future { opacity: .33; }
-    .profit-cell.level-1 { border-color: rgba(121, 180, 147, .12); background: #193126; }
-    .profit-cell.level-2 { border-color: rgba(121, 180, 147, .18); background: #28523b; }
-    .profit-cell.level-3 { border-color: rgba(121, 180, 147, .25); background: #477d5e; }
-    .profit-cell.level-4 { border-color: rgba(121, 180, 147, .36); background: var(--green); }
-    .profit-cell.loss { border-color: rgba(213, 124, 117, .28); background: #743f3b; }
-    .profit-legend { display: flex; justify-content: flex-end; align-items: center; gap: 7px; margin-top: 15px; color: var(--muted); font-family: var(--mono); font-size: 8px; }
-    .profit-legend .profit-cell { display: inline-block; }
-    .table-wrap { overflow-x: auto; }
-    table { width: 100%; min-width: 930px; border-collapse: collapse; }
-    th { padding: 13px 18px; border-bottom: 1px solid var(--line); background: var(--surface-inset); color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .12em; text-align: left; text-transform: uppercase; white-space: nowrap; }
-    td { padding: 16px 18px; border-top: 1px solid var(--line-soft); color: var(--text-soft); font-family: var(--mono); font-size: 10px; white-space: nowrap; }
-    td:nth-child(3) { max-width: 280px; overflow: hidden; color: var(--text); font-family: var(--sans); font-size: 11px; text-overflow: ellipsis; }
-    tbody tr { transition: background-color 120ms ease; }
-    tbody tr:hover { background: rgba(255, 255, 255, .018); }
-    .badge { display: inline-flex; align-items: center; gap: 7px; color: var(--green); font-family: var(--sans); font-size: 8px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
-    .badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-    .badge.failed { color: var(--red); }
-    .empty { padding: 44px 20px; color: var(--muted); font-family: var(--serif); font-size: 14px; text-align: center; }
-    footer { display: flex; justify-content: space-between; gap: 32px; padding-top: 20px; margin-top: 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; line-height: 1.7; letter-spacing: .02em; }
-    footer p { margin: 0; max-width: 760px; }
-    .footer-mark { flex: 0 0 auto; color: var(--text-soft); font-family: var(--mono); text-align: right; text-transform: uppercase; }
-
-    @media (max-width: 1160px) {
-      .overview { grid-template-columns: 1fr; }
-      .overview-primary { min-height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-      .summary-metric { min-height: 152px; }
-      .workspace { grid-template-columns: 1fr; }
-      .profit-history,
-      .activity { grid-column: auto; }
-    }
-
-    @media (max-width: 760px) {
-      .shell { width: min(100% - 28px, 1460px); padding-top: 23px; }
-      .masthead { align-items: flex-start; gap: 22px; }
-      .sync-meta { display: none; }
-      .live-meta { padding: 4px 0 0; border-right: 0; }
-      .overview-primary { padding: 25px 22px 23px; }
-      .overview-caption { margin-bottom: 27px; }
-      .pnl { font-size: clamp(42px, 12vw, 66px); }
-      .overview-metrics { grid-template-columns: 1fr 1fr; }
-      .summary-metric { min-height: 135px; padding: 23px 21px 21px; border-bottom: 1px solid var(--line); }
-      .summary-metric:nth-child(3) { grid-column: 1 / -1; border-left: 0; border-bottom: 0; }
-      .summary-metric .eyebrow { min-height: auto; margin-bottom: 20px; }
-      .panel-head { padding: 16px 18px; }
-      .profit-body { padding: 18px; }
-      .token-grid { grid-template-columns: 1fr 1fr; }
-      .token:nth-child(2) { border-right: 0; }
-      .token:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
-      .execution { padding: 18px; }
-      footer { flex-direction: column; }
-      .footer-mark { text-align: left; }
-    }
-
-    @media (max-width: 500px) {
-      .monogram { width: 37px; height: 37px; }
-      .brand-copy h1 { font-size: 19px; }
-      .brand-overline { font-size: 8px; }
-      .header-meta { align-self: center; }
-      .live-meta .meta-label { display: none; }
-      .status-pill { max-width: 88px; gap: 7px; font-size: 9px; }
-      #status-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .dot { width: 7px; height: 7px; }
-      .overview-primary { padding-inline: 18px; }
-      .pnl-breakdown { gap: 15px 20px; }
-      .breakdown-item + .breakdown-item { padding-left: 20px; }
-      .token { padding: 22px 17px; }
-      .pool-list { grid-template-columns: 1fr; }
-      .pool { border-right: 0; border-bottom: 1px solid var(--line); }
-      .pool:last-child { border-bottom: 0; }
-      .profit-summary { grid-template-columns: 1fr; }
-      .profit-summary-item { border-right: 0; border-bottom: 1px solid var(--line); }
-      .profit-summary-item:last-child { border-bottom: 0; }
-      .profit-selection { grid-template-columns: 1fr; gap: 10px; }
-      .profit-selected-amount { text-align: left; }
-      .profit-selected-meta { text-align: left; }
-      .panel-head > .panel-note { display: none; }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
-    }
-  </style>
-</head>
-<body>
-  <main class="shell">
-    <header class="masthead">
-      <div class="brand-lockup">
-        <div class="monogram" aria-hidden="true">SE</div>
-        <div class="brand-copy">
-          <div class="brand-overline">Stable Execution</div>
-          <h1>Arbitrage Operations</h1>
-        </div>
-      </div>
-      <div class="header-meta">
-        <div class="live-meta">
-          <span class="meta-label">System state</span>
-          <div class="status-pill" aria-live="polite"><span id="status-dot" class="dot"></span><span id="status-label">Connecting</span></div>
-        </div>
-        <div class="sync-meta">
-          <span class="meta-label">Last synchronization</span>
-          <span id="updated-at">Waiting for data</span>
-        </div>
-      </div>
-    </header>
-
-    <div id="offline-banner" class="offline-banner" role="status">Live state is unavailable. The dashboard will keep retrying.</div>
-
-    <section class="overview" aria-label="Portfolio performance">
-      <div class="overview-primary">
-        <div class="overview-caption"><span class="section-label">Performance ledger</span><span class="ledger-mark">Realized</span></div>
-        <div class="eyebrow">Net profit and loss</div>
-        <div id="total-pnl" class="pnl">$0.00</div>
-        <div class="pnl-breakdown">
-          <div class="breakdown-item"><span>Current session</span><strong id="session-pnl">$0.00</strong></div>
-          <div class="breakdown-item"><span>Prior-method estimate</span><strong id="legacy-pnl">$0.00</strong></div>
-        </div>
-      </div>
-      <div class="overview-metrics">
-        <div class="summary-metric">
-          <div class="eyebrow">Successful arbs</div>
-          <div id="total-arbs" class="metric">0</div>
-          <div class="subvalue">Session <span id="session-arbs">0</span></div>
-        </div>
-        <div class="summary-metric">
-          <div class="eyebrow">Wallet value</div>
-          <div id="portfolio" class="metric">$0.00</div>
-          <div class="subvalue">Stablecoins marked at $1</div>
-        </div>
-        <div class="summary-metric">
-          <div class="eyebrow">Observed SOL spent</div>
-          <div id="sol-spent" class="metric metric-mono">0.000000</div>
-          <div class="subvalue"><span id="sol-cost">~$0.00</span> at execution prices</div>
-        </div>
-      </div>
-    </section>
-
-    <div class="workspace">
-      <section class="panel" aria-labelledby="wallet-heading">
-        <div class="panel-head">
-          <div class="panel-heading"><div class="section-code">Positions / 01</div><h2 id="wallet-heading" class="panel-title">Wallet balances</h2></div>
-          <span class="panel-note">Confirmed RPC state</span>
-        </div>
-        <div id="token-grid" class="token-grid"></div>
-        <div class="panel-head">
-          <div class="panel-heading"><div class="section-code">Liquidity / 02</div><h2 class="panel-title">Stable.com reserves</h2></div>
-          <span class="panel-note">Latest observed balances</span>
-        </div>
-        <div id="pool-list" class="pool-list"></div>
-      </section>
-
-      <aside class="panel" aria-labelledby="execution-heading">
-        <div class="panel-head">
-          <div class="panel-heading"><div class="section-code">Runtime / 03</div><h2 id="execution-heading" class="panel-title">Execution state</h2></div>
-          <span id="uptime" class="panel-note">00:00:00</span>
-        </div>
-        <div class="execution">
-          <div class="route"><div class="eyebrow">Current route</div><div id="current-route" class="route-value">Market scan</div></div>
-          <div class="detail-list">
-            <div class="detail"><span>Bot status</span><strong id="detail-status">Offline</strong></div>
-            <div class="detail"><span>Session attempts</span><strong id="attempts">0</strong></div>
-            <div class="detail"><span>Session SOL cost</span><strong id="session-sol-cost">$0.00</strong></div>
-            <div class="detail"><span>SOL reference price</span><strong id="sol-price">$0.00</strong></div>
-            <div class="detail"><span>Wallet</span><strong id="wallet">&mdash;</strong></div>
-          </div>
-          <div id="last-error" class="error" role="status"></div>
-        </div>
-      </aside>
-
-      <section class="panel profit-history" aria-labelledby="profit-heading">
-        <div class="panel-head">
-          <div class="panel-heading"><div class="section-code">Profit / 04</div><h2 id="profit-heading" class="panel-title">Daily USDC profit</h2></div>
-          <span class="panel-note">Last 52 weeks &middot; UTC</span>
-        </div>
-        <div class="profit-body">
-          <div class="profit-summary">
-            <div class="profit-summary-item"><span>Period net</span><strong id="profit-period-total">0.00 USDC</strong></div>
-            <div class="profit-summary-item"><span>Profitable days</span><strong id="profitable-days">0</strong></div>
-            <div class="profit-summary-item"><span>Best day</span><strong id="best-profit-day">0.00 USDC</strong></div>
-          </div>
-          <div id="profit-selection" class="profit-selection" aria-live="polite">
-            <div><span class="profit-selection-label">Selected day</span><strong id="selected-profit-date" class="profit-selected-date">No activity recorded</strong></div>
-            <strong id="selected-profit-amount" class="profit-selected-amount">0.0000 USDC</strong>
-            <div id="selected-profit-meta" class="profit-selected-meta">Select any recorded day to view its exact amount</div>
-          </div>
-          <div class="profit-scroll" aria-label="Daily USDC profit calendar">
-            <div class="profit-chart">
-              <div id="profit-months" class="profit-months" aria-hidden="true"></div>
-              <div class="profit-grid-row">
-                <div class="profit-weekdays" aria-hidden="true"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>
-                <div id="profit-cells" class="profit-cells" role="group" aria-label="Daily realized net profit in USDC"></div>
-              </div>
-            </div>
-          </div>
-          <div class="profit-legend" aria-hidden="true"><span>Loss</span><i class="profit-cell loss"></i><i class="profit-cell"></i><i class="profit-cell level-1"></i><i class="profit-cell level-2"></i><i class="profit-cell level-3"></i><i class="profit-cell level-4"></i><span>More profit</span></div>
-        </div>
-      </section>
-
-      <section class="panel activity" aria-labelledby="ledger-heading">
-        <div class="panel-head">
-          <div class="panel-heading"><div class="section-code">Ledger / 05</div><h2 id="ledger-heading" class="panel-title">Execution history</h2></div>
-          <span class="panel-note">Successful and failed attempts</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Time</th><th>Status</th><th>Route</th><th>Size</th><th>Expected gross</th><th>Stable &Delta;</th><th>SOL spent</th><th>Net P&amp;L</th></tr></thead>
-            <tbody id="activity-body"></tbody>
-          </table>
-          <div id="activity-empty" class="empty">No attempts recorded in the persistent ledger yet.</div>
-        </div>
-      </section>
-    </div>
-
-    <footer>
-      <p>Net P&amp;L = change in USDC + USDG + PYUSD at $1 plus USDT at its 0.999 Stable.com redemption value, minus the USD estimate of observed SOL consumption. This avoids recognizing the USDT exit fee as unrealized profit.</p>
-      <p class="footer-mark">Private operations ledger<br>2-second refresh</p>
-    </footer>
-  </main>
-
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const money = (value, digits = 2) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }).format(Number(value || 0));
-    const number = (value, digits = 6) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 0, maximumFractionDigits: digits }).format(Number(value || 0));
-    const duration = (seconds) => { seconds = Math.max(0, Number(seconds || 0)); const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); const s = Math.floor(seconds % 60); return [h,m,s].map(v => String(v).padStart(2,'0')).join(':'); };
-    const text = (id, value) => { $(id).textContent = value; };
-    const pnlTone = (element, value) => { element.classList.remove('positive','negative'); element.classList.add(Number(value) >= 0 ? 'positive' : 'negative'); };
-    const shortWallet = (wallet) => wallet && wallet.length > 14 ? `${wallet.slice(0,6)}…${wallet.slice(-6)}` : (wallet || '—');
-
-    function renderAssets(wallet, pools) {
-      const tokenGrid = $('token-grid');
-      tokenGrid.replaceChildren();
-      ['USDC','USDG','PYUSD','USDT','SOL'].forEach(asset => {
-        const data = wallet[asset] || {};
-        const node = document.createElement('div');
-        node.className = 'token';
-        const name = document.createElement('div'); name.className = 'token-name';
-        const icon = document.createElement('span'); icon.className = 'token-icon';
-        name.append(icon, document.createTextNode(asset));
-        const amount = document.createElement('div'); amount.className = 'token-amount'; amount.textContent = number(data.amount, asset === 'SOL' ? 9 : 6);
-        const usd = document.createElement('div'); usd.className = 'token-usd'; usd.textContent = money(data.usd_value, 2);
-        node.append(name, amount, usd); tokenGrid.append(node);
-      });
-
-      const poolList = $('pool-list'); poolList.replaceChildren();
-      ['USDC','USDG','PYUSD','USDT'].forEach(asset => {
-        const node = document.createElement('div'); node.className = 'pool';
-        const label = document.createElement('div'); label.className = 'panel-note'; label.textContent = asset + ' available';
-        const value = document.createElement('strong'); value.textContent = number((pools[asset] || {}).amount, 2);
-        node.append(label, value); poolList.append(node);
-      });
-    }
-
-    function renderActivity(records) {
-      const body = $('activity-body'); body.replaceChildren();
-      $('activity-empty').style.display = records.length ? 'none' : 'block';
-      records.slice(0, 12).forEach(record => {
-        const row = document.createElement('tr');
-        const values = [
-          new Date(record.timestamp).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' }),
-          record.status,
-          record.route,
-          number(record.amount, 2),
-          money(record.expected_gross_profit_usd, 4),
-          money(record.stablecoin_change_usd, 4),
-          number(record.sol_consumed, 9) + ' SOL',
-          money(record.realized_pnl_usd, 4),
-        ];
-        values.forEach((value, index) => {
-          const cell = document.createElement('td');
-          if (index === 1) { const badge = document.createElement('span'); badge.className = 'badge' + (record.status === 'failed' ? ' failed' : ''); badge.textContent = value; cell.append(badge); }
-          else { cell.textContent = value; }
-          if (index === 7) cell.className = Number(record.realized_pnl_usd) >= 0 ? 'positive' : 'negative';
-          row.append(cell);
-        });
-        body.append(row);
-      });
-    }
-
-    function usdc(value, digits = 2) {
-      const numeric = Number(value || 0);
-      const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(numeric);
-      return `${numeric > 0 ? '+' : ''}${formatted} USDC`;
-    }
-
-    let selectedProfitDate = null;
-
-    function selectProfitDay(day, cell) {
-      selectedProfitDate = day.key;
-      document.querySelectorAll('#profit-cells button.profit-cell').forEach(candidate => {
-        candidate.classList.toggle('selected', candidate === cell);
-        candidate.setAttribute('aria-pressed', candidate === cell ? 'true' : 'false');
-      });
-      const value = Number(day.record?.profit_usdc || 0);
-      const attempts = Number(day.record?.attempts || 0);
-      const successfulArbs = Number(day.record?.successful_arbs || 0);
-      const dateLabel = day.date.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-      text('selected-profit-date', dateLabel);
-      text('selected-profit-amount', usdc(value, 4));
-      pnlTone($('selected-profit-amount'), value);
-      text('selected-profit-meta', attempts ? `${attempts} attempt${attempts === 1 ? '' : 's'} · ${successfulArbs} successful` : 'No attempts recorded for this day');
-    }
-
-    function renderDailyProfit(dailyProfit) {
-      const records = Array.isArray(dailyProfit.days) ? dailyProfit.days : [];
-      const byDate = new Map(records.map(record => [record.date, record]));
-      const today = new Date();
-      const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-      const currentWeekStart = new Date(todayUtc);
-      currentWeekStart.setUTCDate(currentWeekStart.getUTCDate() - currentWeekStart.getUTCDay());
-      const start = new Date(currentWeekStart);
-      start.setUTCDate(start.getUTCDate() - (52 * 7));
-
-      const visible = [];
-      for (let index = 0; index < 371; index += 1) {
-        const date = new Date(start);
-        date.setUTCDate(start.getUTCDate() + index);
-        const key = date.toISOString().slice(0, 10);
-        visible.push({ date, key, record: byDate.get(key) || null });
-      }
-
-      const positiveValues = visible.map(day => Number(day.record?.profit_usdc || 0)).filter(value => value > 0);
-      const maximumProfit = Math.max(0, ...positiveValues);
-      const cells = $('profit-cells'); cells.replaceChildren();
-      visible.forEach(day => {
-        const value = Number(day.record?.profit_usdc || 0);
-        const attempts = Number(day.record?.attempts || 0);
-        const isInteractive = Boolean(day.record) && day.date <= todayUtc;
-        const cell = document.createElement(isInteractive ? 'button' : 'span');
-        if (isInteractive) cell.type = 'button';
-        cell.className = 'profit-cell';
-        cell.dataset.date = day.key;
-        if (day.date > todayUtc) cell.classList.add('future');
-        else if (value < 0) cell.classList.add('loss');
-        else if (value > 0 && maximumProfit > 0) cell.classList.add(`level-${Math.max(1, Math.ceil((value / maximumProfit) * 4))}`);
-        const dateLabel = day.date.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
-        const attemptLabel = `${attempts} attempt${attempts === 1 ? '' : 's'}`;
-        const label = `${dateLabel}: ${usdc(value, 4)} net, ${attemptLabel}`;
-        cell.title = label;
-        if (isInteractive) {
-          cell.setAttribute('aria-label', label);
-          cell.setAttribute('aria-pressed', 'false');
-          cell.addEventListener('click', () => selectProfitDay(day, cell));
-          cell.addEventListener('focus', () => selectProfitDay(day, cell));
-          cell.addEventListener('mouseenter', () => selectProfitDay(day, cell));
-        } else cell.setAttribute('aria-hidden', 'true');
-        cells.append(cell);
-      });
-
-      const selectedDay = visible.find(day => day.key === selectedProfitDate && day.date <= todayUtc)
-        || [...visible].reverse().find(day => day.record && day.date <= todayUtc)
-        || visible.find(day => day.key === todayUtc.toISOString().slice(0, 10));
-      if (selectedDay) selectProfitDay(selectedDay, cells.querySelector(`[data-date="${selectedDay.key}"]`));
-
-      const months = $('profit-months'); months.replaceChildren();
-      let previousMonth = -1;
-      for (let week = 0; week < 53; week += 1) {
-        const weekDate = new Date(start);
-        weekDate.setUTCDate(start.getUTCDate() + (week * 7));
-        const month = weekDate.getUTCMonth();
-        if (month === previousMonth) continue;
-        if (week === 0 && weekDate.getUTCDate() > 14) { previousMonth = month; continue; }
-        const label = document.createElement('span');
-        label.textContent = weekDate.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short' });
-        label.style.gridColumn = `${week + 1} / span 4`;
-        months.append(label);
-        previousMonth = month;
-      }
-
-      const recordedDays = visible.filter(day => day.record);
-      const periodTotal = recordedDays.reduce((sum, day) => sum + Number(day.record.profit_usdc || 0), 0);
-      const profitableDays = recordedDays.filter(day => Number(day.record.profit_usdc || 0) > 0).length;
-      const bestDay = recordedDays.reduce((best, day) => Number(day.record.profit_usdc || 0) > Number(best?.record?.profit_usdc || 0) ? day : best, null);
-      text('profit-period-total', usdc(periodTotal)); pnlTone($('profit-period-total'), periodTotal);
-      text('profitable-days', number(profitableDays, 0));
-      text('best-profit-day', usdc(bestDay?.record?.profit_usdc || 0));
-      $('best-profit-day').title = bestDay ? bestDay.date.toLocaleDateString('en-US', { timeZone: 'UTC', dateStyle: 'medium' }) : 'No profitable day recorded';
-    }
-
-    function render(state) {
-      const bot = state.bot || {}, performance = state.performance || {}, balances = state.balances || {}, market = state.market || {}, dailyProfit = state.daily_profit || {};
-      text('total-pnl', money(performance.total_realized_pnl_usd, 2)); pnlTone($('total-pnl'), performance.total_realized_pnl_usd);
-      text('session-pnl', money(performance.session_realized_pnl_usd, 4)); pnlTone($('session-pnl'), performance.session_realized_pnl_usd);
-      text('legacy-pnl', money(performance.legacy_balance_change_usd, 4));
-      text('total-arbs', number(performance.total_arbs, 0)); text('session-arbs', number(performance.session_arbs, 0));
-      text('portfolio', money(performance.current_portfolio_usd, 2));
-      text('sol-spent', number(performance.total_sol_consumed, 9)); text('sol-cost', '~' + money(performance.total_sol_cost_usd, 4));
-      text('status-label', bot.status_label || 'Unknown'); text('detail-status', bot.status_label || 'Unknown');
-      text('updated-at', bot.updated_at ? 'Updated ' + new Date(bot.updated_at).toLocaleTimeString() : 'Waiting for data');
-      text('uptime', duration(bot.uptime_seconds)); text('current-route', bot.current_route || 'Market scan');
-      text('attempts', number(performance.session_attempts, 0)); text('session-sol-cost', money(performance.session_sol_cost_usd, 4));
-      text('sol-price', money(market.sol_usd, 2)); text('wallet', shortWallet(bot.wallet)); $('wallet').title = bot.wallet || '';
-      const dot = $('status-dot'); dot.className = 'dot ' + (['scanning','executing_stable','executing_jupiter'].includes(bot.status) ? 'good' : (['starting','recovering','exposed'].includes(bot.status) ? 'warn' : 'bad'));
-      const error = $('last-error'); error.textContent = bot.last_error || ''; error.style.display = bot.last_error ? 'block' : 'none';
-      renderAssets(balances.wallet || {}, balances.pools || {}); renderDailyProfit(dailyProfit); renderActivity(state.recent_arbs || []);
-      const updateAge = bot.updated_at ? (Date.now() - new Date(bot.updated_at).getTime()) / 1000 : Infinity;
-      if (updateAge > 30) {
-        $('offline-banner').textContent = 'Bot state is stale. The dashboard is reachable, but the trading process may be stopped.';
-        $('offline-banner').style.display = 'block';
-        dot.className = 'dot bad'; text('status-label', 'Stale');
-      } else {
-        $('offline-banner').style.display = 'none';
-      }
-    }
-
-    const REFRESH_INTERVAL_MS = 2000;
-    const REFRESH_TIMEOUT_MS = 5000;
-
-    async function refresh() {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
-      try {
-        const response = await fetch('/api/state', { cache: 'no-store', signal: controller.signal });
-        if (!response.ok) throw new Error('State endpoint unavailable');
-        render(await response.json());
-      } catch (error) {
-        $('offline-banner').style.display = 'block';
-        $('status-dot').className = 'dot bad'; text('status-label', 'Disconnected');
-      } finally {
-        clearTimeout(timeout);
-        setTimeout(refresh, REFRESH_INTERVAL_MS);
-      }
-    }
-    refresh();
-  </script>
-</body>
-</html>"""
+EXECUTION_LOGS: list[dict[str, str]] = []
+LOG_LOCK = threading.Lock()
+EXECUTION_LOCK = threading.Lock()
 
 
-def state_is_fresh(state, max_age_seconds=30):
-    updated_at = state.get("bot", {}).get("updated_at")
-    if not updated_at:
-        return False
+def add_log(entry: str, log_type: str = "info") -> None:
+    timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    with LOG_LOCK:
+        EXECUTION_LOGS.append(
+            {
+                "timestamp": timestamp,
+                "text": entry,
+                "type": log_type,
+            }
+        )
+        del EXECUTION_LOGS[:-300]
+
+
+add_log("Arbitrage console online and listening for commands.", "system")
+
+
+def _route_symbols(pair: str) -> tuple[str, str]:
+    intermediate, loan = pair.split("/", 1)
+    return loan, intermediate
+
+
+def _route_flow(chain: str, pair: str) -> str:
+    loan, intermediate = _route_symbols(pair)
+    venue = "Jupiter" if chain == "solana" else "Matcha"
+    return f"{loan} → {intermediate} ({venue}) → {loan} (Stable.com)"
+
+
+def _json_plan(stdout: str) -> dict[str, Any] | None:
     try:
-        updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-        return (datetime.now(timezone.utc) - updated).total_seconds() <= max_age_seconds
+        value = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def parse_output_summary(
+    output: str,
+    plan: dict[str, Any] | None = None,
+    *,
+    chain: str = "ethereum",
+    pair: str = "PYUSD/USDC",
+) -> dict[str, str]:
+    loan_symbol, intermediate_symbol = _route_symbols(pair)
+    summary: dict[str, str] = {"flow": _route_flow(chain, pair)}
+
+    if plan:
+        loan_token = plan.get("loanToken")
+        intermediate_token = plan.get("intermediateToken")
+        if isinstance(loan_token, dict):
+            loan_symbol = str(loan_token.get("symbol") or loan_symbol)
+        if isinstance(intermediate_token, dict):
+            intermediate_symbol = str(
+                intermediate_token.get("symbol") or intermediate_symbol
+            )
+
+        loan_amount = plan.get("loanAmount")
+        if loan_amount is not None:
+            summary["loan"] = f"{loan_amount} {loan_symbol}"
+
+        matcha = plan.get("matcha")
+        if isinstance(matcha, dict):
+            sold = matcha.get("sellLoanToken", matcha.get("sellUSDC"))
+            bought = matcha.get("buyIntermediate", matcha.get("buyUSDT"))
+            if sold is not None and bought is not None:
+                summary["leg1"] = (
+                    f"{sold} {loan_symbol} → {bought} {intermediate_symbol}"
+                )
+
+        stable = plan.get("stable")
+        if isinstance(stable, dict):
+            sold = stable.get("sellIntermediate", stable.get("sellUSDT"))
+            bought = stable.get("buyLoanToken", stable.get("buyUSDC"))
+            if sold is not None and bought is not None:
+                summary["leg2"] = (
+                    f"{sold} {intermediate_symbol} → {bought} {loan_symbol}"
+                )
+
+        gross = plan.get("grossProfit", plan.get("grossProfitAfterFlashFee"))
+        if gross is not None:
+            summary["gross"] = f"{gross} {loan_symbol}"
+        net = plan.get("predictedNetProfit")
+        if net is not None:
+            summary["net"] = f"{net} {loan_symbol}"
+        execution_cost = plan.get(
+            "maximumExecutionCostUsd",
+            plan.get("maximumExecutionCostUSDC"),
+        )
+        if execution_cost is not None:
+            summary["cost"] = f"{execution_cost} {loan_symbol}"
+        transaction_hash = plan.get("transactionHash")
+        if transaction_hash:
+            summary["transaction"] = str(transaction_hash)
+
+    for line in output.splitlines():
+        clean = line.strip()
+        if "Leg 1" in clean:
+            summary.setdefault("leg1", clean.split(":", 1)[-1].strip())
+        elif "Leg 2" in clean:
+            summary.setdefault("leg2", clean.split(":", 1)[-1].strip())
+        elif "Guaranteed net result:" in clean:
+            summary["net"] = clean.split(":", 1)[-1].strip()
+        elif "Gross Profit:" in clean or "Guaranteed gross result:" in clean:
+            summary.setdefault("gross", clean.split(":", 1)[-1].strip())
+        elif "Loan Amount:" in clean or "Flash-loan principal:" in clean:
+            summary.setdefault("loan", clean.split(":", 1)[-1].strip())
+
+    return summary
+
+
+def _error_message(output: str, returncode: int) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.upper().startswith("ERROR:"):
+            return line.split(":", 1)[1].strip()
+    if lines:
+        return lines[-1][:500]
+    return f"Arbitrage process exited with status {returncode}"
+
+
+def _log_process_output(output: str) -> None:
+    for line in output.splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        lowered = clean.lower()
+        log_type = "info"
+        if "error" in lowered or "failed" in lowered:
+            log_type = "error"
+        elif "quote" in lowered or "leg 1" in lowered or "leg 2" in lowered:
+            log_type = "quote"
+        elif "profit" in lowered or "gross" in lowered or "net result" in lowered:
+            log_type = "success"
+        add_log(clean, log_type)
+
+
+def run_arb_command(
+    chain: str,
+    pair: str,
+    mode: str,
+    amount: str,
+    slippage_bps: str,
+) -> tuple[bool, str, dict[str, str]]:
+    env = os.environ.copy()
+    intermediate, _loan = pair.split("/", 1)
+
+    if chain == "solana":
+        env["SOL_FLASH_ARB_AMOUNT_USDC"] = amount
+        env["SOL_FLASH_ARB_SLIPPAGE_BPS"] = slippage_bps
+        env["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"] = intermediate
+        executable = "npx.cmd" if sys.platform == "win32" else "npx"
+        cmd = [
+            executable,
+            "tsx",
+            str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
+        ]
+        if mode == "quote":
+            cmd.append("--quote-only")
+        else:
+            cmd.extend(
+                ["--send", "--confirm-mainnet", "EXECUTE_SOLANA_FLASH_ARB"]
+            )
+    elif chain == "ethereum":
+        script_name = (
+            "eth_flash_arb_pyusd_usdc.py"
+            if intermediate == "PYUSD"
+            else "eth_flash_arb.py"
+        )
+        cmd = [
+            sys.executable,
+            str(PROJECT_ROOT / "src" / "engines" / script_name),
+            "--amount",
+            amount,
+            "--loan-token",
+            "USDC",
+            "--slippage-bps",
+            slippage_bps,
+        ]
+        if mode == "live":
+            cmd.extend(["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"])
+    elif chain in ("polygon", "bsc"):
+        cmd = [
+            sys.executable,
+            str(PROJECT_ROOT / "src" / "engines" / "multichain_flash_arb.py"),
+            "--chain",
+            chain,
+            "--amount",
+            amount,
+            "--slippage-bps",
+            slippage_bps,
+        ]
+        if mode == "live":
+            cmd.extend(
+                ["--send", "--confirm-mainnet", f"EXECUTE_{chain.upper()}_ARB"]
+            )
+    else:
+        return False, f"Unsupported chain: {chain}", {}
+
+    add_log(
+        f"Starting {mode} · {chain.title()} · {pair} · {amount} · {slippage_bps} bps",
+        "system",
+    )
+    timeout_seconds = LIVE_TIMEOUT_SECONDS if mode == "live" else QUOTE_TIMEOUT_SECONDS
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        message = f"Command timed out after {timeout_seconds:g} seconds"
+        add_log(message, "error")
+        return False, message, {}
+    except OSError as exc:
+        message = f"Could not start arbitrage process: {exc}"
+        add_log(message, "error")
+        return False, message, {}
+
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    output = "\n".join(part for part in (stdout, stderr) if part)
+    # EVM stdout is a large JSON plan; stderr contains the human-readable trace.
+    _log_process_output(stdout if chain == "solana" else stderr)
+    plan = _json_plan(stdout)
+    parsed = parse_output_summary(output, plan, chain=chain, pair=pair)
+    if result.returncode != 0:
+        return False, _error_message(output, result.returncode), parsed
+
+    completion = "Live transaction submitted." if mode == "live" else "Quote ready."
+    add_log(completion, "success")
+    return True, output, parsed
+
+
+def _validated_request(data: Any) -> tuple[str, str, str, str, str]:
+    if not isinstance(data, dict):
+        raise ValueError("request body must be an object")
+    chain = str(data.get("chain", "")).lower()
+    pair = str(data.get("pair", "")).upper()
+    mode = str(data.get("mode", "")).lower()
+    amount = str(data.get("amount", "")).strip()
+    slippage_text = str(data.get("slippageBps", "")).strip()
+
+    if chain not in SUPPORTED_PAIRS:
+        raise ValueError("unsupported chain")
+    if pair not in SUPPORTED_PAIRS[chain]:
+        raise ValueError(f"{pair or 'selected pair'} is not supported on {chain.title()}")
+    if mode not in ("quote", "live"):
+        raise ValueError("mode must be quote or live")
+    try:
+        parsed_amount = Decimal(amount)
+    except (InvalidOperation, ValueError):
+        raise ValueError("amount must be a decimal number") from None
+    if not parsed_amount.is_finite() or parsed_amount <= 0:
+        raise ValueError("amount must be greater than zero")
+    if len(amount) > 40:
+        raise ValueError("amount is too long")
+    try:
+        slippage = int(slippage_text)
     except ValueError:
-        return False
+        raise ValueError("slippage must be a whole number") from None
+    if not 0 <= slippage <= 100:
+        raise ValueError("slippage must be between 0 and 100 bps")
+    if mode == "live" and data.get("confirmation") != LIVE_CONFIRMATION:
+        raise PermissionError(f'type "{LIVE_CONFIRMATION}" to authorize a live run')
+    return chain, pair, mode, amount, str(slippage)
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    def setup(self):
+    server_version = "ArbitrageDashboard/2"
+
+    def setup(self) -> None:
         super().setup()
         self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
 
-    def log_message(self, format, *args):
-        pass
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
 
-    def _send(self, status, content_type, payload):
+    def _send(
+        self,
+        status: int,
+        content_type: str,
+        payload: bytes,
+        *,
+        cache_control: str = "no-store",
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; connect-src 'self'; img-src 'self'; "
+            "style-src 'self'; script-src 'self'; base-uri 'none'; "
+            "form-action 'self'; frame-ancestors 'none'",
+        )
         self.end_headers()
         self.wfile.write(payload)
 
-    def _send_state_error(self, endpoint, error):
-        print(f"[!] Dashboard {endpoint} failed: {error}", flush=True)
-        payload = json.dumps(
-            {"ok": False, "error": "dashboard state temporarily unavailable"},
-            separators=(",", ":"),
-        ).encode("utf-8")
-        self._send(503, "application/json; charset=utf-8", payload)
+    def _json(self, status: int, value: Any) -> None:
+        payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        self._send(status, "application/json; charset=utf-8", payload)
 
-    def do_GET(self):
+    def _read_json_body(self) -> Any:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ValueError("invalid content length") from None
+        if length <= 0:
+            raise ValueError("request body is required")
+        if length > MAX_REQUEST_BYTES:
+            raise OverflowError("request body is too large")
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("invalid JSON") from None
+
+    def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
         if path in ("/favicon.svg", "/favicon.ico"):
             try:
                 payload = FAVICON_PATH.read_bytes()
-            except OSError as error:
-                print(f"[!] Dashboard favicon read failed: {error}", flush=True)
-                self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
+            except OSError:
+                self._json(404, {"error": "not found"})
                 return
-            self._send(200, "image/svg+xml", payload)
+            self._send(200, "image/svg+xml", payload, cache_control="public, max-age=3600")
             return
+
+        asset = STATIC_ASSETS.get(path)
+        if asset:
+            asset_path, content_type = asset
+            try:
+                payload = asset_path.read_bytes()
+            except OSError:
+                self._json(404, {"error": "not found"})
+                return
+            self._send(200, content_type, payload, cache_control="public, max-age=300")
+            return
+
+        if path == "/api/logs":
+            with LOG_LOCK:
+                logs = list(EXECUTION_LOGS)
+            self._json(200, {"logs": logs, "running": EXECUTION_LOCK.locked()})
+            return
+
         if path == "/api/state":
             try:
-                state = read_dashboard_state(
-                    DB_PATH,
-                    timeout_seconds=DB_TIMEOUT_SECONDS,
+                state = read_dashboard_state(DB_PATH, timeout_seconds=DB_TIMEOUT_SECONDS)
+            except Exception:
+                self._json(
+                    503,
+                    {"ok": False, "error": "dashboard state temporarily unavailable"},
                 )
-            except Exception as error:
-                self._send_state_error("state read", error)
                 return
-            payload = json.dumps(state, separators=(",", ":")).encode("utf-8")
-            self._send(200, "application/json; charset=utf-8", payload)
+            self._json(200, state)
             return
+
         if path == "/healthz":
             try:
-                state = read_state(DB_PATH, timeout_seconds=DB_TIMEOUT_SECONDS)
-            except Exception as error:
-                self._send_state_error("health check", error)
-                return
-            healthy = state_is_fresh(state) and state.get("bot", {}).get("status") != "offline"
-            payload = json.dumps({"ok": healthy, "status": state.get("bot", {}).get("status", "offline")}).encode("utf-8")
-            self._send(200 if healthy else 503, "application/json; charset=utf-8", payload)
+                state = read_dashboard_state(DB_PATH, timeout_seconds=DB_TIMEOUT_SECONDS)
+                bot_status = state.get("bot", {}).get("status", "offline")
+                healthy = bot_status != "offline"
+            except Exception:
+                bot_status = "unavailable"
+                healthy = False
+            self._json(200 if healthy else 503, {"ok": healthy, "status": bot_status})
             return
+
         if path in ("/", "/index.html"):
-            self._send(200, "text/html; charset=utf-8", HTML_TEMPLATE.encode("utf-8"))
+            self._send(
+                200,
+                "text/html; charset=utf-8",
+                HTML_TEMPLATE.encode("utf-8"),
+            )
             return
-        self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
+
+        self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path != "/api/run":
+            self._json(404, {"error": "not found"})
+            return
+
+        try:
+            data = self._read_json_body()
+            chain, pair, mode, amount, slippage_bps = _validated_request(data)
+        except OverflowError as exc:
+            self._json(413, {"ok": False, "error": str(exc)})
+            return
+        except PermissionError as exc:
+            self._json(403, {"ok": False, "error": str(exc)})
+            return
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+
+        if not EXECUTION_LOCK.acquire(blocking=False):
+            self._json(409, {"ok": False, "error": "another execution is already running"})
+            return
+        try:
+            success, output, parsed = run_arb_command(
+                chain,
+                pair,
+                mode,
+                amount,
+                slippage_bps,
+            )
+        finally:
+            EXECUTION_LOCK.release()
+
+        response = {
+            "ok": success,
+            "parsed": parsed,
+            "output": output if success else "",
+            "error": None if success else output,
+        }
+        self._json(200 if success else 422, response)
 
 
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
+    allow_reuse_address = True
 
 
-def run():
-    server_address = ("0.0.0.0", PORT)
+def run(host: str = HOST, port: int = PORT) -> None:
+    server_address = (host, port)
     httpd = DashboardServer(server_address, DashboardHandler)
-    print(f"[*] Dashboard running on port {PORT}")
+    display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    print(f"[*] Dashboard running on http://{display_host}:{port}", flush=True)
     httpd.serve_forever()
 
 

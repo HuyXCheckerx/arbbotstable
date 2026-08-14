@@ -35,6 +35,7 @@ from eth_flash_arb import (
     select_best_matcha_quote,
     wei_cost_usdc_raw,
 )
+import eth_flash_arb_pyusd_usdc as pyusd_arb
 
 
 TARGET = "0x1111111111111111111111111111111111111111"
@@ -62,6 +63,43 @@ def matcha_response(buy_amount, simulation_result="success", include_data=True):
 
 
 class EthereumFlashArbTests(unittest.TestCase):
+    def test_pyusd_route_checksums_lowercase_matcha_addresses_for_web3(self):
+        quote = pyusd_arb.MatchaQuote(
+            aggregator="1inch",
+            target="0x0000000000001ff3684f28c67538d4d072c22734",
+            allowance_target="0x0000000000001ff3684f28c67538d4d072c22734",
+            data="0x12345678",
+            value=0,
+            sell_amount=1_000_000,
+            buy_amount=1_000_001,
+        )
+
+        Web3 = pyusd_arb.require_web3()
+        arguments = pyusd_arb.checksum_matcha_arguments(Web3, quote)
+
+        self.assertEqual(arguments[0], "0x0000000000001fF3684f28c67538d4D072C22734")
+        self.assertTrue(Web3.is_checksum_address(arguments[0]))
+        self.assertTrue(Web3.is_checksum_address(arguments[1]))
+
+    def test_pyusd_order_uses_single_chain_create_endpoint(self):
+        class RecordingHttp:
+            def __init__(self):
+                self.url = None
+
+            def post(self, url, _payload, *, headers=None):
+                self.url = url
+                return None
+
+        http = RecordingHttp()
+        client = pyusd_arb.StableClient(http, "https://stable.invalid")
+        with self.assertRaisesRegex(pyusd_arb.ArbError, "not an object"):
+            client.create_order(TARGET, "PYUSD", "USDC", 1_000_000, 1_000_000)
+
+        self.assertEqual(
+            http.url,
+            "https://stable.invalid/swap/create/singleChain",
+        )
+
     def test_matcha_gas_endpoint_price_field_is_supported(self):
         class StaticHttp:
             def get(self, *_args, **_kwargs):

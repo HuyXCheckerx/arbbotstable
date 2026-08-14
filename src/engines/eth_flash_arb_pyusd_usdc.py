@@ -33,7 +33,7 @@ except ImportError:  # Reported with the other runtime dependencies when used.
 if load_dotenv is not None:
     # Route configuration belongs to this project's .env. Override stale shell
     # exports so `python3 eth_flash_arb_pyusd_usdc.py` behaves consistently in every shell.
-    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 
 CHAIN_ID = 1
@@ -330,14 +330,14 @@ class StableOrder:
         )
 
 
-def amount_to_raw(value: str | Decimal) -> int:
+def amount_to_raw(value: str | Decimal, allow_zero: bool = False) -> int:
     try:
         amount = Decimal(value)
     except (InvalidOperation, TypeError) as exc:
         raise ArbError(f"invalid token amount: {value!r}") from exc
     scaled = amount * (Decimal(10) ** DECIMALS)
-    if amount <= 0 or scaled != scaled.to_integral_value():
-        raise ArbError("token amount must be positive with at most 6 decimals")
+    if (amount < 0 if allow_zero else amount <= 0) or scaled != scaled.to_integral_value():
+        raise ArbError("token amount must be non-negative with at most 6 decimals" if allow_zero else "token amount must be positive with at most 6 decimals")
     return int(scaled)
 
 
@@ -593,10 +593,17 @@ def parse_stable_quote(payload: Any, amount_in: int) -> StableQuote:
 def parse_stable_order(payload: Any, expected_amount_in: int) -> StableOrder:
     order = unwrap_data(payload)
     if not isinstance(order, dict):
-        raise ArbError("Stable.com create response is not an object")
+        raise ArbError(f"Stable.com create response is not an object: {payload!r}")
+    err = first_key(order, ("error", "message", "msg", "reason", "detail")) or (
+        first_key(payload, ("error", "message", "msg", "reason", "detail"))
+        if isinstance(payload, dict)
+        else None
+    )
     signature = order.get("maintainerSignature")
     if not isinstance(signature, str):
-        raise ArbError("Stable.com order has no maintainer signature")
+        if err:
+            raise ArbError(f"Stable.com create order failed: {err}")
+        raise ArbError(f"Stable.com order has no maintainer signature: {order!r}")
     signature = signature if signature.startswith("0x") else f"0x{signature}"
     try:
         signature_bytes = bytes.fromhex(signature[2:])
@@ -668,17 +675,26 @@ class HttpJsonClient:
 
     @staticmethod
     def _decode(response: requests.Response, url: str) -> Any:
+        excerpt = " ".join(response.text.split())[:400]
         if response.status_code >= 400:
             cloudflare = (
                 " Cloudflare may be blocking this undocumented API."
                 if response.status_code == 403
                 else ""
             )
-            raise ArbError(f"{url} returned HTTP {response.status_code}.{cloudflare}")
+            detail = f": {excerpt}" if excerpt else ""
+            message = f"{url} returned HTTP {response.status_code}{detail}.{cloudflare}"
+            if response.status_code in (429, 502, 503, 504):
+                raise RetryableArbError(message)
+            raise ArbError(message)
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as exc:
-            raise ArbError(f"{url} returned non-JSON content") from exc
+            detail = f": {excerpt}" if excerpt else ""
+            raise ArbError(f"{url} returned non-JSON content{detail}") from exc
+        if payload is None:
+            raise RetryableArbError(f"{url} returned an empty JSON response")
+        return payload
 
 
 class MatchaClient:
@@ -820,7 +836,7 @@ class StableClient:
             }
         )
         response = self.http.post(
-            f"{self.base_url}/swap/create",
+            f"{self.base_url}/swap/create/singleChain",
             request,
             headers=self.headers,
         )
@@ -897,6 +913,16 @@ def require_executor_loan_support(
         )
 
 
+def checksum_matcha_arguments(web3: Any, matcha: MatchaQuote) -> tuple[Any, ...]:
+    """Normalize API-supplied addresses before Web3 ABI validation."""
+    arguments = matcha.contract_tuple()
+    return (
+        web3.to_checksum_address(arguments[0]),
+        web3.to_checksum_address(arguments[1]),
+        *arguments[2:],
+    )
+
+
 def prepare_transaction(
     rpc_url: str,
     rpc_timeout: float,
@@ -920,6 +946,7 @@ def prepare_transaction(
         address=web3.to_checksum_address(executor),
         abi=EXECUTOR_ABI,
     )
+    matcha_arguments = checksum_matcha_arguments(web3, matcha)
 
     # Check if executeArbitrageWithTokens exists or use executeArbitrageWithLoanToken
     try:
@@ -927,7 +954,7 @@ def prepare_transaction(
             loan_amount,
             web3.to_checksum_address(loan_token),
             web3.to_checksum_address(intermediate_token),
-            matcha.contract_tuple(),
+            matcha_arguments,
             stable.contract_tuple(),
             min_profit,
         )
@@ -935,7 +962,7 @@ def prepare_transaction(
         call = contract.functions.executeArbitrageWithLoanToken(
             loan_amount,
             web3.to_checksum_address(loan_token),
-            matcha.contract_tuple(),
+            matcha_arguments,
             stable.contract_tuple(),
             min_profit,
         )
@@ -1003,12 +1030,17 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
         "--executor",
-        default=setting("ETH_ARB_PYUSD_USDC_EXECUTOR", setting("ETH_ARB_EXECUTOR")),
+        default=(
+            setting("ETH_ARB_PYUSD_USDC_EXECUTOR")
+            or setting("ETH_EXECUTOR_ADDRESS")
+            or setting("ETH_ARB_EXECUTOR")
+            or "0x6FA26637Db03519B520A44056fc4D93858Ba5833"
+        ),
         help="deployed MorphoMatchaStableArbUsdc contract address",
     )
     result.add_argument(
         "--rpc-url",
-        default=setting("ETH_RPC_URL"),
+        default=setting("ETH_RPC_URL", "https://ethereum-rpc.publicnode.com"),
         help="Ethereum RPC URL used for state simulation and broadcasting",
     )
     result.add_argument(
@@ -1034,7 +1066,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--operator",
-        default=setting("ETH_OPERATOR_ADDRESS"),
+        default=setting("ETH_OPERATOR_ADDRESS", "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C"),
         help="EOA address initiating the transaction",
     )
     result.add_argument(
@@ -1134,8 +1166,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     requested_loan_amount = amount_to_raw(args.amount)
     loan_amount = requested_loan_amount
-    min_profit = amount_to_raw(args.min_profit)
-    min_net_profit = amount_to_raw(args.min_net_profit)
+    min_profit = amount_to_raw(args.min_profit, allow_zero=True)
+    min_net_profit = amount_to_raw(args.min_net_profit, allow_zero=True)
     loan_symbol = args.loan_token
     loan_token = LOAN_TOKENS[loan_symbol]
     
@@ -1151,7 +1183,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if args.confirm_mainnet != "EXECUTE_ATOMIC_ARB":
             raise ArbError("--send requires --confirm-mainnet EXECUTE_ATOMIC_ARB")
         if not private_key:
-            raise ArbError("ETH_OPERATOR_PRIVATE_KEY is required only for --send")
+            raise ArbError("ETH_OPERATOR_PRIVATE_KEY is required when using --send (check .env)")
         Web3 = require_web3()
         derived = Web3().eth.account.from_key(private_key).address
         if operator and operator.lower() != derived.lower():
