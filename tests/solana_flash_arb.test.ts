@@ -5,6 +5,7 @@ import {
   MAINNET_GENESIS_HASH,
   PYUSD_MINT,
   STABLE_PROGRAM_ID,
+  USDC_MINT,
   USDG_MINT,
   bufferedFeeRaw,
   buildStableSwapInstruction,
@@ -13,6 +14,7 @@ import {
   finalComputeUnitLimit,
   formatRaw,
   intermediateTokenProgram,
+  isTwoHopJupiterRoute,
   parseDecimalToRawCeil,
   parseDecimalToRawFloor,
   parseUiAmountToRaw,
@@ -40,6 +42,14 @@ test("resolves PYUSD and USDG as flash-loan mints", () => {
   assert.ok(resolveLoanMint("PYUSD").equals(PYUSD_MINT));
   assert.ok(resolveLoanMint("USDG").equals(USDG_MINT));
   assert.throws(() => resolveLoanMint("USDT"), /must be USDC, PYUSD, or USDG/);
+});
+
+test("identifies USDG/PYUSD routes as requiring two-hop Jupiter swaps via USDC", () => {
+  assert.equal(isTwoHopJupiterRoute(PYUSD_MINT, USDG_MINT), true);
+  assert.equal(isTwoHopJupiterRoute(USDG_MINT, PYUSD_MINT), true);
+  assert.equal(isTwoHopJupiterRoute(USDC_MINT, PYUSD_MINT), false);
+  assert.equal(isTwoHopJupiterRoute(USDC_MINT, USDG_MINT), false);
+  assert.equal(isTwoHopJupiterRoute(PYUSD_MINT, USDC_MINT), false);
 });
 
 test("parses and formats six-decimal stablecoin amounts exactly", () => {

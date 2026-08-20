@@ -146,6 +146,7 @@ interface StableQuote {
 interface SizedCycle {
   loanAmountRaw: bigint;
   firstQuote: JupiterQuote;
+  secondJupiterQuote?: JupiterQuote;
   stableQuote: StableQuote;
   cycle: ConservativeCycle;
   capacityRaw: bigint;
@@ -250,6 +251,16 @@ export function resolveLoanMint(symbol: string): PublicKey {
   if (symbol === "USDG") return USDG_MINT;
   throw new Error(
     `SOL_FLASH_ARB_LOAN_TOKEN must be USDC, PYUSD, or USDG; received ${symbol}`,
+  );
+}
+
+export function isTwoHopJupiterRoute(
+  loanMint: PublicKey,
+  intermediateMint: PublicKey,
+): boolean {
+  return (
+    (loanMint.equals(PYUSD_MINT) && intermediateMint.equals(USDG_MINT)) ||
+    (loanMint.equals(USDG_MINT) && intermediateMint.equals(PYUSD_MINT))
   );
 }
 
@@ -895,20 +906,48 @@ async function getCapacitySizedCycle(
 ): Promise<SizedCycle> {
   let loanAmountRaw = config.maximumLoanAmountRaw;
   let capacityAdjusted = false;
+  const isTwoHop = isTwoHopJupiterRoute(
+    config.loanMint,
+    config.intermediateMint,
+  );
 
   for (
     let attempt = 0;
     attempt < config.stableCapacitySizingAttempts;
     attempt += 1
   ) {
-    const firstQuote = await getJupiterQuote(
-      config,
-      config.loanMint,
-      config.intermediateMint,
-      loanAmountRaw,
-      attempt,
-    );
-    const firstMinimumRaw = BigInt(firstQuote.otherAmountThreshold);
+    let firstQuote: JupiterQuote;
+    let secondJupiterQuote: JupiterQuote | undefined;
+    let firstMinimumRaw: bigint;
+
+    if (isTwoHop) {
+      firstQuote = await getJupiterQuote(
+        config,
+        config.loanMint,
+        USDC_MINT,
+        loanAmountRaw,
+        attempt * 2,
+      );
+      const usdcMinimumRaw = BigInt(firstQuote.otherAmountThreshold);
+      secondJupiterQuote = await getJupiterQuote(
+        config,
+        USDC_MINT,
+        config.intermediateMint,
+        usdcMinimumRaw,
+        attempt * 2 + 1,
+      );
+      firstMinimumRaw = BigInt(secondJupiterQuote.otherAmountThreshold);
+    } else {
+      firstQuote = await getJupiterQuote(
+        config,
+        config.loanMint,
+        config.intermediateMint,
+        loanAmountRaw,
+        attempt,
+      );
+      firstMinimumRaw = BigInt(firstQuote.otherAmountThreshold);
+    }
+
     const stableQuote = await getStableQuote(config, wallet, firstMinimumRaw);
     const capacityRaw = parseDecimalToRawFloor(String(stableQuote.status.balance));
     const minimumRaw = parseDecimalToRawCeil(String(stableQuote.status.min));
@@ -939,9 +978,10 @@ async function getCapacitySizedCycle(
       return {
         loanAmountRaw,
         firstQuote,
+        secondJupiterQuote,
         stableQuote,
         cycle: conservativeCycle(
-          firstQuote,
+          secondJupiterQuote ?? firstQuote,
           stableQuote.outputRaw,
           loanAmountRaw,
         ),
@@ -1198,13 +1238,27 @@ async function assertTokenAccountsExist(
     false,
     inputTokenProgram,
   );
+  const checkAccounts: PublicKey[] = [loanAta, interAta];
+  const requiresUsdc =
+    !loanMint.equals(USDC_MINT) && !intermediateMint.equals(USDC_MINT);
+  let usdcAta: PublicKey | undefined;
+  if (requiresUsdc) {
+    usdcAta = getAssociatedTokenAddressSync(
+      USDC_MINT,
+      owner,
+      false,
+      TOKEN_PROGRAM_ID,
+    );
+    checkAccounts.push(usdcAta);
+  }
   const infos = await connection.getMultipleAccountsInfo(
-    [loanAta, interAta],
+    checkAccounts,
     "confirmed",
   );
   const missing: string[] = [];
   if (!infos[0]) missing.push(`${loanSymbol} ATA ${loanAta.toBase58()}`);
   if (!infos[1]) missing.push(`${intermediateSymbol} ATA ${interAta.toBase58()}`);
+  if (requiresUsdc && !infos[2]) missing.push(`USDC ATA ${usdcAta!.toBase58()}`);
   if (missing.length) {
     throw new Error(
       `Create the wallet token accounts before using the flash loan: ${missing.join(", ")}`,
@@ -1358,14 +1412,21 @@ async function main(): Promise<void> {
     `Maximum flash-loan principal: ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol}`,
   );
   const sized = await getCapacitySizedCycle(config, walletAddress);
-  const { loanAmountRaw, firstQuote, stableQuote, cycle } = sized;
+  const { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
+  const isTwoHop = isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);
   console.log(`Flash-loan principal: ${formatRaw(loanAmountRaw)} ${config.loanSymbol}`);
   console.log(
     `Stable.com capacity: ${formatRaw(sized.capacityRaw)} ${config.intermediateSymbol} (${formatRaw(sized.usableCapacityRaw)} usable)`,
   );
-  console.log(
-    `Leg 1 (Jupiter): ${config.loanSymbol} -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
-  );
+  if (isTwoHop && secondJupiterQuote) {
+    console.log(
+      `Leg 1 (Jupiter): ${config.loanSymbol} -> USDC -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+    );
+  } else {
+    console.log(
+      `Leg 1 (Jupiter): ${config.loanSymbol} -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+    );
+  }
   console.log(
     `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
   );
@@ -1410,19 +1471,53 @@ async function main(): Promise<void> {
   console.log(`Marginfi account: ${account.address.toBase58()}`);
   console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
 
-  const [firstSwap, stableLeg] = await Promise.all([
-    getSwapLeg(config, firstQuote, walletAddress, 1),
-    getStableLeg(config, walletAddress, stableQuote),
-  ]);
-  const jupiterLookupTables = await fetchLookupTables(
-    connection,
-    firstSwap.lookupTableAddresses,
-  );
-  const lookupTables = mergeLookupTables(
-    client.addressLookupTables ?? [],
-    jupiterLookupTables,
-  );
-  const swapInstructions = [...firstSwap.instructions, stableLeg.instruction];
+  let swapInstructions: TransactionInstruction[];
+  let lookupTables: AddressLookupTableAccount[];
+  let ignoredComputeBudgetCount = 0;
+  let stableLeg: StableLeg;
+
+  if (isTwoHop && secondJupiterQuote) {
+    const [firstSwap1, firstSwap2, stableLegResult] = await Promise.all([
+      getSwapLeg(config, firstQuote, walletAddress, 1),
+      getSwapLeg(config, secondJupiterQuote, walletAddress, 2),
+      getStableLeg(config, walletAddress, stableQuote),
+    ]);
+    stableLeg = stableLegResult;
+    const [jupiterLookupTables1, jupiterLookupTables2] = await Promise.all([
+      fetchLookupTables(connection, firstSwap1.lookupTableAddresses),
+      fetchLookupTables(connection, firstSwap2.lookupTableAddresses),
+    ]);
+    lookupTables = mergeLookupTables(
+      client.addressLookupTables ?? [],
+      jupiterLookupTables1,
+      jupiterLookupTables2,
+    );
+    swapInstructions = [
+      ...firstSwap1.instructions,
+      ...firstSwap2.instructions,
+      stableLeg.instruction,
+    ];
+    ignoredComputeBudgetCount =
+      firstSwap1.ignoredComputeBudgetInstructionCount +
+      firstSwap2.ignoredComputeBudgetInstructionCount;
+  } else {
+    const [firstSwap, stableLegResult] = await Promise.all([
+      getSwapLeg(config, firstQuote, walletAddress, 1),
+      getStableLeg(config, walletAddress, stableQuote),
+    ]);
+    stableLeg = stableLegResult;
+    const jupiterLookupTables = await fetchLookupTables(
+      connection,
+      firstSwap.lookupTableAddresses,
+    );
+    lookupTables = mergeLookupTables(
+      client.addressLookupTables ?? [],
+      jupiterLookupTables,
+    );
+    swapInstructions = [...firstSwap.instructions, stableLeg.instruction];
+    ignoredComputeBudgetCount = firstSwap.ignoredComputeBudgetInstructionCount;
+  }
+
   const latest = await connection.getLatestBlockhash(config.commitment);
   const probe = await buildFlashTransaction(
     account,
@@ -1516,9 +1611,9 @@ async function main(): Promise<void> {
     computeUnitLimit,
     unitsConsumed: finalUnits,
     transactionBytes: wireSize,
-    ignoredJupiterComputeBudgetInstructions:
-      firstSwap.ignoredComputeBudgetInstructionCount,
+    ignoredJupiterComputeBudgetInstructions: ignoredComputeBudgetCount,
     firstQuote,
+    secondJupiterQuote,
     stableStatus: stableQuote.status,
   };
   fs.mkdirSync(path.dirname(config.outputPath), { recursive: true });

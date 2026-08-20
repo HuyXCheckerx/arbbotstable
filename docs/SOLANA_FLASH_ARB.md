@@ -38,9 +38,10 @@ smaller loan size when necessary.
 
 The default Jupiter account ceiling is 20. That keeps the combined Marginfi,
 Jupiter, and Stable.com transaction below Solana's 1,232-byte wire limit while
-still allowing current stablecoin routes. The dashboard and sniper override
-`SOL_FLASH_ARB_ONLY_DIRECT_ROUTES` to `false` for `USDG/PYUSD` and
-`PYUSD/USDG`, since Jupiter currently needs a multi-hop path for those pairs.
+still allowing current stablecoin routes. On Solana, the `USDG/PYUSD` and
+`PYUSD/USDG` routes automatically execute Jupiter swaps through USDC
+(`PYUSD -> USDC -> USDG` or `USDG -> USDC -> PYUSD`) before the Stable.com
+redemption leg to eliminate routing inefficiency.
 
 If the wallet has no Marginfi account, create a dedicated empty one once:
 
