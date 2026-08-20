@@ -52,9 +52,9 @@ MAX_REQUEST_BYTES = 64 * 1024
 LIVE_CONFIRMATION = "EXECUTE LIVE ARB"
 
 SUPPORTED_PAIRS = {
-    "ethereum": {"PYUSD/USDC", "USDT/USDC"},
-    "solana": {"PYUSD/USDC", "USDT/USDC"},
-    "polygon": {"USDT/USDC"},
+    "ethereum": {"PYUSD/USDC", "USDT/USDC", "USDG/PYUSD", "PYUSD/USDG"},
+    "solana": {"PYUSD/USDC", "USDT/USDC", "USDG/PYUSD", "PYUSD/USDG"},
+    "polygon": {"PYUSD/USDC"},
     "bsc": {"USDT/USDC"},
 }
 
@@ -217,12 +217,16 @@ def run_arb_command(
     slippage_bps: str,
 ) -> tuple[bool, str, dict[str, str]]:
     env = os.environ.copy()
-    intermediate, _loan = pair.split("/", 1)
+    intermediate, loan = pair.split("/", 1)
 
     if chain == "solana":
         env["SOL_FLASH_ARB_AMOUNT_USDC"] = amount
+        env[f"SOL_FLASH_ARB_AMOUNT_{loan}"] = amount
+        env["SOL_FLASH_ARB_LOAN_TOKEN"] = loan
         env["SOL_FLASH_ARB_SLIPPAGE_BPS"] = slippage_bps
         env["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"] = intermediate
+        if loan != "USDC":
+            env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
         executable = "npx.cmd" if sys.platform == "win32" else "npx"
         cmd = [
             executable,
@@ -236,21 +240,20 @@ def run_arb_command(
                 ["--send", "--confirm-mainnet", "EXECUTE_SOLANA_FLASH_ARB"]
             )
     elif chain == "ethereum":
-        script_name = (
-            "eth_flash_arb_pyusd_usdc.py"
-            if intermediate == "PYUSD"
-            else "eth_flash_arb.py"
-        )
+        generic_route = intermediate != "USDT"
+        script_name = "eth_flash_arb_pyusd_usdc.py" if generic_route else "eth_flash_arb.py"
         cmd = [
             sys.executable,
             str(PROJECT_ROOT / "src" / "engines" / script_name),
             "--amount",
             amount,
             "--loan-token",
-            "USDC",
+            loan,
             "--slippage-bps",
             slippage_bps,
         ]
+        if generic_route:
+            cmd.extend(["--intermediate-token", intermediate])
         if mode == "live":
             cmd.extend(["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"])
     elif chain in ("polygon", "bsc"):
@@ -259,6 +262,8 @@ def run_arb_command(
             str(PROJECT_ROOT / "src" / "engines" / "multichain_flash_arb.py"),
             "--chain",
             chain,
+            "--pair",
+            pair,
             "--amount",
             amount,
             "--slippage-bps",

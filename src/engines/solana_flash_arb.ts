@@ -41,6 +41,9 @@ export const USDT_MINT = new PublicKey(
 export const PYUSD_MINT = new PublicKey(
   "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
 );
+export const USDG_MINT = new PublicKey(
+  "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH",
+);
 export const MAINNET_GENESIS_HASH =
   "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 export const STABLE_PROGRAM_ID = new PublicKey(
@@ -171,6 +174,8 @@ interface Config {
   jupiterApiKeys: string[];
   stableApiBase: string;
   stableChainId: string;
+  loanSymbol: string;
+  loanMint: PublicKey;
   intermediateSymbol: string;
   intermediateMint: PublicKey;
   stableMaxExecutionFeeLamports: bigint;
@@ -228,6 +233,30 @@ function envBool(name: string, fallback: boolean): boolean {
   if (["1", "true", "yes", "on"].includes(raw)) return true;
   if (["0", "false", "no", "off"].includes(raw)) return false;
   throw new Error(`${name} must be true or false`);
+}
+
+export function resolveIntermediateMint(symbol: string): PublicKey {
+  if (symbol === "PYUSD") return PYUSD_MINT;
+  if (symbol === "USDG") return USDG_MINT;
+  if (symbol === "USDT") return USDT_MINT;
+  throw new Error(
+    `SOL_FLASH_ARB_INTERMEDIATE_TOKEN must be PYUSD, USDG, or USDT; received ${symbol}`,
+  );
+}
+
+export function resolveLoanMint(symbol: string): PublicKey {
+  if (symbol === "USDC") return USDC_MINT;
+  if (symbol === "PYUSD") return PYUSD_MINT;
+  if (symbol === "USDG") return USDG_MINT;
+  throw new Error(
+    `SOL_FLASH_ARB_LOAN_TOKEN must be USDC, PYUSD, or USDG; received ${symbol}`,
+  );
+}
+
+export function intermediateTokenProgram(mint: PublicKey): PublicKey {
+  return mint.equals(PYUSD_MINT) || mint.equals(USDG_MINT)
+    ? TOKEN_2022_PROGRAM_ID
+    : TOKEN_PROGRAM_ID;
 }
 
 export function parseUiAmountToRaw(value: string, decimals = 6): bigint {
@@ -378,8 +407,17 @@ function readConfig(): Config {
     .filter(Boolean);
   const intermediateSymbol =
     process.env.SOL_FLASH_ARB_INTERMEDIATE_TOKEN?.trim().toUpperCase() || "PYUSD";
-  const intermediateMint =
-    intermediateSymbol === "USDT" ? USDT_MINT : PYUSD_MINT;
+  const intermediateMint = resolveIntermediateMint(intermediateSymbol);
+  const loanSymbol =
+    process.env.SOL_FLASH_ARB_LOAN_TOKEN?.trim().toUpperCase() || "USDC";
+  const loanMint = resolveLoanMint(loanSymbol);
+  if (loanMint.equals(intermediateMint)) {
+    throw new Error("SOL_FLASH_ARB_LOAN_TOKEN must differ from SOL_FLASH_ARB_INTERMEDIATE_TOKEN");
+  }
+  const capacityBuffer =
+    process.env[`SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_${intermediateSymbol}`] ||
+    process.env.SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_USDT ||
+    "1";
   return {
     rpcUrl: requiredEnv("SOLANA_RPC_URL"),
     keypair: loadKeypair(requiredEnv("SOLANA_PRIVATE_KEY")),
@@ -393,16 +431,20 @@ function readConfig(): Config {
       "https://api-defi.stable.com"
     ).replace(/\/$/, ""),
     stableChainId: process.env.SOL_FLASH_ARB_STABLE_CHAIN_ID || "102",
+    loanSymbol,
+    loanMint,
     intermediateSymbol,
     intermediateMint,
     stableMaxExecutionFeeLamports: BigInt(
       envInt("SOL_FLASH_ARB_STABLE_MAX_EXECUTION_FEE_LAMPORTS", 100_000, 0),
     ),
     maximumLoanAmountRaw: parseUiAmountToRaw(
-      process.env.SOL_FLASH_ARB_AMOUNT_USDC || "100000",
+      process.env[`SOL_FLASH_ARB_AMOUNT_${loanSymbol}`] ||
+        process.env.SOL_FLASH_ARB_AMOUNT_USDC ||
+        "100000",
     ),
     stableCapacityBufferRaw: parseDecimalToRawFloor(
-      process.env.SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_USDT || "1",
+      capacityBuffer,
     ),
     stableCapacitySizingAttempts: envInt(
       "SOL_FLASH_ARB_STABLE_CAPACITY_SIZING_ATTEMPTS",
@@ -411,10 +453,14 @@ function readConfig(): Config {
     ),
     slippageBps: envInt("SOL_FLASH_ARB_SLIPPAGE_BPS", 0, 0),
     minimumGrossProfitRaw: parseUiAmountToRaw(
-      process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC || "0.01",
+      process.env[`SOL_FLASH_ARB_MIN_GROSS_PROFIT_${loanSymbol}`] ||
+        process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC ||
+        "0.01",
     ),
     minimumNetProfitRaw: parseUiAmountToRaw(
-      process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC || "0.01",
+      process.env[`SOL_FLASH_ARB_MIN_NET_PROFIT_${loanSymbol}`] ||
+        process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC ||
+        "0.01",
     ),
     maxAccounts: envInt("SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS", 20, 1),
     onlyDirectRoutes: envBool("SOL_FLASH_ARB_ONLY_DIRECT_ROUTES", true),
@@ -536,7 +582,7 @@ function stableRequestPayload(
     chainFrom: config.stableChainId,
     assetFrom: config.intermediateSymbol,
     chainTo: config.stableChainId,
-    assetTo: "USDC",
+    assetTo: config.loanSymbol,
     gasLess: false,
     amountFrom: formatRaw(inputRaw),
     addressFrom: wallet.toBase58(),
@@ -581,11 +627,13 @@ async function getStableQuote(
   const quotedInputRaw = parseDecimalToRawFloor(status.amountFrom);
   if (quotedInputRaw !== inputRaw) {
     throw new Error(
-      `Stable.com changed the requested input to ${status.amountFrom} USDT`,
+      `Stable.com changed the requested input to ${status.amountFrom} ${config.intermediateSymbol}`,
     );
   }
   const outputRaw = parseDecimalToRawFloor(status.amountTo);
-  if (outputRaw <= 0n) throw new Error("Stable.com returned no USDC output");
+  if (outputRaw <= 0n) {
+    throw new Error(`Stable.com returned no ${config.loanSymbol} output`);
+  }
   return {
     inputRaw,
     outputRaw,
@@ -627,6 +675,7 @@ export function buildStableSwapInstruction(
   order: StableOrder,
   maximumExecutionFeeLamports: bigint,
   intermediateMint: PublicKey = PYUSD_MINT,
+  outputMint: PublicKey = USDC_MINT,
 ): StableLeg {
   const signatureHex = order.maintainerSignature?.replace(/^0x/, "");
   if (!signatureHex || !/^[0-9a-fA-F]+$/.test(signatureHex)) {
@@ -692,13 +741,11 @@ export function buildStableSwapInstruction(
     STABLE_PROGRAM_ID,
   );
   const [outputPool] = PublicKey.findProgramAddressSync(
-    [Buffer.from("pool"), USDC_MINT.toBuffer()],
+    [Buffer.from("pool"), outputMint.toBuffer()],
     STABLE_PROGRAM_ID,
   );
-  const inputTokenProgram = intermediateMint.equals(PYUSD_MINT)
-    ? TOKEN_2022_PROGRAM_ID
-    : TOKEN_PROGRAM_ID;
-  const outputTokenProgram = TOKEN_PROGRAM_ID;
+  const inputTokenProgram = intermediateTokenProgram(intermediateMint);
+  const outputTokenProgram = intermediateTokenProgram(outputMint);
 
   const userInputAta = getAssociatedTokenAddressSync(
     intermediateMint,
@@ -707,7 +754,7 @@ export function buildStableSwapInstruction(
     inputTokenProgram,
   );
   const userOutputAta = getAssociatedTokenAddressSync(
-    USDC_MINT,
+    outputMint,
     wallet,
     false,
     outputTokenProgram,
@@ -719,7 +766,7 @@ export function buildStableSwapInstruction(
     inputTokenProgram,
   );
   const poolOutputAta = getAssociatedTokenAddressSync(
-    USDC_MINT,
+    outputMint,
     outputPool,
     true,
     outputTokenProgram,
@@ -747,7 +794,7 @@ export function buildStableSwapInstruction(
       { pubkey: poolInputAta, isSigner: false, isWritable: true },
       { pubkey: userInputAta, isSigner: false, isWritable: true },
       { pubkey: outputPool, isSigner: false, isWritable: true },
-      { pubkey: USDC_MINT, isSigner: false, isWritable: false },
+      { pubkey: outputMint, isSigner: false, isWritable: false },
       { pubkey: poolOutputAta, isSigner: false, isWritable: true },
       { pubkey: wallet, isSigner: false, isWritable: false },
       { pubkey: userOutputAta, isSigner: false, isWritable: true },
@@ -803,6 +850,7 @@ async function getStableLeg(
     order,
     config.stableMaxExecutionFeeLamports,
     config.intermediateMint,
+    config.loanMint,
   );
   const minimumDeadline = BigInt(Math.floor(Date.now() / 1_000) + 5);
   if (leg.deadline <= minimumDeadline) {
@@ -855,7 +903,7 @@ async function getCapacitySizedCycle(
   ) {
     const firstQuote = await getJupiterQuote(
       config,
-      USDC_MINT,
+      config.loanMint,
       config.intermediateMint,
       loanAmountRaw,
       attempt,
@@ -878,14 +926,14 @@ async function getCapacitySizedCycle(
         : capacityAfterBufferRaw;
     if (usableCapacityRaw < minimumRaw) {
       throw new Error(
-        `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} USDT is below its ${formatRaw(minimumRaw)} USDT minimum order`,
+        `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} ${config.intermediateSymbol} is below its ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum order`,
       );
     }
 
     if (stableQuote.inputRaw <= usableCapacityRaw) {
       if (stableQuote.inputRaw < minimumRaw) {
         throw new Error(
-          `Sized Stable.com order ${formatRaw(stableQuote.inputRaw)} USDT is below its ${formatRaw(minimumRaw)} USDT minimum`,
+          `Sized Stable.com order ${formatRaw(stableQuote.inputRaw)} ${config.intermediateSymbol} is below its ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum`,
         );
       }
       return {
@@ -909,7 +957,7 @@ async function getCapacitySizedCycle(
       usableCapacityRaw,
     );
     console.log(
-      `Stable.com capacity reduced the loan from ${formatRaw(loanAmountRaw)} to ${formatRaw(adjustedLoanAmountRaw)} USDC; requesting fresh quotes...`,
+      `Stable.com capacity reduced the loan from ${formatRaw(loanAmountRaw)} to ${formatRaw(adjustedLoanAmountRaw)} ${config.loanSymbol}; requesting fresh quotes...`,
     );
     loanAmountRaw = adjustedLoanAmountRaw;
     capacityAdjusted = true;
@@ -1029,16 +1077,17 @@ async function selectMarginfiAccount(
   return client.fetchAccount(addresses[0], true);
 }
 
-function assertNoExistingUsdcLiability(
+function assertNoExistingLoanLiability(
   account: MarginfiAccountWrapper,
-  usdcBankAddress: PublicKey,
+  bankAddress: PublicKey,
+  loanSymbol: string,
 ): void {
   const balance = account.balances.find((item) =>
-    item.bankPk.equals(usdcBankAddress),
+    item.bankPk.equals(bankAddress),
   );
   if (balance?.active && !balance.liabilityShares.isZero()) {
     throw new Error(
-      "Selected Marginfi account already has a USDC liability. Use a dedicated empty account so repay-all cannot consume unrelated debt.",
+      `Selected Marginfi account already has a ${loanSymbol} liability. Use a dedicated empty account so repay-all cannot consume unrelated debt.`,
     );
   }
 }
@@ -1132,11 +1181,17 @@ async function assertTokenAccountsExist(
   owner: PublicKey,
   intermediateMint: PublicKey = PYUSD_MINT,
   intermediateSymbol = "PYUSD",
+  loanMint: PublicKey = USDC_MINT,
+  loanSymbol = "USDC",
 ): Promise<void> {
-  const inputTokenProgram = intermediateMint.equals(PYUSD_MINT)
-    ? TOKEN_2022_PROGRAM_ID
-    : TOKEN_PROGRAM_ID;
-  const usdcAta = getAssociatedTokenAddressSync(USDC_MINT, owner);
+  const inputTokenProgram = intermediateTokenProgram(intermediateMint);
+  const outputTokenProgram = intermediateTokenProgram(loanMint);
+  const loanAta = getAssociatedTokenAddressSync(
+    loanMint,
+    owner,
+    false,
+    outputTokenProgram,
+  );
   const interAta = getAssociatedTokenAddressSync(
     intermediateMint,
     owner,
@@ -1144,11 +1199,11 @@ async function assertTokenAccountsExist(
     inputTokenProgram,
   );
   const infos = await connection.getMultipleAccountsInfo(
-    [usdcAta, interAta],
+    [loanAta, interAta],
     "confirmed",
   );
   const missing: string[] = [];
-  if (!infos[0]) missing.push(`USDC ATA ${usdcAta.toBase58()}`);
+  if (!infos[0]) missing.push(`${loanSymbol} ATA ${loanAta.toBase58()}`);
   if (!infos[1]) missing.push(`${intermediateSymbol} ATA ${interAta.toBase58()}`);
   if (missing.length) {
     throw new Error(
@@ -1300,26 +1355,26 @@ async function main(): Promise<void> {
 
   console.log(`Wallet: ${walletAddress.toBase58()}`);
   console.log(
-    `Maximum flash-loan principal: ${formatRaw(config.maximumLoanAmountRaw)} USDC`,
+    `Maximum flash-loan principal: ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol}`,
   );
   const sized = await getCapacitySizedCycle(config, walletAddress);
   const { loanAmountRaw, firstQuote, stableQuote, cycle } = sized;
-  console.log(`Flash-loan principal: ${formatRaw(loanAmountRaw)} USDC`);
+  console.log(`Flash-loan principal: ${formatRaw(loanAmountRaw)} ${config.loanSymbol}`);
   console.log(
     `Stable.com capacity: ${formatRaw(sized.capacityRaw)} ${config.intermediateSymbol} (${formatRaw(sized.usableCapacityRaw)} usable)`,
   );
   console.log(
-    `Leg 1 (Jupiter): USDC -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+    `Leg 1 (Jupiter): ${config.loanSymbol} -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
   );
   console.log(
-    `Leg 2 (Stable.com): ${config.intermediateSymbol} -> USDC | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} USDC`,
+    `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
   );
-  console.log(`Stable.com token fee: ${formatRaw(stableQuote.tokenFeeRaw)} USDC`);
-  console.log(`Guaranteed gross result: ${formatRaw(cycle.grossProfitRaw)} USDC`);
+  console.log(`Stable.com token fee: ${formatRaw(stableQuote.tokenFeeRaw)} ${config.loanSymbol}`);
+  console.log(`Guaranteed gross result: ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol}`);
 
   if (cycle.grossProfitRaw < config.minimumGrossProfitRaw) {
     throw new Error(
-      `No executable opportunity: guaranteed gross ${formatRaw(cycle.grossProfitRaw)} USDC is below ${formatRaw(config.minimumGrossProfitRaw)} USDC`,
+      `No executable opportunity: guaranteed gross ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol} is below ${formatRaw(config.minimumGrossProfitRaw)} ${config.loanSymbol}`,
     );
   }
   if (cli.quoteOnly) {
@@ -1327,7 +1382,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  await assertTokenAccountsExist(connection, walletAddress, config.intermediateMint, config.intermediateSymbol);
+  await assertTokenAccountsExist(
+    connection,
+    walletAddress,
+    config.intermediateMint,
+    config.intermediateSymbol,
+    config.loanMint,
+    config.loanSymbol,
+  );
   const client = await Project0Client.initialize(
     connection,
     getConfig("production"),
@@ -1337,16 +1399,16 @@ async function main(): Promise<void> {
     walletAddress,
     config.marginfiAccount,
   );
-  const usdcBanks = client.getBanksByMint(USDC_MINT, AssetTag.DEFAULT);
-  if (usdcBanks.length !== 1) {
+  const loanBanks = client.getBanksByMint(config.loanMint, AssetTag.DEFAULT);
+  if (loanBanks.length !== 1) {
     throw new Error(
-      `Expected exactly one standard Marginfi USDC bank; found ${usdcBanks.length}`,
+      `Expected exactly one standard Marginfi ${config.loanSymbol} bank; found ${loanBanks.length}`,
     );
   }
-  const usdcBank = usdcBanks[0];
-  assertNoExistingUsdcLiability(account, usdcBank.address);
+  const loanBank = loanBanks[0];
+  assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
   console.log(`Marginfi account: ${account.address.toBase58()}`);
-  console.log(`Marginfi USDC bank: ${usdcBank.address.toBase58()}`);
+  console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
 
   const [firstSwap, stableLeg] = await Promise.all([
     getSwapLeg(config, firstQuote, walletAddress, 1),
@@ -1365,7 +1427,7 @@ async function main(): Promise<void> {
   const probe = await buildFlashTransaction(
     account,
     config.keypair,
-    usdcBank.address,
+    loanBank.address,
     loanAmountRaw,
     swapInstructions,
     lookupTables,
@@ -1388,7 +1450,7 @@ async function main(): Promise<void> {
   const transaction = await buildFlashTransaction(
     account,
     config.keypair,
-    usdcBank.address,
+    loanBank.address,
     loanAmountRaw,
     swapInstructions,
     lookupTables,
@@ -1425,14 +1487,17 @@ async function main(): Promise<void> {
     `Stable.com execution fee: ${stableLeg.executionFeeLamports.toString()} lamports`,
   );
   console.log(`SOL/USD: $${solUsd.toFixed(4)}`);
-  console.log(`Buffered execution cost: ${formatRaw(executionCostRaw)} USDC`);
-  console.log(`Guaranteed net result: ${formatRaw(netProfitRaw)} USDC`);
+  console.log(`Buffered execution cost: ${formatRaw(executionCostRaw)} ${config.loanSymbol}`);
+  console.log(`Guaranteed net result: ${formatRaw(netProfitRaw)} ${config.loanSymbol}`);
 
   const plan = {
     createdAt: new Date().toISOString(),
     wallet: walletAddress.toBase58(),
     marginfiAccount: account.address.toBase58(),
-    marginfiBank: usdcBank.address.toBase58(),
+    pair: `${config.intermediateSymbol}/${config.loanSymbol}`,
+    loanSymbol: config.loanSymbol,
+    intermediateSymbol: config.intermediateSymbol,
+    marginfiBank: loanBank.address.toBase58(),
     configuredMaximumPrincipalRaw: config.maximumLoanAmountRaw.toString(),
     principalRaw: loanAmountRaw.toString(),
     capacityAdjusted: sized.capacityAdjusted,
@@ -1464,7 +1529,7 @@ async function main(): Promise<void> {
 
   if (netProfitRaw < config.minimumNetProfitRaw) {
     throw new Error(
-      `No executable opportunity: guaranteed net ${formatRaw(netProfitRaw)} USDC is below ${formatRaw(config.minimumNetProfitRaw)} USDC`,
+      `No executable opportunity: guaranteed net ${formatRaw(netProfitRaw)} ${config.loanSymbol} is below ${formatRaw(config.minimumNetProfitRaw)} ${config.loanSymbol}`,
     );
   }
   if (!cli.send) {

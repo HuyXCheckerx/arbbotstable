@@ -4,7 +4,15 @@ Solana stablecoin arbitrage bot with a live operational dashboard. The bot monit
 
 ## Dashboard
 
-Run `python3 app.py`, then open `http://SERVER_IP:25284` or the port configured in `.env`. The root entrypoint supervises the scanner, recovery worker, and dashboard from their canonical locations under `src/`.
+For the dashboard by itself, run one command from the repository root:
+
+```bash
+python webapp.py
+```
+
+It opens the correct local address in your default browser automatically. On Windows, double-click `start_webapp.cmd` for the same behavior. Use `python webapp.py --no-open` on a headless machine, or `python webapp.py --host 0.0.0.0` when intentionally exposing it to your LAN.
+
+Run `python app.py` when you want the complete service stack: scanner, recovery worker, and dashboard. The root entrypoints resolve all canonical scripts under `src/`, so neither workflow requires navigating into implementation folders.
 
 The dashboard exposes:
 
@@ -24,7 +32,84 @@ Machine-readable endpoints:
 - `POST /api/run` — validated quote or execution request; live requests require the explicit `EXECUTE LIVE ARB` confirmation.
 - `GET /healthz` — returns HTTP 200 while the scanner reports an active status, otherwise 503.
 
-The browser UI is split into `src/web/templates/dashboard.html`, `src/web/static/dashboard.css`, and `src/web/static/dashboard.js`. The server rejects overlapping runs and unsupported chain/pair combinations. Keep the dashboard behind authentication or a private network because an authorized live request can broadcast a mainnet transaction.
+The browser UI remembers the selected network, pair, amount, and slippage; includes quick amount presets and log filters; and exposes a one-click copyable access URL. The implementation remains organized under `src/web/`, while `webapp.py` is the only dashboard entrypoint operators need. The server rejects overlapping runs and unsupported chain/pair combinations. Keep the dashboard behind authentication or a private network because an authorized live request can broadcast a mainnet transaction.
+
+### Polygon PYUSD / USDC executor
+
+Polygon uses a separate immutable executor for each intermediate token. Estimate
+the PYUSD deployment first, then broadcast it with the explicit mainnet guard:
+
+```bash
+python deploy_multichain_executor.py --chain polygon --pair PYUSD/USDC
+python deploy_multichain_executor.py --chain polygon --pair PYUSD/USDC --send --confirm-mainnet DEPLOY_POLYGON_EXECUTOR
+```
+
+Store the emitted `POLYGON_PYUSD_USDC_EXECUTOR_ADDRESS` value in `.env`. The
+dashboard passes the selected pair to the multichain engine and automatically
+uses this pair-specific executor. Polygon is restricted to PYUSD/USDC in the
+dashboard and never falls back to USDT/USDC. The existing
+`POLYGON_EXECUTOR_ADDRESS` remains available only for explicitly invoked legacy
+USDT/USDC command-line runs.
+
+### Ethereum and Solana profit sniper
+
+The cross-chain sniper rotates `PYUSD/USDC`, `USDG/USDC`, `USDG/PYUSD`, and
+`PYUSD/USDG` sequentially on each chain, while Ethereum and Solana monitor in
+parallel. Pair names use `intermediate/loan`, so `USDG/PYUSD` borrows PYUSD,
+swaps PYUSD to USDG on Matcha or Jupiter, then settles USDG back to PYUSD on
+Stable.com. A `$5` threshold is converted to a `5.000001`-unit gross and
+guaranteed-net floor in the route's loan stablecoin, so equality at exactly `$5`
+never broadcasts. Each underlying engine still performs its atomic simulation,
+gas/fee accounting, mainnet check, and guarded submission logic.
+
+Check all eight chain/pair routes once without broadcasting:
+
+```bash
+python sniper.py --once
+```
+
+Start guarded live monitoring:
+
+```bash
+python sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
+```
+
+On Windows, `start_sniper.cmd` starts the same live command. Runtime output is
+written to `logs/crosschain-sniper.log`, with one lock preventing duplicate
+sniper processes. Ethereum USDG requires the upgraded executor emitted by
+`deploy_eth_executor_usdc.py`. Solana direct pairs also require exactly one
+standard Marginfi bank for the selected loan mint. A route without the required
+bank or sufficient Stable.com capacity remains in monitoring mode and cannot
+broadcast. The two direct USDG/PYUSD pair directions automatically allow a
+multi-hop Jupiter route; USDC-loan pairs retain the direct-route preference.
+
+On Ethereum, `ETH_ARB_FLASH_PROVIDER=auto` checks funding liquidity before
+requesting venue quotes. It prefers zero-fee Morpho and falls back to Aave v3,
+including Aave's live flash-loan premium in both the on-chain repayment gate and
+the displayed gross/net profit. USDG currently needs this upgraded executor
+because Morpho has negligible USDG liquidity. Uniswap v4 funding is available
+as an explicit experimental option, but it cannot compose with a Matcha route
+that attempts to unlock the same v4 PoolManager.
+
+Compile and estimate the upgraded Ethereum executor before deployment, then use
+the guarded command only after reviewing the estimate:
+
+```bash
+python deploy_eth_executor_usdc.py
+python deploy_eth_executor_usdc.py --send --confirm-mainnet DEPLOY_EXECUTOR
+```
+
+Store the emitted `ETH_ARB_STABLECOIN_EXECUTOR` value in `.env`. Until that new
+address is configured, the runner rejects Aave/Uniswap funding before requesting
+quotes instead of calling an incompatible deployed executor.
+
+Stop cleanly after any active route checks finish:
+
+```bash
+python sniper.py --request-stop
+```
+
+On Windows, double-click `stop_sniper.cmd` for the same cooperative shutdown.
 
 ### P&L method
 

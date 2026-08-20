@@ -198,12 +198,32 @@ def main() -> int:
     executor = web3.eth.contract(address=address, abi=abi)
     if Web3.to_checksum_address(executor.functions.owner().call()) != account.address:
         raise DeploymentError("deployed executor owner verification failed")
+    supported_tokens = {
+        "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "PYUSD": "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8",
+        "USDG": "0xe343167631d89B6Ffc58B88d6b7fB0228795491D",
+    }
+    for symbol, token in supported_tokens.items():
+        if not executor.functions.supportsLoanToken(
+            Web3.to_checksum_address(token)
+        ).call():
+            raise DeploymentError(f"deployed executor does not support {symbol}")
+    for provider_id, provider_name in (
+        (0, "Morpho"),
+        (1, "Uniswap v4"),
+        (2, "Aave v3"),
+    ):
+        if not executor.functions.supportsFlashProvider(provider_id).call():
+            raise DeploymentError(
+                f"deployed executor does not support {provider_name} flash funding"
+            )
 
     print(
         json.dumps(
             {
                 "transactionHash": transaction_hash.hex(),
                 "executorAddress": address,
+                "setEnv": f"ETH_ARB_STABLECOIN_EXECUTOR={address}",
                 "owner": account.address,
                 "blockNumber": receipt.blockNumber,
                 "gasUsed": receipt.gasUsed,

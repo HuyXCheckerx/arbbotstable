@@ -103,6 +103,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn('href="/static/dashboard.css"', web.HTML_TEMPLATE)
         self.assertNotIn("<style>", web.HTML_TEMPLATE)
 
+    def test_dashboard_exposes_quick_access_and_log_controls(self):
+        self.assertIn('id="copy-url-button"', web.HTML_TEMPLATE)
+        self.assertIn('data-amount="100000"', web.HTML_TEMPLATE)
+        self.assertIn('data-log-filter="error"', web.HTML_TEMPLATE)
+        self.assertIn('id="copy-logs-button"', web.HTML_TEMPLATE)
+
     def test_homepage_sets_a_restrictive_content_security_policy(self):
         status, headers, _ = self.request("/")
 
@@ -127,21 +133,41 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn(b"EXECUTE LIVE ARB", body)
 
-    def test_rejects_a_pair_that_the_selected_chain_cannot_execute(self):
-        status, _, body = self.request(
-            "/api/run",
-            method="POST",
-            body={
-                "chain": "polygon",
-                "pair": "PYUSD/USDC",
-                "mode": "quote",
-                "amount": "1000",
-                "slippageBps": "0",
-            },
+    def test_polygon_pyusd_pair_is_supported(self):
+        self.assertIn("PYUSD/USDC", web.SUPPORTED_PAIRS["polygon"])
+        self.assertNotIn("USDT/USDC", web.SUPPORTED_PAIRS["polygon"])
+
+    def test_cross_token_pairs_are_supported_on_ethereum_and_solana(self):
+        for chain in ("ethereum", "solana"):
+            self.assertIn("USDG/PYUSD", web.SUPPORTED_PAIRS[chain])
+            self.assertIn("PYUSD/USDG", web.SUPPORTED_PAIRS[chain])
+
+    def test_ethereum_cross_token_pair_reaches_the_generic_engine(self):
+        with patch(
+            "web.subprocess.run",
+            return_value=CompletedProcess([], 2, stdout="", stderr="ERROR: no route\n"),
+        ) as run:
+            web.run_arb_command("ethereum", "USDG/PYUSD", "quote", "1000", "1")
+
+        command = run.call_args.args[0]
+        self.assertTrue(command[1].endswith("eth_flash_arb_pyusd_usdc.py"))
+        self.assertEqual(command[command.index("--loan-token") + 1], "PYUSD")
+        self.assertEqual(
+            command[command.index("--intermediate-token") + 1], "USDG"
         )
 
-        self.assertEqual(status, 400)
-        self.assertIn(b"not supported", body)
+    def test_solana_cross_token_pair_reaches_both_engine_settings(self):
+        with patch(
+            "web.subprocess.run",
+            return_value=CompletedProcess([], 2, stdout="", stderr="ERROR: no route\n"),
+        ) as run:
+            web.run_arb_command("solana", "PYUSD/USDG", "quote", "1000", "1")
+
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["SOL_FLASH_ARB_AMOUNT_USDG"], "1000")
+        self.assertEqual(environment["SOL_FLASH_ARB_LOAN_TOKEN"], "USDG")
+        self.assertEqual(environment["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"], "PYUSD")
+        self.assertEqual(environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"], "false")
 
     def test_failed_engine_process_is_not_reported_as_success(self):
         with patch(
@@ -162,6 +188,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("--amount", command)
         self.assertEqual(command[command.index("--amount") + 1], "1234.5")
         self.assertEqual(command[command.index("--slippage-bps") + 1], "7")
+        self.assertEqual(command[command.index("--pair") + 1], "USDT/USDC")
 
     def test_quant_logo_is_served_as_the_favicon(self):
         status, headers, body = self.request("/favicon.svg")

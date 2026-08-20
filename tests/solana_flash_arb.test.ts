@@ -3,24 +3,43 @@ import test from "node:test";
 
 import {
   MAINNET_GENESIS_HASH,
+  PYUSD_MINT,
   STABLE_PROGRAM_ID,
+  USDG_MINT,
   bufferedFeeRaw,
   buildStableSwapInstruction,
   capacityLimitedLoanAmount,
   conservativeCycle,
   finalComputeUnitLimit,
   formatRaw,
+  intermediateTokenProgram,
   parseDecimalToRawCeil,
   parseDecimalToRawFloor,
   parseUiAmountToRaw,
+  resolveLoanMint,
 } from "../src/engines/solana_flash_arb.js";
 import { PublicKey } from "@solana/web3.js";
+import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 
 test("uses the Solana mainnet-beta genesis hash", () => {
   assert.equal(
     MAINNET_GENESIS_HASH,
     "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
   );
+});
+
+test("uses the canonical Token-2022 USDG mint", () => {
+  assert.equal(
+    USDG_MINT.toBase58(),
+    "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH",
+  );
+  assert.ok(intermediateTokenProgram(USDG_MINT).equals(TOKEN_2022_PROGRAM_ID));
+});
+
+test("resolves PYUSD and USDG as flash-loan mints", () => {
+  assert.ok(resolveLoanMint("PYUSD").equals(PYUSD_MINT));
+  assert.ok(resolveLoanMint("USDG").equals(USDG_MINT));
+  assert.throws(() => resolveLoanMint("USDT"), /must be USDC, PYUSD, or USDG/);
 });
 
 test("parses and formats six-decimal stablecoin amounts exactly", () => {
@@ -97,6 +116,32 @@ test("encodes the Stable single-chain USDT to USDC instruction", () => {
   assert.equal(leg.instruction.data.readBigUInt64LE(88), 7n);
   assert.equal(leg.instruction.data.readBigInt64LE(96), 2_000_000_000n);
   assert.equal(leg.instruction.data[104], 1);
+});
+
+test("encodes a Token-2022 USDG to PYUSD Stable instruction", () => {
+  const wallet = new PublicKey("G3yfNkUaTvr1QvAPThRuNL9H5oogVDrzSVopCsY1f1he");
+  const leg = buildStableSwapInstruction(
+    wallet,
+    1_000_000n,
+    1_000_001n,
+    {
+      maintainerSignature: `0x${"22".repeat(64)}`,
+      recoveryId: 0,
+      nonce: "9",
+      deadline: "2000000000",
+      executionFeeNative: "1000",
+      amountFrom: "1",
+      amountTo: "1.000001",
+    },
+    100_000n,
+    USDG_MINT,
+    PYUSD_MINT,
+  );
+
+  assert.ok(leg.instruction.keys[6].pubkey.equals(USDG_MINT));
+  assert.ok(leg.instruction.keys[10].pubkey.equals(PYUSD_MINT));
+  assert.ok(leg.instruction.keys[14].pubkey.equals(TOKEN_2022_PROGRAM_ID));
+  assert.ok(leg.instruction.keys[15].pubkey.equals(TOKEN_2022_PROGRAM_ID));
 });
 
 test("fee conversion rounds up and includes its price buffer", () => {

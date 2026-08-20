@@ -57,6 +57,7 @@ class ChainConfig:
     decimals: int
     usdc: str
     usdt: str
+    pyusd: str | None
     provider_kind: int
     flash_lender: str
     flash_liquidity_holder: str
@@ -77,6 +78,7 @@ CHAINS = {
         decimals=6,
         usdc="0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
         usdt="0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        pyusd="0x99aF3EeA856556646C98c8B9b2548Fe815240750",
         provider_kind=0,
         flash_lender="0x1bF0c2541F820E775182832f06c0B7Fc27A25f67",
         flash_liquidity_holder="0x1bF0c2541F820E775182832f06c0B7Fc27A25f67",
@@ -95,6 +97,7 @@ CHAINS = {
         decimals=18,
         usdc="0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
         usdt="0x55d398326f99059fF775485246999027B3197955",
+        pyusd=None,
         provider_kind=1,
         flash_lender="0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
         # Aave transfers flash liquidity out of the reserve's aToken contract.
@@ -106,6 +109,28 @@ CHAINS = {
         confirmation="EXECUTE_BSC_ARB",
     ),
 }
+
+
+PAIR_TO_SYMBOL = {
+    "USDT/USDC": "USDT",
+    "PYUSD/USDC": "PYUSD",
+}
+
+
+def supported_pairs(config: ChainConfig) -> tuple[str, ...]:
+    pairs = ["USDT/USDC"]
+    if config.pyusd:
+        pairs.append("PYUSD/USDC")
+    return tuple(pairs)
+
+
+def intermediate_for_pair(config: ChainConfig, pair: str) -> tuple[str, str]:
+    symbol = PAIR_TO_SYMBOL.get(pair.upper())
+    if symbol == "USDT":
+        return symbol, config.usdt
+    if symbol == "PYUSD" and config.pyusd:
+        return symbol, config.pyusd
+    raise ArbError(f"{pair} is not supported on {config.name}")
 
 
 EXECUTOR_ABI = [
@@ -327,6 +352,24 @@ def raw_to_signed_amount(value: int, decimals: int) -> str:
         f"-{raw_to_amount(-value, decimals)}"
         if value < 0
         else raw_to_amount(value, decimals)
+    )
+
+
+def minimum_order_error(
+    config: ChainConfig,
+    intermediate_symbol: str,
+    loan_amount: int,
+    matcha: MatchaQuote,
+    stable_minimum_raw: int,
+) -> ArbError:
+    return ArbError(
+        f"No executable Matcha liquidity for USDC -> {intermediate_symbol} on "
+        f"{config.name}: best {matcha.aggregator} route quotes "
+        f"{raw_to_amount(loan_amount, config.decimals)} USDC -> "
+        f"{raw_to_amount(matcha.buy_amount, config.decimals)} "
+        f"{intermediate_symbol}, below Stable.com's minimum of "
+        f"{raw_to_amount(stable_minimum_raw, config.decimals)} "
+        f"{intermediate_symbol}"
     )
 
 
@@ -595,10 +638,17 @@ class HttpJsonClient:
 
 
 class MatchaClient:
-    def __init__(self, http: HttpJsonClient, config: ChainConfig, base_url: str):
+    def __init__(
+        self,
+        http: HttpJsonClient,
+        config: ChainConfig,
+        base_url: str,
+        intermediate_token: str,
+    ):
         self.http = http
         self.config = config
         self.base_url = base_url.rstrip("/")
+        self.intermediate_token = intermediate_token
         self.headers = {
             "origin": "https://meta.matcha.xyz",
             "referer": "https://meta.matcha.xyz/",
@@ -629,7 +679,7 @@ class MatchaClient:
                 "gasPrice": str(self.gas_price()),
                 "sellTokenAddress": self.config.usdc.lower(),
                 "sellTokenDecimals": self.config.decimals,
-                "buyTokenAddress": self.config.usdt.lower(),
+                "buyTokenAddress": self.intermediate_token.lower(),
                 "buyTokenDecimals": self.config.decimals,
                 "sellAmount": str(sell_amount),
                 "slippageBps": slippage_bps,
@@ -666,10 +716,17 @@ class MatchaClient:
 
 
 class StableClient:
-    def __init__(self, http: HttpJsonClient, config: ChainConfig, base_url: str):
+    def __init__(
+        self,
+        http: HttpJsonClient,
+        config: ChainConfig,
+        base_url: str,
+        intermediate_symbol: str,
+    ):
         self.http = http
         self.config = config
         self.base_url = base_url.rstrip("/")
+        self.intermediate_symbol = intermediate_symbol
         self.headers = {
             "origin": "https://stable.com",
             "referer": "https://stable.com/",
@@ -682,7 +739,7 @@ class StableClient:
         amount_out: int | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "assetFrom": "USDT",
+            "assetFrom": self.intermediate_symbol,
             "assetTo": "USDC",
             "chainFrom": self.config.stable_chain_id,
             "chainTo": self.config.stable_chain_id,
@@ -739,6 +796,7 @@ def validate_executor(
     config: ChainConfig,
     executor_address: str,
     operator_address: str,
+    intermediate_token: str,
 ) -> Any:
     executor = Web3.to_checksum_address(executor_address)
     if len(web3.eth.get_code(executor)) == 0:
@@ -750,7 +808,7 @@ def validate_executor(
         "providerKind": config.provider_kind,
         "flashLender": config.flash_lender,
         "loanToken": config.usdc,
-        "intermediateToken": config.usdt,
+        "intermediateToken": intermediate_token,
         "stablePool": STABLE_POOL,
     }
     for getter, wanted in expected.items():
@@ -948,12 +1006,25 @@ def parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     selected, _ = bootstrap.parse_known_args(argv)
     config = CHAINS[selected.chain]
 
+    pair_parser = argparse.ArgumentParser(add_help=False, parents=[bootstrap])
+    pair_parser.add_argument(
+        "--pair",
+        choices=supported_pairs(config),
+        default=os.getenv(f"{config.env_prefix}_ARB_PAIR", "USDT/USDC").upper(),
+    )
+    selected_route, _ = pair_parser.parse_known_args(argv)
+    intermediate_symbol, _ = intermediate_for_pair(config, selected_route.pair)
+
     def setting(suffix: str, fallback: str | None = None) -> str | None:
         value = os.getenv(f"{config.env_prefix}_{suffix}")
         return value if value not in (None, "") else fallback
 
-    result = argparse.ArgumentParser(description=__doc__, parents=[bootstrap])
-    result.add_argument("--executor", default=setting("EXECUTOR_ADDRESS"))
+    result = argparse.ArgumentParser(description=__doc__, parents=[pair_parser])
+    pair_executor = setting(
+        f"{intermediate_symbol}_USDC_EXECUTOR_ADDRESS",
+        setting("EXECUTOR_ADDRESS") if intermediate_symbol == "USDT" else None,
+    )
+    result.add_argument("--executor", default=pair_executor)
     result.add_argument("--operator", default=setting("OPERATOR_ADDRESS"))
     result.add_argument("--rpc-url", default=setting("RPC_URL"))
     result.add_argument(
@@ -967,7 +1038,10 @@ def parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--stable-capacity-buffer",
-        default=setting("ARB_STABLE_CAPACITY_BUFFER_USDT", "1"),
+        default=setting(
+            f"ARB_STABLE_CAPACITY_BUFFER_{intermediate_symbol}",
+            setting("ARB_STABLE_CAPACITY_BUFFER_USDT", "1"),
+        ),
     )
     result.add_argument(
         "--slippage-bps", type=int, default=setting("ARB_SLIPPAGE_BPS", "5")
@@ -1030,6 +1104,9 @@ def parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     config = CHAINS[args.chain]
+    intermediate_symbol, intermediate_token = intermediate_for_pair(
+        config, args.pair
+    )
     if not is_address(args.executor):
         raise ArbError("--executor must be the deployed multichain executor")
     if not is_address(args.operator):
@@ -1061,7 +1138,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise ArbError("configured operator does not match its private key")
 
     web3 = chain_web3(config, args.rpc_url, args.rpc_timeout)
-    contract = validate_executor(web3, config, args.executor, operator)
+    contract = validate_executor(
+        web3, config, args.executor, operator, intermediate_token
+    )
     available_liquidity, premium_bps = get_flash_state(web3, config)
     requested_amount = amount_to_raw(args.amount, config.decimals)
     flash_buffer = amount_to_raw(args.flash_liquidity_buffer, config.decimals)
@@ -1079,8 +1158,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
     )
     http = HttpJsonClient(args.timeout, user_agent)
-    matcha_client = MatchaClient(http, config, args.matcha_base_url)
-    stable_client = StableClient(http, config, args.stable_base_url)
+    matcha_client = MatchaClient(
+        http, config, args.matcha_base_url, intermediate_token
+    )
+    stable_client = StableClient(
+        http, config, args.stable_base_url, intermediate_symbol
+    )
     market_native_usd = parse_native_price(
         http.get(args.native_price_url), config.native_price_symbol
     )
@@ -1163,7 +1246,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ArbError("Stable.com capacity kept changing during sizing")
 
     if stable_minimum_raw is not None and stable_quote.amount_in < stable_minimum_raw:
-        raise ArbError("Stable.com order is below its minimum")
+        raise minimum_order_error(
+            config,
+            intermediate_symbol,
+            loan_amount,
+            matcha,
+            stable_minimum_raw,
+        )
     provider_fee = flash_fee_raw(loan_amount, premium_bps)
     gross_profit = stable_quote.amount_out - loan_amount - provider_fee
     if gross_profit < min_profit:
@@ -1202,6 +1291,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "mode": "broadcast" if args.send else "dry-run",
         "chain": config.name,
         "chainId": config.chain_id,
+        "pair": args.pair,
         "flashLoanProvider": config.flash_provider_name,
         "flashLender": config.flash_lender,
         "flashPremiumBps": premium_bps,
@@ -1210,27 +1300,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "executor": args.executor,
         "operator": operator,
         "loanToken": config.usdc,
-        "intermediateToken": config.usdt,
+        "intermediateToken": intermediate_token,
+        "intermediateSymbol": intermediate_symbol,
         "requestedLoanAmount": raw_to_amount(requested_amount, config.decimals),
         "loanAmount": raw_to_amount(loan_amount, config.decimals),
         "capacityAdjusted": capacity_adjusted,
         "matcha": {
             "aggregator": matcha.aggregator,
-            "sellUSDC": raw_to_amount(matcha.sell_amount, config.decimals),
-            "buyUSDT": raw_to_amount(matcha.buy_amount, config.decimals),
+            "sellLoanToken": raw_to_amount(matcha.sell_amount, config.decimals),
+            "buyIntermediate": raw_to_amount(matcha.buy_amount, config.decimals),
             "target": matcha.target,
             "allowanceTarget": matcha.allowance_target,
         },
         "stable": {
             "pool": STABLE_POOL,
-            "sellUSDT": raw_to_amount(stable_quote.amount_in, config.decimals),
-            "buyUSDC": raw_to_amount(stable_quote.amount_out, config.decimals),
+            "sellIntermediate": raw_to_amount(
+                stable_quote.amount_in, config.decimals
+            ),
+            "buyLoanToken": raw_to_amount(
+                stable_quote.amount_out, config.decimals
+            ),
             "tokenFee": (
                 raw_to_amount(stable_quote.token_fee, config.decimals)
                 if stable_quote.token_fee is not None
                 else None
             ),
-            "capacityUSDT": (
+            "capacityIntermediate": (
                 raw_to_amount(capacity_raw, config.decimals)
                 if capacity_raw is not None
                 else None

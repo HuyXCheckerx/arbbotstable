@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "npm run typecheck && npm run solana:test",
+    "web": "python webapp.py",
+    "sniper": "python sniper.py",
     "solana:flash": "tsx src/engines/solana_flash_arb.ts",
     "solana:quote": "tsx src/engines/solana_flash_arb.ts --quote-only",
     "solana:test": "node --import tsx --test tests/solana_flash_arb.test.ts",

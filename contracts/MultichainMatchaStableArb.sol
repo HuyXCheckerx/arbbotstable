@@ -40,7 +40,7 @@ interface IStableMultichain {
     ) external payable;
 }
 
-/// @notice Atomic USDC -> USDT -> USDC executor for Polygon and BNB Chain.
+/// @notice Atomic USDC -> supported stablecoin -> USDC executor for Polygon and BNB Chain.
 /// @dev ProviderKind.Morpho uses Morpho's zero-fee callback. ProviderKind.AaveV3
 ///      repays the exact premium supplied by Aave's flashLoanSimple callback.
 contract MultichainMatchaStableArb {

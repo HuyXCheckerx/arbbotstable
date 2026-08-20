@@ -37,6 +37,8 @@ from multichain_flash_arb import (
     EXECUTOR_ABI,
     STABLE_POOL,
     ChainConfig,
+    intermediate_for_pair,
+    supported_pairs,
 )
 
 
@@ -51,8 +53,9 @@ class DeploymentError(RuntimeError):
 
 def compile_contract() -> tuple[list[dict], str]:
     with TemporaryDirectory(prefix="multichain-executor-solc-") as output_dir:
+        npx = "npx.cmd" if sys.platform == "win32" else "npx"
         command = [
-            "npx",
+            npx,
             "--yes",
             f"solc@{SOLC_VERSION}",
             "--optimize",
@@ -104,6 +107,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     selected, _ = bootstrap.parse_known_args(argv)
     config = CHAINS[selected.chain]
     parser = argparse.ArgumentParser(description=__doc__, parents=[bootstrap])
+    parser.add_argument(
+        "--pair",
+        choices=supported_pairs(config),
+        default=os.getenv(f"{config.env_prefix}_ARB_PAIR", "USDT/USDC").upper(),
+        help="pair-specific executor to deploy",
+    )
     parser.add_argument("--send", action="store_true", help="broadcast deployment")
     parser.add_argument(
         "--confirm-mainnet",
@@ -138,18 +147,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def validate_system_contracts(web3: Web3, config: ChainConfig) -> None:
+def validate_system_contracts(
+    web3: Web3,
+    config: ChainConfig,
+    intermediate_symbol: str,
+    intermediate_token: str,
+) -> None:
     addresses = {
         config.flash_provider_name: config.flash_lender,
         "USDC": config.usdc,
-        "USDT": config.usdt,
+        intermediate_symbol: intermediate_token,
         "Stable.com pool": STABLE_POOL,
     }
     for label, address in addresses.items():
         checksum = Web3.to_checksum_address(address)
         if len(web3.eth.get_code(checksum)) == 0:
             raise DeploymentError(f"configured {label} address has no bytecode")
-    for symbol, address in (("USDC", config.usdc), ("USDT", config.usdt)):
+    for symbol, address in (
+        ("USDC", config.usdc),
+        (intermediate_symbol, intermediate_token),
+    ):
         token = web3.eth.contract(
             address=Web3.to_checksum_address(address), abi=ERC20_ABI
         )
@@ -169,6 +186,7 @@ def validate_deployment(
     address: str,
     owner: str,
     config: ChainConfig,
+    intermediate_token: str,
 ) -> None:
     expected = {
         "owner": owner,
@@ -176,7 +194,7 @@ def validate_deployment(
         "providerKind": config.provider_kind,
         "flashLender": config.flash_lender,
         "loanToken": config.usdc,
-        "intermediateToken": config.usdt,
+        "intermediateToken": intermediate_token,
         "stablePool": STABLE_POOL,
     }
     last_error: Exception | None = None
@@ -212,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(PROJECT_DIR / ".env", override=True)
     args = parse_args(argv)
     config = CHAINS[args.chain]
+    intermediate_symbol, intermediate_token = intermediate_for_pair(
+        config, args.pair
+    )
     prefix = config.env_prefix
     confirmation = f"DEPLOY_{prefix}_EXECUTOR"
     rpc_url = os.getenv(f"{prefix}_RPC_URL", "").strip()
@@ -245,7 +266,9 @@ def main(argv: list[str] | None = None) -> int:
         raise DeploymentError(
             f"RPC chain ID is {chain_id}; {config.name} requires {config.chain_id}"
         )
-    validate_system_contracts(web3, config)
+    validate_system_contracts(
+        web3, config, intermediate_symbol, intermediate_token
+    )
 
     account = None
     if private_key:
@@ -275,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         config.provider_kind,
         Web3.to_checksum_address(config.flash_lender),
         Web3.to_checksum_address(config.usdc),
-        Web3.to_checksum_address(config.usdt),
+        Web3.to_checksum_address(intermediate_token),
         Web3.to_checksum_address(STABLE_POOL),
     )
     try:
@@ -351,6 +374,9 @@ def main(argv: list[str] | None = None) -> int:
         "mode": "broadcast" if args.send else "estimate-only",
         "chain": config.name,
         "chainId": config.chain_id,
+        "pair": args.pair,
+        "loanToken": config.usdc,
+        "intermediateToken": intermediate_token,
         "flashProvider": config.flash_provider_name,
         "operator": operator,
         "estimatedGas": estimated_gas,
@@ -393,13 +419,14 @@ def main(argv: list[str] | None = None) -> int:
     if receipt.status != 1 or not receipt.contractAddress:
         raise DeploymentError(f"deployment failed: {transaction_hash.hex()}")
     address = Web3.to_checksum_address(receipt.contractAddress)
-    validate_deployment(web3, address, operator, config)
+    validate_deployment(web3, address, operator, config, intermediate_token)
+    executor_env = f"{prefix}_{intermediate_symbol}_USDC_EXECUTOR_ADDRESS"
     print(
         json.dumps(
             {
                 "transactionHash": transaction_hash.hex(),
                 "executorAddress": address,
-                "setEnv": f"{prefix}_EXECUTOR_ADDRESS={address}",
+                "setEnv": f"{executor_env}={address}",
                 "blockNumber": receipt.blockNumber,
                 "gasUsed": receipt.gasUsed,
             },

@@ -100,6 +100,65 @@ class EthereumFlashArbTests(unittest.TestCase):
             "https://stable.invalid/swap/create/singleChain",
         )
 
+    def test_pyusd_engine_accepts_usdg_as_an_explicit_intermediate(self):
+        configured = {
+            "ETH_ARB_INTERMEDIATE_TOKEN": "USDG",
+            "ETH_ARB_STABLECOIN_EXECUTOR": TARGET,
+            "ETH_ARB_FLASH_PROVIDER": "uniswap-v4",
+        }
+        with patch.dict(os.environ, configured, clear=False):
+            args = pyusd_arb.parser().parse_args([])
+
+        self.assertEqual(args.intermediate_token, "USDG")
+        self.assertEqual(args.executor, TARGET)
+        self.assertEqual(args.flash_provider, "uniswap-v4")
+
+    def test_flash_provider_auto_falls_back_to_aave_v3_for_usdg(self):
+        provider = pyusd_arb.select_flash_provider(
+            "auto",
+            "USDG",
+            100_000_000_000,
+            {
+                "morpho": 1_283_000,
+                "aave-v3": 4_084_658_664_804,
+            },
+            {"aave-v3": 5},
+        )
+
+        self.assertEqual(provider.key, "aave-v3")
+        self.assertEqual(provider.provider_id, 2)
+        self.assertEqual(provider.available, 4_084_658_664_804)
+        self.assertEqual(provider.premium_bps, 5)
+
+    def test_flash_provider_auto_prefers_morpho_when_it_has_liquidity(self):
+        provider = pyusd_arb.select_flash_provider(
+            "auto",
+            "PYUSD",
+            100_000_000_000,
+            {
+                "morpho": 59_200_636_464_769,
+                "uniswap-v4": 10_000_000_000_000,
+            },
+        )
+
+        self.assertEqual(provider.key, "morpho")
+
+    def test_aave_flash_fee_uses_protocol_half_up_rounding(self):
+        self.assertEqual(pyusd_arb.flash_provider_fee(100_000_000_000, 5), 50_000_000)
+        self.assertEqual(pyusd_arb.flash_provider_fee(1, 5), 0)
+
+    def test_forced_morpho_fails_before_quote_when_usdg_is_unavailable(self):
+        with self.assertRaisesRegex(
+            pyusd_arb.ArbError,
+            r"Morpho flash liquidity is 1\.283 USDG, below requested 100000 USDG",
+        ):
+            pyusd_arb.select_flash_provider(
+                "morpho",
+                "USDG",
+                100_000_000_000,
+                {"morpho": 1_283_000},
+            )
+
     def test_matcha_gas_endpoint_price_field_is_supported(self):
         class StaticHttp:
             def get(self, *_args, **_kwargs):
@@ -235,6 +294,20 @@ class EthereumFlashArbTests(unittest.TestCase):
         )
         self.assertIsInstance(error, QuoteStaleError)
         self.assertIn("minimum return", str(error))
+
+    def test_classifies_provider_fee_repayment_shortfall(self):
+        error = pyusd_arb.classify_atomic_simulation_error(
+            ValueError("execution reverted: 0x4e88422a")
+        )
+        self.assertIsInstance(error, pyusd_arb.QuoteStaleError)
+        self.assertIn("provider fee", str(error))
+
+    def test_classifies_nested_uniswap_v4_unlock_conflict(self):
+        error = pyusd_arb.classify_atomic_simulation_error(
+            ValueError("execution reverted: outer...5090d6c6")
+        )
+        self.assertIs(type(error), pyusd_arb.ArbError)
+        self.assertIn("same PoolManager", str(error))
 
     def test_preserves_unknown_simulation_error(self):
         error = classify_atomic_simulation_error(ValueError("execution reverted: 0xdeadbeef"))

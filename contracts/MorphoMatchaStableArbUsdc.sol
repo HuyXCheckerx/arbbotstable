@@ -12,6 +12,23 @@ interface IMorphoFlashLoan {
     function flashLoan(address token, uint256 assets, bytes calldata data) external;
 }
 
+interface IUniswapV4PoolManager {
+    function unlock(bytes calldata data) external returns (bytes memory result);
+    function take(address currency, address to, uint256 amount) external;
+    function sync(address currency) external;
+    function settle() external payable returns (uint256 paid);
+}
+
+interface IAaveV3Pool {
+    function flashLoanSimple(
+        address receiverAddress,
+        address asset,
+        uint256 amount,
+        bytes calldata params,
+        uint16 referralCode
+    ) external;
+}
+
 interface IStablePool {
     struct SwapLocal {
         uint256 amountIn;
@@ -30,12 +47,15 @@ interface IStablePool {
     ) external payable;
 }
 
-/// @notice Atomic Ethereum (PYUSD <-> USDC) -> intermediate-token arbitrage executor.
+/// @notice Atomic Ethereum stablecoin arbitrage executor with selectable funding.
 contract MorphoMatchaStableArbUsdc {
     address public constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
+    address public constant UNISWAP_V4_POOL_MANAGER = 0x000000000004444c5dc75cB358380D2e3dE08A90;
+    address public constant AAVE_V3_POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
     address public constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address public constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
     address public constant PYUSD = 0x6c3ea9036406852006290770BEdFcAbA0e23A0e8;
+    address public constant USDG = 0xe343167631d89B6Ffc58B88d6b7fB0228795491D;
     address public constant STABLE_POOL = 0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da;
 
     struct MatchaRoute {
@@ -60,6 +80,12 @@ contract MorphoMatchaStableArbUsdc {
         InCallback
     }
 
+    enum FlashProvider {
+        Morpho,
+        UniswapV4,
+        AaveV3
+    }
+
     address public owner;
     Phase public phase;
 
@@ -69,6 +95,7 @@ contract MorphoMatchaStableArbUsdc {
     uint256 private _minimumProfit;
     address private _loanToken;
     address private _intermediateToken;
+    FlashProvider private _flashProvider;
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event ArbitrageExecuted(
@@ -111,7 +138,7 @@ contract MorphoMatchaStableArbUsdc {
 
     receive() external payable {}
 
-    /// @notice Executes a PYUSD <-> USDC arbitrage route.
+    /// @notice Backward-compatible PYUSD <-> USDC entry point.
     function executeArbitrageWithLoanToken(
         uint256 loanAmount,
         address loanToken,
@@ -124,6 +151,7 @@ contract MorphoMatchaStableArbUsdc {
             loanAmount,
             loanToken,
             intermediate,
+            FlashProvider.Morpho,
             matcha,
             stable,
             minProfit
@@ -143,6 +171,28 @@ contract MorphoMatchaStableArbUsdc {
             loanAmount,
             loanToken,
             intermediateToken,
+            FlashProvider.Morpho,
+            matcha,
+            stable,
+            minProfit
+        );
+    }
+
+    /// @notice Explicit entry point supporting Morpho, Uniswap v4, or Aave v3.
+    function executeArbitrageWithTokensAndProvider(
+        uint256 loanAmount,
+        address loanToken,
+        address intermediateToken,
+        FlashProvider flashProvider,
+        MatchaRoute calldata matcha,
+        StableOrder calldata stable,
+        uint256 minProfit
+    ) external payable onlyOwner onlyIdle {
+        _executeArbitrage(
+            loanAmount,
+            loanToken,
+            intermediateToken,
+            flashProvider,
             matcha,
             stable,
             minProfit
@@ -153,6 +203,7 @@ contract MorphoMatchaStableArbUsdc {
         uint256 loanAmount,
         address loanToken,
         address intermediateToken,
+        FlashProvider flashProvider,
         MatchaRoute calldata matcha,
         StableOrder calldata stable,
         uint256 minProfit
@@ -180,19 +231,45 @@ contract MorphoMatchaStableArbUsdc {
         _minimumProfit = minProfit;
         _loanToken = loanToken;
         _intermediateToken = intermediateToken;
+        _flashProvider = flashProvider;
         phase = Phase.LoanRequested;
 
-        IMorphoFlashLoan(MORPHO).flashLoan(
+        bytes memory callbackData = abi.encode(
             loanToken,
-            loanAmount,
-            abi.encode(loanToken, intermediateToken, matcha, stable)
+            intermediateToken,
+            matcha,
+            stable
         );
+        if (flashProvider == FlashProvider.Morpho) {
+            IMorphoFlashLoan(MORPHO).flashLoan(
+                loanToken,
+                loanAmount,
+                callbackData
+            );
+            _forceApprove(loanToken, MORPHO, 0);
+        } else if (flashProvider == FlashProvider.UniswapV4) {
+            IUniswapV4PoolManager(UNISWAP_V4_POOL_MANAGER).unlock(callbackData);
+        } else {
+            IAaveV3Pool(AAVE_V3_POOL).flashLoanSimple(
+                address(this),
+                loanToken,
+                loanAmount,
+                callbackData,
+                0
+            );
+            _forceApprove(loanToken, AAVE_V3_POOL, 0);
+        }
 
         if (phase != Phase.InCallback) revert InvalidCallback();
-        phase = Phase.Idle;
+        _finishArbitrage(stable.amountIn);
+    }
 
+    function _finishArbitrage(uint256 stableAmountIn) private {
+        address loanToken = _loanToken;
+        address intermediateToken = _intermediateToken;
+        uint256 loanAmount = _pendingLoanAmount;
         uint256 endingLoanToken = _balanceOf(loanToken);
-        uint256 requiredEnding = _startingLoanToken + minProfit;
+        uint256 requiredEnding = _startingLoanToken + _minimumProfit;
         if (endingLoanToken < requiredEnding) {
             revert InsufficientProfit(endingLoanToken, requiredEnding);
         }
@@ -203,12 +280,14 @@ contract MorphoMatchaStableArbUsdc {
             ? endingIntermediate - _startingIntermediate
             : 0;
 
+        phase = Phase.Idle;
         _pendingLoanAmount = 0;
         _startingLoanToken = 0;
         _startingIntermediate = 0;
         _minimumProfit = 0;
         _loanToken = address(0);
         _intermediateToken = address(0);
+        _flashProvider = FlashProvider.Morpho;
 
         if (profit != 0) _safeTransfer(loanToken, owner, profit);
         if (intermediateDust != 0) _safeTransfer(intermediateToken, owner, intermediateDust);
@@ -216,7 +295,7 @@ contract MorphoMatchaStableArbUsdc {
             loanAmount,
             loanToken,
             intermediateToken,
-            stable.amountIn,
+            stableAmountIn,
             profit,
             intermediateDust
         );
@@ -227,6 +306,7 @@ contract MorphoMatchaStableArbUsdc {
         if (
             msg.sender != MORPHO ||
             phase != Phase.LoanRequested ||
+            _flashProvider != FlashProvider.Morpho ||
             assets != _pendingLoanAmount
         ) revert InvalidCallback();
         phase = Phase.InCallback;
@@ -240,13 +320,94 @@ contract MorphoMatchaStableArbUsdc {
             data,
             (address, address, MatchaRoute, StableOrder)
         );
+        _runArbitrage(assets, 0, loanToken, intermediateToken, matcha, stable);
+        _forceApprove(loanToken, MORPHO, assets);
+    }
+
+    /// @dev Aave v3 calls this during flashLoanSimple().
+    function executeOperation(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        address initiator,
+        bytes calldata data
+    ) external returns (bool) {
+        if (
+            msg.sender != AAVE_V3_POOL ||
+            initiator != address(this) ||
+            phase != Phase.LoanRequested ||
+            _flashProvider != FlashProvider.AaveV3 ||
+            asset != _loanToken ||
+            amount != _pendingLoanAmount
+        ) revert InvalidCallback();
+        phase = Phase.InCallback;
+
+        (
+            address loanToken,
+            address intermediateToken,
+            MatchaRoute memory matcha,
+            StableOrder memory stable
+        ) = abi.decode(data, (address, address, MatchaRoute, StableOrder));
+        _runArbitrage(
+            amount,
+            premium,
+            loanToken,
+            intermediateToken,
+            matcha,
+            stable
+        );
+        _forceApprove(loanToken, AAVE_V3_POOL, amount + premium);
+        return true;
+    }
+
+    /// @dev Uniswap v4 calls this during unlock(). Its take/settle accounting is
+    /// a fee-free atomic loan as long as the currency delta returns to zero.
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        if (
+            msg.sender != UNISWAP_V4_POOL_MANAGER ||
+            phase != Phase.LoanRequested ||
+            _flashProvider != FlashProvider.UniswapV4
+        ) revert InvalidCallback();
+        phase = Phase.InCallback;
+
+        (
+            address loanToken,
+            address intermediateToken,
+            MatchaRoute memory matcha,
+            StableOrder memory stable
+        ) = abi.decode(data, (address, address, MatchaRoute, StableOrder));
+        uint256 assets = _pendingLoanAmount;
         if (
             matcha.sellAmount != assets ||
             loanToken != _loanToken ||
             intermediateToken != _intermediateToken
-        ) {
-            revert InvalidRoute();
-        }
+        ) revert InvalidRoute();
+
+        IUniswapV4PoolManager manager = IUniswapV4PoolManager(
+            UNISWAP_V4_POOL_MANAGER
+        );
+        manager.take(loanToken, address(this), assets);
+        _runArbitrage(assets, 0, loanToken, intermediateToken, matcha, stable);
+
+        manager.sync(loanToken);
+        _safeTransfer(loanToken, UNISWAP_V4_POOL_MANAGER, assets);
+        if (manager.settle() != assets) revert InvalidCallback();
+        return "";
+    }
+
+    function _runArbitrage(
+        uint256 assets,
+        uint256 providerFee,
+        address loanToken,
+        address intermediateToken,
+        MatchaRoute memory matcha,
+        StableOrder memory stable
+    ) private {
+        if (
+            matcha.sellAmount != assets ||
+            loanToken != _loanToken ||
+            intermediateToken != _intermediateToken
+        ) revert InvalidRoute();
         if (_balanceOf(loanToken) < _startingLoanToken + assets) {
             revert InvalidCallback();
         }
@@ -279,12 +440,13 @@ contract MorphoMatchaStableArbUsdc {
         _forceApprove(intermediateToken, STABLE_POOL, 0);
 
         uint256 currentLoanToken = _balanceOf(loanToken);
-        uint256 requiredLoanToken = _startingLoanToken + assets + _minimumProfit;
+        uint256 requiredLoanToken = _startingLoanToken +
+            assets +
+            providerFee +
+            _minimumProfit;
         if (currentLoanToken < requiredLoanToken) {
             revert InsufficientProfit(currentLoanToken, requiredLoanToken);
         }
-
-        _forceApprove(loanToken, MORPHO, assets);
     }
 
     function transferOwnership(address newOwner) external onlyOwner onlyIdle {
@@ -308,8 +470,12 @@ contract MorphoMatchaStableArbUsdc {
         return _isSupportedToken(token);
     }
 
+    function supportsFlashProvider(uint8 provider) external pure returns (bool) {
+        return provider <= uint8(FlashProvider.AaveV3);
+    }
+
     function _isSupportedToken(address token) private pure returns (bool) {
-        return token == USDC || token == PYUSD || token == USDT;
+        return token == USDC || token == PYUSD || token == USDG || token == USDT;
     }
 
     function _balanceOf(address token) private view returns (uint256 balance) {

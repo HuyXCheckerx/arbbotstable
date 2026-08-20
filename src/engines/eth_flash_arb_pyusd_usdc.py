@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and simulate a Morpho-funded Matcha -> Stable.com Ethereum PYUSD/USDC arbitrage.
+"""Build and simulate flash-funded Ethereum stablecoin arbitrage.
 
 The default mode never signs or broadcasts. A deployed
 MorphoMatchaStableArbUsdc contract is required because an atomic flash loan cannot
@@ -42,7 +42,11 @@ DECIMALS = 6
 USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
 PYUSD = "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"
+USDG = "0xe343167631d89B6Ffc58B88d6b7fB0228795491D"
 MORPHO = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
+UNISWAP_V4_POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"
+AAVE_V3_POOL = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+AAVE_V3_DATA_PROVIDER = "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD"
 STABLE_POOL = "0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da"
 MATCHA_BASE_URL = "https://meta.matcha.xyz"
 STABLE_BASE_URL = "https://api-defi.stable.com"
@@ -64,7 +68,20 @@ MATCHA_AGGREGATORS = (
 LOAN_TOKENS = {
     "USDC": USDC,
     "PYUSD": PYUSD,
+    "USDG": USDG,
 }
+FLASH_PROVIDER_IDS = {"morpho": 0, "uniswap-v4": 1, "aave-v3": 2}
+FLASH_PROVIDER_ADDRESSES = {
+    "morpho": MORPHO,
+    "uniswap-v4": UNISWAP_V4_POOL_MANAGER,
+    "aave-v3": AAVE_V3_POOL,
+}
+FLASH_PROVIDER_LABELS = {
+    "morpho": "Morpho",
+    "uniswap-v4": "Uniswap v4",
+    "aave-v3": "Aave v3",
+}
+AUTO_FLASH_PROVIDER_ORDER = ("morpho", "aave-v3")
 MAX_CAPACITY_SIZING_ATTEMPTS = 5
 
 EXECUTOR_ABI = [
@@ -118,6 +135,63 @@ EXECUTOR_ABI = [
             {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
         ],
         "name": "executeArbitrageWithLoanToken",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
+            {"internalType": "address", "name": "loanToken", "type": "address"},
+            {
+                "internalType": "address",
+                "name": "intermediateToken",
+                "type": "address",
+            },
+            {
+                "internalType": "enum MorphoMatchaStableArbUsdc.FlashProvider",
+                "name": "flashProvider",
+                "type": "uint8",
+            },
+            {
+                "components": [
+                    {"internalType": "address", "name": "target", "type": "address"},
+                    {
+                        "internalType": "address",
+                        "name": "allowanceTarget",
+                        "type": "address",
+                    },
+                    {"internalType": "uint256", "name": "sellAmount", "type": "uint256"},
+                    {"internalType": "uint256", "name": "value", "type": "uint256"},
+                    {"internalType": "bytes", "name": "data", "type": "bytes"},
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.MatchaRoute",
+                "name": "matcha",
+                "type": "tuple",
+            },
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint64", "name": "deadline", "type": "uint64"},
+                    {"internalType": "uint256", "name": "nonce", "type": "uint256"},
+                    {
+                        "internalType": "bytes",
+                        "name": "maintainerSignature",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "executionFeeNative",
+                        "type": "uint256",
+                    },
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.StableOrder",
+                "name": "stable",
+                "type": "tuple",
+            },
+            {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+        ],
+        "name": "executeArbitrageWithTokensAndProvider",
         "outputs": [],
         "stateMutability": "payable",
         "type": "function",
@@ -196,6 +270,13 @@ EXECUTOR_ABI = [
         "type": "function",
     },
     {
+        "inputs": [{"internalType": "uint8", "name": "provider", "type": "uint8"}],
+        "name": "supportsFlashProvider",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
         "inputs": [],
         "name": "owner",
         "outputs": [{"internalType": "address", "name": "", "type": "address"}],
@@ -247,6 +328,16 @@ def classify_atomic_simulation_error(exc: Exception) -> ArbError:
     if "3e0aa470" in lowered:
         return QuoteStaleError(
             "Matcha route became stale: output fell below the Stable order input"
+        )
+    if "4e88422a" in lowered:
+        return QuoteStaleError(
+            "atomic route could not repay the flash principal, provider fee, "
+            "and configured profit floor"
+        )
+    if "5090d6c6" in lowered:
+        return ArbError(
+            "Uniswap v4 flash funding conflicts with this Matcha route because "
+            "the route tries to unlock the same PoolManager"
         )
     return ArbError(f"atomic mainnet simulation reverted: {detail}")
 
@@ -328,6 +419,16 @@ class StableOrder:
             bytes.fromhex(self.maintainer_signature[2:]),
             self.execution_fee_native,
         )
+
+
+@dataclass(frozen=True)
+class FlashLiquidity:
+    key: str
+    provider_id: int
+    label: str
+    address: str
+    available: int
+    premium_bps: int = 0
 
 
 def amount_to_raw(value: str | Decimal, allow_zero: bool = False) -> int:
@@ -913,6 +1014,175 @@ def require_executor_loan_support(
         )
 
 
+def select_flash_provider(
+    requested: str,
+    loan_symbol: str,
+    loan_amount: int,
+    available_by_provider: dict[str, int],
+    premium_bps_by_provider: dict[str, int] | None = None,
+) -> FlashLiquidity:
+    if requested not in ("auto", *FLASH_PROVIDER_IDS):
+        raise ArbError(f"unsupported flash provider: {requested}")
+    candidates = AUTO_FLASH_PROVIDER_ORDER if requested == "auto" else (requested,)
+    premiums = premium_bps_by_provider or {}
+    for key in candidates:
+        available = available_by_provider.get(key, 0)
+        if available >= loan_amount:
+            return FlashLiquidity(
+                key=key,
+                provider_id=FLASH_PROVIDER_IDS[key],
+                label=FLASH_PROVIDER_LABELS[key],
+                address=FLASH_PROVIDER_ADDRESSES[key],
+                available=available,
+                premium_bps=premiums.get(key, 0),
+            )
+
+    details = ", ".join(
+        f"{FLASH_PROVIDER_LABELS[key]} {raw_to_amount(available_by_provider.get(key, 0))}"
+        for key in candidates
+    )
+    if requested == "auto":
+        raise ArbError(
+            f"no flash provider has {raw_to_amount(loan_amount)} {loan_symbol}; "
+            f"available: {details} {loan_symbol}"
+        )
+    raise ArbError(
+        f"{FLASH_PROVIDER_LABELS[requested]} flash liquidity is "
+        f"{raw_to_amount(available_by_provider.get(requested, 0))} {loan_symbol}, "
+        f"below requested {raw_to_amount(loan_amount)} {loan_symbol}"
+    )
+
+
+def resolve_flash_provider(
+    rpc_url: str,
+    rpc_timeout: float,
+    requested: str,
+    loan_symbol: str,
+    loan_token: str,
+    loan_amount: int,
+) -> FlashLiquidity:
+    Web3 = require_web3()
+    web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
+    if not web3.is_connected():
+        raise ArbError("could not connect to Ethereum RPC endpoint")
+    token = web3.eth.contract(
+        address=web3.to_checksum_address(loan_token),
+        abi=[
+            {
+                "inputs": [{"name": "account", "type": "address"}],
+                "name": "balanceOf",
+                "outputs": [{"name": "", "type": "uint256"}],
+                "stateMutability": "view",
+                "type": "function",
+            }
+        ],
+    )
+    available: dict[str, int] = {}
+    premiums: dict[str, int] = {}
+    keys = AUTO_FLASH_PROVIDER_ORDER if requested == "auto" else (requested,)
+    try:
+        for key in keys:
+            if key == "aave-v3":
+                data_provider = web3.eth.contract(
+                    address=web3.to_checksum_address(AAVE_V3_DATA_PROVIDER),
+                    abi=[
+                        {
+                            "inputs": [{"name": "asset", "type": "address"}],
+                            "name": "getReserveTokensAddresses",
+                            "outputs": [
+                                {"name": "aTokenAddress", "type": "address"},
+                                {"name": "stableDebtTokenAddress", "type": "address"},
+                                {"name": "variableDebtTokenAddress", "type": "address"},
+                            ],
+                            "stateMutability": "view",
+                            "type": "function",
+                        },
+                        {
+                            "inputs": [{"name": "asset", "type": "address"}],
+                            "name": "getFlashLoanEnabled",
+                            "outputs": [{"name": "", "type": "bool"}],
+                            "stateMutability": "view",
+                            "type": "function",
+                        },
+                    ],
+                )
+                flash_enabled = data_provider.functions.getFlashLoanEnabled(
+                    web3.to_checksum_address(loan_token)
+                ).call()
+                a_token = data_provider.functions.getReserveTokensAddresses(
+                    web3.to_checksum_address(loan_token)
+                ).call()[0]
+                available[key] = (
+                    int(token.functions.balanceOf(a_token).call())
+                    if flash_enabled and int(a_token, 16) != 0
+                    else 0
+                )
+                pool = web3.eth.contract(
+                    address=web3.to_checksum_address(AAVE_V3_POOL),
+                    abi=[
+                        {
+                            "inputs": [],
+                            "name": "FLASHLOAN_PREMIUM_TOTAL",
+                            "outputs": [{"name": "", "type": "uint128"}],
+                            "stateMutability": "view",
+                            "type": "function",
+                        }
+                    ],
+                )
+                premiums[key] = int(pool.functions.FLASHLOAN_PREMIUM_TOTAL().call())
+            else:
+                available[key] = int(
+                    token.functions.balanceOf(
+                        web3.to_checksum_address(FLASH_PROVIDER_ADDRESSES[key])
+                    ).call()
+                )
+    except Exception as exc:
+        raise ArbError(f"failed to read flash-loan liquidity: {exc}") from exc
+    return select_flash_provider(
+        requested,
+        loan_symbol,
+        loan_amount,
+        available,
+        premiums,
+    )
+
+
+def flash_provider_fee(amount: int, premium_bps: int) -> int:
+    if amount <= 0 or not 0 <= premium_bps <= 10_000:
+        raise ArbError("invalid flash-loan fee inputs")
+    return (amount * premium_bps + 5_000) // 10_000
+
+
+def require_executor_flash_provider_support(
+    rpc_url: str,
+    rpc_timeout: float,
+    executor: str,
+    provider: FlashLiquidity,
+) -> None:
+    if provider.key == "morpho":
+        return
+    Web3 = require_web3()
+    web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
+    if not web3.is_connected():
+        raise ArbError("could not connect to Ethereum RPC endpoint")
+    contract = web3.eth.contract(
+        address=web3.to_checksum_address(executor),
+        abi=EXECUTOR_ABI,
+    )
+    try:
+        supported = contract.functions.supportsFlashProvider(provider.provider_id).call()
+    except Exception as exc:
+        raise ArbError(
+            f"executor {executor} does not implement {provider.label} flash funding; "
+            "deploy the updated MorphoMatchaStableArbUsdc contract and set "
+            "ETH_ARB_STABLECOIN_EXECUTOR"
+        ) from exc
+    if not supported:
+        raise ArbError(
+            f"executor {executor} does not support {provider.label} flash funding"
+        )
+
+
 def checksum_matcha_arguments(web3: Any, matcha: MatchaQuote) -> tuple[Any, ...]:
     """Normalize API-supplied addresses before Web3 ABI validation."""
     arguments = matcha.contract_tuple()
@@ -931,6 +1201,7 @@ def prepare_transaction(
     loan_amount: int,
     loan_token: str,
     intermediate_token: str,
+    flash_provider: FlashLiquidity,
     matcha: MatchaQuote,
     stable: StableOrder,
     min_profit: int,
@@ -948,20 +1219,21 @@ def prepare_transaction(
     )
     matcha_arguments = checksum_matcha_arguments(web3, matcha)
 
-    # Check if executeArbitrageWithTokens exists or use executeArbitrageWithLoanToken
-    try:
-        call = contract.functions.executeArbitrageWithTokens(
+    if flash_provider.key != "morpho":
+        call = contract.functions.executeArbitrageWithTokensAndProvider(
             loan_amount,
             web3.to_checksum_address(loan_token),
             web3.to_checksum_address(intermediate_token),
+            flash_provider.provider_id,
             matcha_arguments,
             stable.contract_tuple(),
             min_profit,
         )
-    except Exception:
-        call = contract.functions.executeArbitrageWithLoanToken(
+    else:
+        call = contract.functions.executeArbitrageWithTokens(
             loan_amount,
             web3.to_checksum_address(loan_token),
+            web3.to_checksum_address(intermediate_token),
             matcha_arguments,
             stable.contract_tuple(),
             min_profit,
@@ -1031,7 +1303,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--executor",
         default=(
-            setting("ETH_ARB_PYUSD_USDC_EXECUTOR")
+            setting("ETH_ARB_STABLECOIN_EXECUTOR")
+            or setting("ETH_ARB_PYUSD_USDC_EXECUTOR")
             or setting("ETH_EXECUTOR_ADDRESS")
             or setting("ETH_ARB_EXECUTOR")
             or "0x6FA26637Db03519B520A44056fc4D93858Ba5833"
@@ -1047,7 +1320,26 @@ def parser() -> argparse.ArgumentParser:
         "--loan-token",
         choices=tuple(LOAN_TOKENS.keys()),
         default=setting("ETH_ARB_LOAN_TOKEN", "PYUSD"),
-        help="flash loan token to borrow and profit in (PYUSD or USDC)",
+        help="flash loan token to borrow and profit in (USDC, PYUSD, or USDG)",
+    )
+    result.add_argument(
+        "--intermediate-token",
+        choices=tuple(LOAN_TOKENS.keys()),
+        default=setting("ETH_ARB_INTERMEDIATE_TOKEN"),
+        help=(
+            "token bought on Matcha and returned through Stable.com; defaults "
+            "to the legacy PYUSD/USDC counterpart"
+        ),
+    )
+    result.add_argument(
+        "--flash-provider",
+        choices=("auto", *FLASH_PROVIDER_IDS),
+        default=setting("ETH_ARB_FLASH_PROVIDER", "auto"),
+        help=(
+            "atomic funding source; auto prefers fee-free Morpho and falls "
+            "back to Aave v3; Uniswap v4 is explicit because nested v4 swap "
+            "routes are incompatible with its unlock"
+        ),
     )
     result.add_argument(
         "--amount",
@@ -1171,8 +1463,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     loan_symbol = args.loan_token
     loan_token = LOAN_TOKENS[loan_symbol]
     
-    # PYUSD/USDC pairing: loan token PYUSD -> intermediate USDC, loan token USDC -> intermediate PYUSD
-    intermediate_symbol = "USDC" if loan_symbol == "PYUSD" else "PYUSD"
+    if args.intermediate_token:
+        intermediate_symbol = args.intermediate_token
+    elif loan_symbol in {"PYUSD", "USDG"}:
+        intermediate_symbol = "USDC"
+    else:
+        intermediate_symbol = "PYUSD"
+    if intermediate_symbol == loan_symbol:
+        raise ArbError("--intermediate-token must differ from --loan-token")
     intermediate_token = LOAN_TOKENS[intermediate_symbol]
 
     capacity_buffer = amount_to_raw(args.stable_capacity_buffer)
@@ -1197,6 +1495,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.rpc_timeout,
         args.executor,
         loan_token,
+    )
+    require_executor_loan_support(
+        args.rpc_url,
+        args.rpc_timeout,
+        args.executor,
+        intermediate_token,
+    )
+    flash_provider = resolve_flash_provider(
+        args.rpc_url,
+        args.rpc_timeout,
+        args.flash_provider,
+        loan_symbol,
+        loan_token,
+        loan_amount,
+    )
+    require_executor_flash_provider_support(
+        args.rpc_url,
+        args.rpc_timeout,
+        args.executor,
+        flash_provider,
     )
 
     user_agent = os.getenv(
@@ -1327,11 +1645,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"{raw_to_amount(stable_minimum_raw)} {intermediate_symbol}"
         )
 
-    gross_profit = stable_quote.amount_out - loan_amount
+    gross_profit_before_flash_fee = stable_quote.amount_out - loan_amount
+    flash_loan_fee = flash_provider_fee(
+        loan_amount,
+        flash_provider.premium_bps,
+    )
+    gross_profit = gross_profit_before_flash_fee - flash_loan_fee
     print("\n--- QUOTE BREAKDOWN ---", file=sys.stderr)
+    print(
+        f"Flash Provider:          {flash_provider.label} "
+        f"({raw_to_amount(flash_provider.available)} {loan_symbol} available)",
+        file=sys.stderr,
+    )
     print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
     print(f"Leg 1 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
     print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
+    if flash_loan_fee:
+        print(
+            f"Flash Loan Fee:          {raw_to_amount(flash_loan_fee)} "
+            f"{loan_symbol} ({flash_provider.premium_bps} bps)",
+            file=sys.stderr,
+        )
+        print(
+            f"Gross Before Flash Fee:  "
+            f"{raw_to_signed_amount(gross_profit_before_flash_fee)} {loan_symbol}",
+            file=sys.stderr,
+        )
     print(f"Gross Profit:            {raw_to_signed_amount(gross_profit)} {loan_symbol}", file=sys.stderr)
     print("-----------------------\n", file=sys.stderr)
 
@@ -1357,6 +1696,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         loan_amount,
         loan_token,
         intermediate_token,
+        flash_provider,
         matcha,
         stable_order,
         min_profit,
@@ -1380,7 +1720,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     plan = {
         "mode": "broadcast" if args.send else "dry-run",
         "chainId": CHAIN_ID,
-        "flashLoanProvider": MORPHO,
+        "flashLoanProvider": flash_provider.address,
+        "flashLoanProviderName": flash_provider.label,
+        "flashLoanProviderLiquidity": raw_to_amount(flash_provider.available),
+        "flashLoanPremiumBps": flash_provider.premium_bps,
+        "flashLoanFee": raw_to_amount(flash_loan_fee),
         "executor": args.executor,
         "operator": operator,
         "loanToken": {
@@ -1433,7 +1777,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "orderId": stable_order.order_id,
             "deadline": stable_order.deadline,
         },
-        "grossProfit": raw_to_amount(gross_profit),
+        "grossProfitBeforeFlashFee": raw_to_signed_amount(
+            gross_profit_before_flash_fee
+        ),
+        "grossProfit": raw_to_signed_amount(gross_profit),
         "minimumProfit": raw_to_amount(min_profit),
         "estimatedGas": estimated_gas,
         "gasLimit": gas_limit,
@@ -1445,13 +1792,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "transaction": json_safe(transaction),
     }
 
+    if predicted_net < min_net_profit:
+        raise ArbError(
+            "route is below the maximum-gas net-profit floor: "
+            f"{raw_to_signed_amount(predicted_net or 0)} {loan_symbol} < "
+            f"{raw_to_amount(min_net_profit)} {loan_symbol}"
+        )
     if args.send:
-        if predicted_net < min_net_profit:
-            raise ArbError(
-                "route is below the maximum-gas net-profit floor: "
-                f"{raw_to_signed_amount(predicted_net or 0)} {loan_symbol} < "
-                f"{raw_to_amount(min_net_profit)} {loan_symbol}"
-            )
         signed = web3.eth.account.sign_transaction(transaction, private_key)
         transaction_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
         plan["transactionHash"] = transaction_hash.hex()

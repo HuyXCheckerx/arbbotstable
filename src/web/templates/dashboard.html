@@ -29,7 +29,7 @@
       <button class="access-pill" id="copy-url-button" type="button" title="Copy dashboard address">
         <span class="access-label">Web app</span>
         <span id="webapp-address">localhost</span>
-        <span aria-hidden="true">Copy</span>
+        <span id="copy-url-feedback" aria-hidden="true">Copy</span>
       </button>
       <div class="connection" id="connection-badge" data-state="offline" aria-live="polite">
         <span class="connection-dot" aria-hidden="true"></span>
@@ -100,6 +100,8 @@
             <select id="pair-select" name="pair">
               <option value="PYUSD/USDC">PYUSD / USDC · zero-fee settlement</option>
               <option value="USDT/USDC">USDT / USDC · standard settlement</option>
+              <option value="USDG/PYUSD">USDG / PYUSD · zero-fee settlement</option>
+              <option value="PYUSD/USDG">PYUSD / USDG · zero-fee settlement</option>
             </select>
             <p class="field-note" id="pair-note">Matcha entry with Stable.com par settlement.</p>
           </div>
