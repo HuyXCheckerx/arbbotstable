@@ -466,12 +466,12 @@ function readConfig(): Config {
     minimumGrossProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_GROSS_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC ||
-        "0.01",
+        "1",
     ),
     minimumNetProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_NET_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC ||
-        "0.01",
+        "1",
     ),
     maxAccounts: envInt("SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS", 20, 1),
     onlyDirectRoutes: envBool("SOL_FLASH_ARB_ONLY_DIRECT_ROUTES", true),
