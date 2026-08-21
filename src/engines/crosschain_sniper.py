@@ -29,6 +29,7 @@ PID_PATH = LOG_DIR / "crosschain-sniper.pid"
 STOP_PATH = LOG_DIR / ".crosschain-sniper.stop"
 LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("5")
+SOLANA_CROSS_TOKEN_MINIMUM_ALLOWED_THRESHOLD = Decimal("1")
 TOKEN_QUANTUM = Decimal("0.000001")
 
 
@@ -77,10 +78,34 @@ def decimal_setting(name: str, fallback: str) -> Decimal:
     return value
 
 
-def strict_execution_floor(threshold: Decimal) -> Decimal:
-    if not threshold.is_finite() or threshold < MINIMUM_ALLOWED_THRESHOLD:
-        raise SniperError("profit threshold must be at least 5 USD")
+def route_minimum_allowed_threshold(route: Route | None = None) -> Decimal:
+    if (
+        route
+        and route.chain == "solana"
+        and route.pair in ("USDG/PYUSD", "PYUSD/USDG")
+    ):
+        return SOLANA_CROSS_TOKEN_MINIMUM_ALLOWED_THRESHOLD
+    return MINIMUM_ALLOWED_THRESHOLD
+
+
+def strict_execution_floor(threshold: Decimal, route: Route | None = None) -> Decimal:
+    min_allowed = route_minimum_allowed_threshold(route)
+    if not threshold.is_finite() or threshold < min_allowed:
+        if route:
+            raise SniperError(
+                f"profit threshold for {route.chain}:{route.pair} must be at least {min_allowed} USD"
+            )
+        raise SniperError(f"profit threshold must be at least {min_allowed} USD")
     return threshold + TOKEN_QUANTUM
+
+
+def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
+    if route.chain == "solana" and route.pair in ("USDG/PYUSD", "PYUSD/USDG"):
+        effective_threshold = (
+            Decimal("1") if base_threshold == Decimal("5") else base_threshold
+        )
+        return strict_execution_floor(effective_threshold, route)
+    return strict_execution_floor(base_threshold, route)
 
 
 def amount_text(value: Decimal) -> str:
@@ -292,7 +317,7 @@ def worker(
     routes: list[Route],
     *,
     live: bool,
-    execution_floor: Decimal,
+    base_threshold: Decimal,
     interval_seconds: float,
     cooldown_seconds: float,
     timeout_seconds: float,
@@ -304,11 +329,12 @@ def worker(
         for route in routes:
             if stop.is_set():
                 return
+            floor = route_execution_floor(route, base_threshold)
             logger.info("checking %s %s", chain.title(), route.pair)
             outcome = run_route(
                 route,
                 live=live,
-                execution_floor=execution_floor,
+                execution_floor=floor,
                 timeout_seconds=timeout_seconds,
             )
             level = logging.WARNING if outcome.executed else logging.INFO
@@ -335,7 +361,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--threshold-usd",
         type=Decimal,
         default=decimal_setting("SNIPER_PROFIT_THRESHOLD_USD", "5"),
-        help="execute only above this net loan-stablecoin profit (minimum 5; default 5)",
+        help="execute only above this net loan-stablecoin profit (default 5; 1 for Solana USDG/PYUSD & PYUSD/USDG)",
     )
     parser.add_argument(
         "--chains",
@@ -396,13 +422,14 @@ def main(argv: list[str] | None = None) -> int:
             f"--live requires --confirm-live {LIVE_CONFIRMATION}"
         )
 
-    execution_floor = strict_execution_floor(args.threshold_usd)
     routes = selected_routes(args.chains, args.pairs)
+    for route in routes:
+        route_execution_floor(route, args.threshold_usd)
+
     logger = configure_logging()
     logger.info(
-        "starting %s sniper; execute only when guaranteed net profit is > %s units of the loan stablecoin",
+        "starting %s sniper; execute only when guaranteed net profit is above route execution floor",
         "LIVE" if args.live else "DRY-RUN",
-        amount_text(args.threshold_usd),
     )
     logger.info("routes: %s", ", ".join(f"{r.chain}:{r.pair}" for r in routes))
 
@@ -424,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
                 args=(chain, chain_routes),
                 kwargs={
                     "live": args.live,
-                    "execution_floor": execution_floor,
+                    "base_threshold": args.threshold_usd,
                     "interval_seconds": args.interval_seconds,
                     "cooldown_seconds": args.cooldown_seconds,
                     "timeout_seconds": args.route_timeout_seconds,

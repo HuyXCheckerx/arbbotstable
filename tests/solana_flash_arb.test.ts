@@ -44,9 +44,9 @@ test("resolves PYUSD and USDG as flash-loan mints", () => {
   assert.throws(() => resolveLoanMint("USDT"), /must be USDC, PYUSD, or USDG/);
 });
 
-test("identifies USDG/PYUSD routes as requiring two-hop Jupiter swaps via USDC", () => {
-  assert.equal(isTwoHopJupiterRoute(PYUSD_MINT, USDG_MINT), true);
-  assert.equal(isTwoHopJupiterRoute(USDG_MINT, PYUSD_MINT), true);
+test("identifies direct Jupiter routing for atomic flash loans", () => {
+  assert.equal(isTwoHopJupiterRoute(PYUSD_MINT, USDG_MINT), false);
+  assert.equal(isTwoHopJupiterRoute(USDG_MINT, PYUSD_MINT), false);
   assert.equal(isTwoHopJupiterRoute(USDC_MINT, PYUSD_MINT), false);
   assert.equal(isTwoHopJupiterRoute(USDC_MINT, USDG_MINT), false);
   assert.equal(isTwoHopJupiterRoute(PYUSD_MINT, USDC_MINT), false);

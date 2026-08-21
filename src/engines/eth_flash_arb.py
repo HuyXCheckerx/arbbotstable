@@ -1054,7 +1054,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--slippage-bps",
         type=int,
-        default=setting("ETH_ARB_SLIPPAGE_BPS", "5"),
+        default=setting("ETH_ARB_SLIPPAGE_BPS", "0"),
     )
     result.add_argument(
         "--min-profit",
@@ -1264,17 +1264,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if stable_quote.maximum is not None
             else None
         )
-        usable_capacity_raw = (
-            capacity_raw - capacity_buffer if capacity_raw is not None else None
-        )
-        if stable_maximum_raw is not None:
+        if capacity_raw is not None:
+            if capacity_raw <= 0:
+                raise ArbError("Stable.com pool has no remaining capacity")
             usable_capacity_raw = (
-                min(usable_capacity_raw, stable_maximum_raw)
-                if usable_capacity_raw is not None
-                else stable_maximum_raw
+                capacity_raw - capacity_buffer
+                if capacity_raw > capacity_buffer
+                else (capacity_raw - 1 if capacity_raw > 1 else capacity_raw)
             )
+        else:
+            usable_capacity_raw = None
+
+        if stable_maximum_raw is not None and usable_capacity_raw is not None:
+            usable_capacity_raw = min(usable_capacity_raw, stable_maximum_raw)
+
         if usable_capacity_raw is not None and usable_capacity_raw <= 0:
-            raise ArbError("Stable.com capacity is below the configured safety buffer")
+            raise ArbError("Stable.com pool has no remaining capacity")
         if (
             usable_capacity_raw is not None
             and stable_minimum_raw is not None

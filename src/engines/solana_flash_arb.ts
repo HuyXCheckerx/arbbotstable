@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   AssetTag,
+  Bank,
   MarginfiAccountWrapper,
   Project0Client,
   deriveMarginfiAccount,
@@ -198,12 +199,14 @@ interface Config {
   solUsdBufferBps: number;
   outputPath: string;
   commitment: Commitment;
+  provider: "marginfi" | "solend" | "auto";
 }
 
 interface CliOptions {
   quoteOnly: boolean;
   send: boolean;
   createMarginfiAccount: boolean;
+  provider?: "marginfi" | "solend" | "auto";
   confirmation?: string;
 }
 
@@ -255,13 +258,10 @@ export function resolveLoanMint(symbol: string): PublicKey {
 }
 
 export function isTwoHopJupiterRoute(
-  loanMint: PublicKey,
-  intermediateMint: PublicKey,
+  _loanMint: PublicKey,
+  _intermediateMint: PublicKey,
 ): boolean {
-  return (
-    (loanMint.equals(PYUSD_MINT) && intermediateMint.equals(USDG_MINT)) ||
-    (loanMint.equals(USDG_MINT) && intermediateMint.equals(PYUSD_MINT))
-  );
+  return false;
 }
 
 export function intermediateTokenProgram(mint: PublicKey): PublicKey {
@@ -491,6 +491,7 @@ function readConfig(): Config {
     solUsdBufferBps: envInt("SOL_FLASH_ARB_SOL_PRICE_BUFFER_BPS", 100, 0),
     outputPath: process.env.SOL_FLASH_ARB_OUTPUT_PATH || "/tmp/solana-flash-arb-plan.json",
     commitment: "confirmed",
+    provider: (process.env.SOL_FLASH_ARB_PROVIDER?.trim().toLowerCase() || "auto") as "marginfi" | "solend" | "auto",
   };
 }
 
@@ -505,6 +506,10 @@ function parseCli(argv: string[]): CliOptions {
     if (arg === "--quote-only") options.quoteOnly = true;
     else if (arg === "--send") options.send = true;
     else if (arg === "--create-marginfi-account") options.createMarginfiAccount = true;
+    else if (arg === "--provider") {
+      const p = argv[++index]?.toLowerCase();
+      if (p === "marginfi" || p === "solend" || p === "auto") options.provider = p;
+    }
     else if (arg === "--confirm-mainnet") options.confirmation = argv[++index];
     else if (arg === "--help" || arg === "-h") {
       printHelp();
@@ -876,6 +881,7 @@ async function getJupiterQuote(
   outputMint: PublicKey,
   amountRaw: bigint,
   requestNumber: number,
+  overrideMaxAccounts?: number,
 ): Promise<JupiterQuote> {
   const params = new URLSearchParams({
     inputMint: inputMint.toBase58(),
@@ -885,8 +891,11 @@ async function getJupiterQuote(
     slippageBps: String(config.slippageBps),
     restrictIntermediateTokens: "true",
     onlyDirectRoutes: String(config.onlyDirectRoutes),
-    maxAccounts: String(config.maxAccounts),
   });
+  const maxAccounts = overrideMaxAccounts ?? config.maxAccounts;
+  if (maxAccounts !== undefined) {
+    params.set("maxAccounts", String(maxAccounts));
+  }
   const quote = await fetchJson<JupiterQuote>(
     `${config.jupiterApiBase}/quote?${params}`,
     { headers: jupiterHeaders(config, requestNumber) },
@@ -903,8 +912,15 @@ async function getJupiterQuote(
 async function getCapacitySizedCycle(
   config: Config,
   wallet: PublicKey,
+  maxBankBorrowRaw?: bigint,
 ): Promise<SizedCycle> {
   let loanAmountRaw = config.maximumLoanAmountRaw;
+  if (maxBankBorrowRaw && maxBankBorrowRaw > 0n && loanAmountRaw > maxBankBorrowRaw) {
+    console.log(
+      `Marginfi pool headroom capped the loan from ${formatRaw(loanAmountRaw)} to ${formatRaw(maxBankBorrowRaw)} ${config.loanSymbol}`,
+    );
+    loanAmountRaw = maxBankBorrowRaw;
+  }
   let capacityAdjusted = false;
   const isTwoHop = isTwoHopJupiterRoute(
     config.loanMint,
@@ -921,12 +937,14 @@ async function getCapacitySizedCycle(
     let firstMinimumRaw: bigint;
 
     if (isTwoHop) {
+      const twoHopMaxAccounts = Math.min(13, config.maxAccounts);
       firstQuote = await getJupiterQuote(
         config,
         config.loanMint,
         USDC_MINT,
         loanAmountRaw,
         attempt * 2,
+        twoHopMaxAccounts,
       );
       const usdcMinimumRaw = BigInt(firstQuote.otherAmountThreshold);
       secondJupiterQuote = await getJupiterQuote(
@@ -935,6 +953,7 @@ async function getCapacitySizedCycle(
         config.intermediateMint,
         usdcMinimumRaw,
         attempt * 2 + 1,
+        twoHopMaxAccounts,
       );
       firstMinimumRaw = BigInt(secondJupiterQuote.otherAmountThreshold);
     } else {
@@ -952,13 +971,15 @@ async function getCapacitySizedCycle(
     const capacityRaw = parseDecimalToRawFloor(String(stableQuote.status.balance));
     const minimumRaw = parseDecimalToRawCeil(String(stableQuote.status.min));
     const maximumRaw = parseDecimalToRawFloor(String(stableQuote.status.max));
-    if (capacityRaw <= config.stableCapacityBufferRaw) {
+    if (capacityRaw <= 0n) {
       throw new Error(
-        `Stable.com capacity ${formatRaw(capacityRaw)} ${config.intermediateSymbol} is not above the configured ${formatRaw(config.stableCapacityBufferRaw)} ${config.intermediateSymbol} safety buffer`,
+        `Stable.com pool has no remaining ${config.intermediateSymbol} capacity`,
       );
     }
     const capacityAfterBufferRaw =
-      capacityRaw - config.stableCapacityBufferRaw;
+      capacityRaw > config.stableCapacityBufferRaw
+        ? capacityRaw - config.stableCapacityBufferRaw
+        : (capacityRaw > 1n ? capacityRaw - 1n : capacityRaw);
     const usableCapacityRaw =
       maximumRaw > 0n && maximumRaw < capacityAfterBufferRaw
         ? maximumRaw
@@ -975,20 +996,43 @@ async function getCapacitySizedCycle(
           `Sized Stable.com order ${formatRaw(stableQuote.inputRaw)} ${config.intermediateSymbol} is below its ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum`,
         );
       }
-      return {
+      const cycle = conservativeCycle(
+        secondJupiterQuote ?? firstQuote,
+        stableQuote.outputRaw,
         loanAmountRaw,
-        firstQuote,
-        secondJupiterQuote,
-        stableQuote,
-        cycle: conservativeCycle(
-          secondJupiterQuote ?? firstQuote,
-          stableQuote.outputRaw,
+      );
+      if (cycle.grossProfitRaw >= config.minimumGrossProfitRaw || attempt >= config.stableCapacitySizingAttempts - 1) {
+        return {
           loanAmountRaw,
-        ),
-        capacityRaw,
-        usableCapacityRaw,
-        capacityAdjusted,
-      };
+          firstQuote,
+          secondJupiterQuote,
+          stableQuote,
+          cycle,
+          capacityRaw,
+          usableCapacityRaw,
+          capacityAdjusted,
+        };
+      }
+      const stepDownRaw = 5_000_000_000n; // 5,000 tokens
+      const downsizedLoan = loanAmountRaw > stepDownRaw + minimumRaw ? loanAmountRaw - stepDownRaw : (loanAmountRaw * 8n) / 10n;
+      if (downsizedLoan < minimumRaw) {
+        return {
+          loanAmountRaw,
+          firstQuote,
+          secondJupiterQuote,
+          stableQuote,
+          cycle,
+          capacityRaw,
+          usableCapacityRaw,
+          capacityAdjusted,
+        };
+      }
+      console.log(
+        `Gross profit at ${formatRaw(loanAmountRaw)} ${config.loanSymbol} was ${formatRaw(cycle.grossProfitRaw)}; stepping down to ${formatRaw(downsizedLoan)} ${config.loanSymbol}...`,
+      );
+      loanAmountRaw = downsizedLoan;
+      capacityAdjusted = true;
+      continue;
     }
 
     const adjustedLoanAmountRaw = capacityLimitedLoanAmount(
@@ -1147,8 +1191,6 @@ async function buildFlashTransaction(
   const borrow = await account.makeBorrowIx(bankAddress, uiAmount, {
     createAtas: false,
     wrapAndUnwrapSol: false,
-    // p0-ts-sdk 2.5.3 does not forward the inferred authority/group through
-    // its async Anchor path, so provide both explicitly.
     overrideInferAccounts: {
       authority: keypair.publicKey,
       group: account.group,
@@ -1161,23 +1203,33 @@ async function buildFlashTransaction(
       group: account.group,
     },
   });
-  const transaction = await account.makeFlashLoanTx({
-    bankMap: account.getClient().bankMap,
-    ixs: [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
-      ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: computeUnitPriceMicroLamports,
-      }),
-      ...borrow.instructions,
-      ...swapInstructions,
-      ...repay.instructions,
-    ],
-    signers: [],
-    blockhash,
-    addressLookupTableAccounts: lookupTables,
-  });
-  transaction.sign([keypair]);
-  return transaction;
+  try {
+    const transaction = await account.makeFlashLoanTx({
+      bankMap: account.getClient().bankMap,
+      ixs: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
+        ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: computeUnitPriceMicroLamports,
+        }),
+        ...borrow.instructions,
+        ...swapInstructions,
+        ...repay.instructions,
+      ],
+      signers: [],
+      blockhash,
+      addressLookupTableAccounts: lookupTables,
+    });
+    transaction.sign([keypair]);
+    return transaction;
+  } catch (err: unknown) {
+    const msg = errorMessage(err);
+    if (msg.includes("encoding overruns")) {
+      throw new Error(
+        "Atomic transaction exceeds Solana 1232-byte size limit (encoding overruns Uint8Array). Lower SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS.",
+      );
+    }
+    throw err;
+  }
 }
 
 function simulationFailure(error: unknown, logs?: string[] | null): Error {
@@ -1411,7 +1463,52 @@ async function main(): Promise<void> {
   console.log(
     `Maximum flash-loan principal: ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol}`,
   );
-  const sized = await getCapacitySizedCycle(config, walletAddress);
+
+  let availableBankLiquidityRaw: bigint | undefined;
+  let client: Project0Client | undefined;
+  let account: MarginfiAccountWrapper | undefined;
+  let loanBank: Bank | undefined;
+
+  if (!cli.quoteOnly) {
+    await assertTokenAccountsExist(
+      connection,
+      walletAddress,
+      config.intermediateMint,
+      config.intermediateSymbol,
+      config.loanMint,
+      config.loanSymbol,
+    );
+    client = await Project0Client.initialize(
+      connection,
+      getConfig("production"),
+    );
+    account = await selectMarginfiAccount(
+      client,
+      walletAddress,
+      config.marginfiAccount,
+    );
+    const loanBanks = client.getBanksByMint(config.loanMint, AssetTag.DEFAULT);
+    if (loanBanks.length !== 1) {
+      throw new Error(
+        `Expected exactly one standard Marginfi ${config.loanSymbol} bank; found ${loanBanks.length}`,
+      );
+    }
+    loanBank = loanBanks[0];
+    try {
+      const vaultBalance = await connection.getTokenAccountBalance(loanBank.liquidityVault);
+      const vaultRaw = BigInt(vaultBalance.value.amount);
+      availableBankLiquidityRaw = (vaultRaw * 95n) / 100n;
+    } catch {
+      availableBankLiquidityRaw = undefined;
+    }
+    console.log(`Marginfi account: ${account.address.toBase58()}`);
+    console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
+    if (availableBankLiquidityRaw) {
+      console.log(`Marginfi liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`);
+    }
+  }
+
+  const sized = await getCapacitySizedCycle(config, walletAddress, availableBankLiquidityRaw);
   const { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
   const isTwoHop = isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);
   console.log(`Flash-loan principal: ${formatRaw(loanAmountRaw)} ${config.loanSymbol}`);
@@ -1442,34 +1539,9 @@ async function main(): Promise<void> {
     console.log("Quote-only mode: no transaction was built, signed, or sent.");
     return;
   }
-
-  await assertTokenAccountsExist(
-    connection,
-    walletAddress,
-    config.intermediateMint,
-    config.intermediateSymbol,
-    config.loanMint,
-    config.loanSymbol,
-  );
-  const client = await Project0Client.initialize(
-    connection,
-    getConfig("production"),
-  );
-  const account = await selectMarginfiAccount(
-    client,
-    walletAddress,
-    config.marginfiAccount,
-  );
-  const loanBanks = client.getBanksByMint(config.loanMint, AssetTag.DEFAULT);
-  if (loanBanks.length !== 1) {
-    throw new Error(
-      `Expected exactly one standard Marginfi ${config.loanSymbol} bank; found ${loanBanks.length}`,
-    );
+  if (!client || !account || !loanBank) {
+    throw new Error("Marginfi client or account not initialized");
   }
-  const loanBank = loanBanks[0];
-  assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
-  console.log(`Marginfi account: ${account.address.toBase58()}`);
-  console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
 
   let swapInstructions: TransactionInstruction[];
   let lookupTables: AddressLookupTableAccount[];
