@@ -12,6 +12,11 @@ import requests
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple
 
+try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    cffi_requests = None
+
 from dotenv import load_dotenv
 from solders.pubkey import Pubkey
 from solana.rpc.api import Client
@@ -36,9 +41,18 @@ SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.sola
 SOLANA_CHAIN_ID_MATCHA = 1399811149
 
 MATCHA_HEADERS = {
-    "origin": "https://meta.matcha.xyz",
-    "referer": "https://meta.matcha.xyz/",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "content-type": "application/json",
+    "origin": "https://matcha.xyz",
+    "referer": "https://matcha.xyz/",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
 STABLE_HEADERS = {
@@ -96,7 +110,16 @@ def query_matcha_quotes(
         "slippageBps": slippage_bps,
     }
     
-    resp = requests.post(f"{MATCHA_BASE_URL}/api/competitions", json=payload, headers=MATCHA_HEADERS, timeout=timeout)
+    session = cffi_requests.Session(impersonate="chrome124") if cffi_requests is not None else requests.Session()
+    session.headers.update(MATCHA_HEADERS)
+    cookies = os.environ.get("SOLANA_ARB_MATCHA_COOKIES") or os.environ.get("MATCHA_COOKIES")
+    if cookies:
+        for item in cookies.split(";"):
+            if "=" in item:
+                k, v = item.strip().split("=", 1)
+                session.cookies.set(k.strip(), v.strip())
+
+    resp = session.post(f"{MATCHA_BASE_URL}/api/competitions", json=payload, timeout=timeout)
     if resp.status_code != 200:
         raise RuntimeError(f"Matcha competition init failed ({resp.status_code}): {resp.text}")
     
@@ -110,10 +133,9 @@ def query_matcha_quotes(
     
     for agg in aggregators:
         try:
-            q_resp = requests.post(
+            q_resp = session.post(
                 f"{MATCHA_BASE_URL}/api/quotes?aggregator={agg}",
                 json={"competitionId": comp_id, "aggregator": agg},
-                headers=MATCHA_HEADERS,
                 timeout=timeout
             )
             if q_resp.status_code == 200:

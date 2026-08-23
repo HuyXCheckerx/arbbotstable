@@ -16,6 +16,11 @@ from typing import Any, Iterable
 import uuid
 
 try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    cffi_requests = None
+
+try:
     import requests
     from dotenv import load_dotenv
     from web3 import Web3
@@ -581,19 +586,40 @@ def parse_stable_order(
 class HttpJsonClient:
     def __init__(self, timeout: float, user_agent: str):
         self.timeout = timeout
-        self.session = requests.Session()
+        if cffi_requests is not None:
+            self.session = cffi_requests.Session(impersonate="chrome124")
+        else:
+            self.session = requests.Session()
+
         self.session.headers.update(
             {
                 "accept": "application/json, text/plain, */*",
-                "content-type": "application/json",
+                "accept-language": "en-US,en;q=0.9",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-site",
                 "user-agent": user_agent,
             }
         )
+        cookies = (
+            os.environ.get("POLYGON_ARB_MATCHA_COOKIES")
+            or os.environ.get("BSC_ARB_MATCHA_COOKIES")
+            or os.environ.get("ETH_ARB_MATCHA_COOKIES")
+            or os.environ.get("MATCHA_COOKIES")
+        )
+        if cookies:
+            for item in cookies.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    self.session.cookies.set(k.strip(), v.strip())
 
     def get(self, url: str, *, headers: dict[str, str] | None = None) -> Any:
         try:
             response = self.session.get(url, headers=headers, timeout=self.timeout)
-        except requests.RequestException as exc:
+        except Exception as exc:
             raise RetryableArbError(f"GET {url} failed: {exc}") from exc
         return self._decode(response, url)
 
@@ -608,18 +634,18 @@ class HttpJsonClient:
             response = self.session.post(
                 url, json=payload, headers=headers, timeout=self.timeout
             )
-        except requests.RequestException as exc:
+        except Exception as exc:
             raise RetryableArbError(f"POST {url} failed: {exc}") from exc
         return self._decode(response, url)
 
     @staticmethod
-    def _decode(response: requests.Response, url: str) -> Any:
+    def _decode(response: Any, url: str) -> Any:
         excerpt = " ".join(response.text.split())[:400]
         if response.status_code >= 400:
             if response.status_code == 403:
                 raise ArbError(
                     f"{url} returned HTTP 403; this website API may require a "
-                    "browser session or may be blocking terminal traffic"
+                    "browser session or Cloudflare clearance"
                 )
             message = f"{url} returned HTTP {response.status_code}"
             if excerpt:
@@ -650,8 +676,8 @@ class MatchaClient:
         self.base_url = base_url.rstrip("/")
         self.intermediate_token = intermediate_token
         self.headers = {
-            "origin": "https://meta.matcha.xyz",
-            "referer": "https://meta.matcha.xyz/",
+            "origin": "https://matcha.xyz",
+            "referer": "https://matcha.xyz/",
         }
 
     def gas_price(self) -> int:
@@ -855,10 +881,19 @@ def get_flash_state(
 
 
 def parse_native_price(payload: Any, expected_symbol: str) -> Decimal:
-    if not isinstance(payload, dict) or payload.get("symbol") != expected_symbol:
+    raw_val = None
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict) and "amount" in data:
+            raw_val = data["amount"]
+        elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "last" in data[0]:
+            raw_val = data[0]["last"]
+        elif payload.get("symbol") == expected_symbol or "price" in payload or "last" in payload:
+            raw_val = payload.get("price") or payload.get("last") or payload.get("rate")
+    if raw_val is None:
         raise ArbError(f"price endpoint returned an unexpected {expected_symbol} response")
     try:
-        price = Decimal(str(payload.get("price")))
+        price = Decimal(str(raw_val))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ArbError("native-token price is invalid") from exc
     if not price.is_finite() or price <= 0:
@@ -1164,9 +1199,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     stable_client = StableClient(
         http, config, args.stable_base_url, intermediate_symbol
     )
-    market_native_usd = parse_native_price(
-        http.get(args.native_price_url), config.native_price_symbol
-    )
+
+    def fetch_native_price(primary_url: str) -> Decimal:
+        candidates = [
+            primary_url,
+            f"https://api.coinbase.com/v2/prices/{config.native_symbol}-USD/spot",
+            f"https://www.okx.com/api/v5/market/ticker?instId={config.native_symbol}-USDC",
+            f"https://api.binance.com/api/v3/ticker/price?symbol={config.native_price_symbol}",
+        ]
+        seen = set()
+        urls = [u for u in candidates if u and not (u in seen or seen.add(u))]
+        last_exc = None
+        for u in urls:
+            try:
+                data = http.get(u)
+                return parse_native_price(data, config.native_price_symbol)
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise ArbError(f"All native price endpoints failed: {last_exc}")
+
+    market_native_usd = fetch_native_price(args.native_price_url)
     accounting_native_usd = buffered_price(
         market_native_usd, args.native_price_buffer_bps
     )

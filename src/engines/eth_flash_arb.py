@@ -21,6 +21,11 @@ from typing import Any, Iterable
 import uuid
 
 try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    cffi_requests = None
+
+try:
     import requests
 except ImportError:  # Allows helpers and --help to run before dependencies install.
     requests = None
@@ -361,12 +366,21 @@ def capacity_limited_loan_amount(
 
 
 def parse_binance_eth_usdc_price(payload: Any) -> Decimal:
-    if not isinstance(payload, dict) or payload.get("symbol") != "ETHUSDC":
-        raise ArbError("Binance returned an unexpected ETHUSDC price response")
+    raw_val = None
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict) and "amount" in data:
+            raw_val = data["amount"]
+        elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "last" in data[0]:
+            raw_val = data[0]["last"]
+        elif payload.get("symbol") in ("ETHUSDC", "ETH-USD") or "price" in payload or "last" in payload:
+            raw_val = payload.get("price") or payload.get("last") or payload.get("rate")
+    if raw_val is None:
+        raise ArbError(f"Unexpected ETH price response: {payload!r}")
     try:
-        price = Decimal(str(payload.get("price")))
+        price = Decimal(str(raw_val))
     except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ArbError("Binance returned an invalid ETHUSDC price") from exc
+        raise ArbError(f"Invalid ETH price: {raw_val!r}") from exc
     if not price.is_finite() or price <= 0:
         raise ArbError("Binance returned a non-positive ETHUSDC price")
     return price
@@ -635,22 +649,38 @@ def parse_stable_order(payload: Any, expected_amount_in: int) -> StableOrder:
 
 class HttpJsonClient:
     def __init__(self, timeout: float, user_agent: str):
-        if requests is None:
-            raise ArbError("requests is required; install requirements-eth.txt")
+        if cffi_requests is not None:
+            self.session = cffi_requests.Session(impersonate="chrome124")
+        elif requests is not None:
+            self.session = requests.Session()
+        else:
+            raise ArbError("requests or curl_cffi is required; install requirements-eth.txt")
+
         self.timeout = timeout
-        self.session = requests.Session()
         self.session.headers.update(
             {
                 "accept": "application/json, text/plain, */*",
-                "content-type": "application/json",
+                "accept-language": "en-US,en;q=0.9",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-site",
                 "user-agent": user_agent,
             }
         )
+        cookies = os.environ.get("ETH_ARB_MATCHA_COOKIES") or os.environ.get("MATCHA_COOKIES")
+        if cookies:
+            for item in cookies.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    self.session.cookies.set(k.strip(), v.strip())
 
     def get(self, url: str, *, headers: dict[str, str] | None = None) -> Any:
         try:
             response = self.session.get(url, headers=headers, timeout=self.timeout)
-        except requests.RequestException as exc:
+        except Exception as exc:
             raise ArbError(f"GET {url} failed: {exc}") from exc
         return self._decode(response, url)
 
@@ -668,12 +698,12 @@ class HttpJsonClient:
                 headers=headers,
                 timeout=self.timeout,
             )
-        except requests.RequestException as exc:
+        except Exception as exc:
             raise ArbError(f"POST {url} failed: {exc}") from exc
         return self._decode(response, url)
 
     @staticmethod
-    def _decode(response: requests.Response, url: str) -> Any:
+    def _decode(response: Any, url: str) -> Any:
         excerpt = " ".join(response.text.split())[:400]
         if response.status_code >= 400:
             cloudflare = (
@@ -701,8 +731,8 @@ class MatchaClient:
         self.http = http
         self.base_url = base_url.rstrip("/")
         self.headers = {
-            "origin": "https://meta.matcha.xyz",
-            "referer": "https://meta.matcha.xyz/",
+            "origin": "https://matcha.xyz",
+            "referer": "https://matcha.xyz/",
         }
 
     def gas_price(self) -> int:
@@ -1196,7 +1226,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     http = HttpJsonClient(args.timeout, user_agent)
     matcha_client = MatchaClient(http, args.matcha_base_url)
     stable_client = StableClient(http, args.stable_base_url)
-    live_eth_usd = parse_binance_eth_usdc_price(http.get(args.eth_price_url))
+
+    def fetch_eth_price(primary_url: str) -> Decimal:
+        candidates = [
+            primary_url,
+            "https://api.coinbase.com/v2/prices/ETH-USD/spot",
+            "https://www.okx.com/api/v5/market/ticker?instId=ETH-USDC",
+            "https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDC",
+        ]
+        seen = set()
+        urls = [u for u in candidates if u and not (u in seen or seen.add(u))]
+        last_exc = None
+        for u in urls:
+            try:
+                data = http.get(u)
+                return parse_binance_eth_usdc_price(data)
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise ArbError(f"All ETH price endpoints failed: {last_exc}")
+
+    live_eth_usd = fetch_eth_price(args.eth_price_url)
     gas_accounting_eth_usd = buffered_eth_usd_price(
         live_eth_usd,
         args.eth_price_buffer_bps,
