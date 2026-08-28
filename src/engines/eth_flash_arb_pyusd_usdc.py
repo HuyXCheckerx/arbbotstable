@@ -204,6 +204,68 @@ EXECUTOR_ABI = [
     {
         "inputs": [
             {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
+            {"internalType": "address", "name": "loanToken", "type": "address"},
+            {
+                "internalType": "address",
+                "name": "intermediateToken",
+                "type": "address",
+            },
+            {
+                "internalType": "enum MorphoMatchaStableArbUsdc.FlashProvider",
+                "name": "flashProvider",
+                "type": "uint8",
+            },
+            {
+                "internalType": "enum MorphoMatchaStableArbUsdc.SwapOrder",
+                "name": "swapOrder",
+                "type": "uint8",
+            },
+            {
+                "components": [
+                    {"internalType": "address", "name": "target", "type": "address"},
+                    {
+                        "internalType": "address",
+                        "name": "allowanceTarget",
+                        "type": "address",
+                    },
+                    {"internalType": "uint256", "name": "sellAmount", "type": "uint256"},
+                    {"internalType": "uint256", "name": "value", "type": "uint256"},
+                    {"internalType": "bytes", "name": "data", "type": "bytes"},
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.MatchaRoute",
+                "name": "matcha",
+                "type": "tuple",
+            },
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint64", "name": "deadline", "type": "uint64"},
+                    {"internalType": "uint256", "name": "nonce", "type": "uint256"},
+                    {
+                        "internalType": "bytes",
+                        "name": "maintainerSignature",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "executionFeeNative",
+                        "type": "uint256",
+                    },
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.StableOrder",
+                "name": "stable",
+                "type": "tuple",
+            },
+            {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+        ],
+        "name": "executeArbitrageWithTokensAndProviderAndOrder",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
             {
                 "internalType": "address",
                 "name": "loanToken",
@@ -1237,6 +1299,7 @@ def prepare_transaction(
     min_profit: int,
     gas_limit_multiplier: Decimal,
     max_fee_gwei_override: Decimal | None,
+    swap_order: str = "dex-first",
 ) -> tuple[Any, dict[str, Any], int, int]:
     Web3 = require_web3()
     web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
@@ -1249,25 +1312,17 @@ def prepare_transaction(
     )
     matcha_arguments = checksum_matcha_arguments(web3, matcha)
 
-    if flash_provider.key != "morpho":
-        call = contract.functions.executeArbitrageWithTokensAndProvider(
-            loan_amount,
-            web3.to_checksum_address(loan_token),
-            web3.to_checksum_address(intermediate_token),
-            flash_provider.provider_id,
-            matcha_arguments,
-            stable.contract_tuple(),
-            min_profit,
-        )
-    else:
-        call = contract.functions.executeArbitrageWithTokens(
-            loan_amount,
-            web3.to_checksum_address(loan_token),
-            web3.to_checksum_address(intermediate_token),
-            matcha_arguments,
-            stable.contract_tuple(),
-            min_profit,
-        )
+    swap_order_id = 1 if swap_order == "stable-first" else 0
+    call = contract.functions.executeArbitrageWithTokensAndProviderAndOrder(
+        loan_amount,
+        web3.to_checksum_address(loan_token),
+        web3.to_checksum_address(intermediate_token),
+        flash_provider.provider_id,
+        swap_order_id,
+        matcha_arguments,
+        stable.contract_tuple(),
+        min_profit,
+    )
 
     native_value = matcha.value + stable.execution_fee_native
     tx_params: dict[str, Any] = {
@@ -1462,6 +1517,12 @@ def parser() -> argparse.ArgumentParser:
         default=setting("ETH_ARB_OUTPUT_PATH"),
         help="optional path for the dry-run JSON plan",
     )
+    result.add_argument(
+        "--swap-order",
+        choices=("dex-first", "stable-first"),
+        default=setting("ETH_ARB_SWAP_ORDER", "dex-first"),
+        help="execution order: dex-first (Matcha -> Stable) or stable-first (Stable -> Matcha)",
+    )
     result.add_argument("--send", action="store_true", help="sign and broadcast after all checks")
     result.add_argument(
         "--confirm-mainnet",
@@ -1592,156 +1653,237 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     capacity_raw: int | None = None
     stable_minimum_raw: int | None = None
     stable_maximum_raw: int | None = None
-    for sizing_attempt in range(1, MAX_CAPACITY_SIZING_ATTEMPTS + 1):
-        matcha_responses = matcha_client.quotes(
-            args.executor,
-            loan_amount,
-            args.slippage_bps,
-            aggregators,
-            sell_token_address=loan_token,
-            buy_token_address=intermediate_token,
-        )
-        matcha = select_best_matcha_quote(matcha_responses, loan_amount)
+    if args.swap_order == "stable-first":
+        for sizing_attempt in range(1, MAX_CAPACITY_SIZING_ATTEMPTS + 1):
+            stable_quote = stable_client.quote(
+                args.executor,
+                loan_symbol,
+                intermediate_symbol,
+                loan_amount,
+            )
+            capacity_raw = (
+                _stable_raw_amount(
+                    stable_quote.capacity,
+                    "capacity",
+                    fractional_rounding=ROUND_DOWN,
+                )
+                if stable_quote.capacity is not None
+                else None
+            )
+            if capacity_raw is not None:
+                if capacity_raw <= 0:
+                    raise ArbError("Stable.com pool has no remaining capacity")
+                usable_capacity_raw = (
+                    capacity_raw - capacity_buffer
+                    if capacity_raw > capacity_buffer
+                    else (capacity_raw - 1 if capacity_raw > 1 else capacity_raw)
+                )
+                if loan_amount > usable_capacity_raw:
+                    loan_amount = usable_capacity_raw
+                    capacity_adjusted = True
+                    continue
 
-        stable_amount_in = minimum_output_after_slippage(
-            matcha.buy_amount,
-            args.slippage_bps,
+            matcha_responses = matcha_client.quotes(
+                args.executor,
+                stable_quote.amount_out,
+                args.slippage_bps,
+                aggregators,
+                sell_token_address=intermediate_token,
+                buy_token_address=loan_token,
+            )
+            matcha = select_best_matcha_quote(matcha_responses, stable_quote.amount_out)
+            break
+        else:
+            raise ArbError("Stable.com capacity kept changing; could not size an executable route")
+
+        gross_profit_before_flash_fee = matcha.buy_amount - loan_amount
+        flash_loan_fee = flash_provider_fee(
+            loan_amount,
+            flash_provider.premium_bps,
         )
-        stable_quote = stable_client.quote(
+        gross_profit = gross_profit_before_flash_fee - flash_loan_fee
+        print("\n--- QUOTE BREAKDOWN (STABLE-FIRST) ---", file=sys.stderr)
+        print(
+            f"Flash Provider:          {flash_provider.label} "
+            f"({raw_to_amount(flash_provider.available)} {loan_symbol} available)",
+            file=sys.stderr,
+        )
+        print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
+        print(f"Leg 1 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {loan_symbol} -> {raw_to_amount(stable_quote.amount_out)} {intermediate_symbol}", file=sys.stderr)
+        print(f"Leg 2 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {intermediate_symbol} -> {raw_to_amount(matcha.buy_amount)} {loan_symbol}", file=sys.stderr)
+        if flash_loan_fee:
+            print(
+                f"Flash Loan Fee:          {raw_to_amount(flash_loan_fee)} "
+                f"{loan_symbol} ({flash_provider.premium_bps} bps)",
+                file=sys.stderr,
+            )
+        print(f"Gross Profit:            {raw_to_signed_amount(gross_profit)} {loan_symbol}", file=sys.stderr)
+        print("---------------------------------------\n", file=sys.stderr)
+
+        if gross_profit < min_profit:
+            raise ArbError(
+                "quoted route is below the on-chain profit floor: "
+                f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
+                f"{raw_to_amount(min_profit)} {loan_symbol}"
+            )
+        stable_order = stable_client.create_order(
+            args.executor,
+            loan_symbol,
+            intermediate_symbol,
+            stable_quote.amount_in,
+            stable_quote.amount_out,
+        )
+    else:
+        for sizing_attempt in range(1, MAX_CAPACITY_SIZING_ATTEMPTS + 1):
+            matcha_responses = matcha_client.quotes(
+                args.executor,
+                loan_amount,
+                args.slippage_bps,
+                aggregators,
+                sell_token_address=loan_token,
+                buy_token_address=intermediate_token,
+            )
+            matcha = select_best_matcha_quote(matcha_responses, loan_amount)
+
+            stable_amount_in = minimum_output_after_slippage(
+                matcha.buy_amount,
+                args.slippage_bps,
+            )
+            stable_quote = stable_client.quote(
+                args.executor,
+                intermediate_symbol,
+                loan_symbol,
+                stable_amount_in,
+            )
+            capacity_raw = (
+                _stable_raw_amount(
+                    stable_quote.capacity,
+                    "capacity",
+                    fractional_rounding=ROUND_DOWN,
+                )
+                if stable_quote.capacity is not None
+                else None
+            )
+            stable_minimum_raw = (
+                _stable_raw_amount(
+                    stable_quote.minimum,
+                    "minimum",
+                    fractional_rounding=ROUND_CEILING,
+                )
+                if stable_quote.minimum is not None
+                else None
+            )
+            stable_maximum_raw = (
+                _stable_raw_amount(
+                    stable_quote.maximum,
+                    "maximum",
+                    fractional_rounding=ROUND_DOWN,
+                )
+                if stable_quote.maximum is not None
+                else None
+            )
+            if capacity_raw is not None:
+                if capacity_raw <= 0:
+                    raise ArbError("Stable.com pool has no remaining capacity")
+                usable_capacity_raw = (
+                    capacity_raw - capacity_buffer
+                    if capacity_raw > capacity_buffer
+                    else (capacity_raw - 1 if capacity_raw > 1 else capacity_raw)
+                )
+            else:
+                usable_capacity_raw = None
+
+            if stable_maximum_raw is not None and usable_capacity_raw is not None:
+                usable_capacity_raw = min(usable_capacity_raw, stable_maximum_raw)
+
+            if usable_capacity_raw is not None and usable_capacity_raw <= 0:
+                raise ArbError("Stable.com pool has no remaining capacity")
+            if (
+                usable_capacity_raw is not None
+                and stable_minimum_raw is not None
+                and usable_capacity_raw < stable_minimum_raw
+            ):
+                raise ArbError(
+                    "Stable.com pool capacity is below its minimum order: "
+                    f"{raw_to_amount(usable_capacity_raw)} {intermediate_symbol} < "
+                    f"{raw_to_amount(stable_minimum_raw)} {intermediate_symbol}"
+                )
+            if (
+                usable_capacity_raw is None
+                or stable_quote.amount_in <= usable_capacity_raw
+            ):
+                break
+
+            adjusted_loan_amount = capacity_limited_loan_amount(
+                loan_amount,
+                stable_quote.amount_in,
+                usable_capacity_raw,
+            )
+            print(
+                f"Stable.com capacity reduced the {loan_symbol} loan from "
+                f"{raw_to_amount(loan_amount)} to "
+                f"{raw_to_amount(adjusted_loan_amount)}; requesting fresh quotes...",
+                file=sys.stderr,
+            )
+            loan_amount = adjusted_loan_amount
+            capacity_adjusted = True
+        else:
+            raise ArbError(
+                "Stable.com capacity kept changing; could not size an executable route"
+            )
+
+        if (
+            stable_minimum_raw is not None
+            and stable_quote.amount_in < stable_minimum_raw
+        ):
+            raise ArbError(
+                "Stable.com order is below its minimum: "
+                f"{raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} < "
+                f"{raw_to_amount(stable_minimum_raw)} {intermediate_symbol}"
+            )
+
+        gross_profit_before_flash_fee = stable_quote.amount_out - loan_amount
+        flash_loan_fee = flash_provider_fee(
+            loan_amount,
+            flash_provider.premium_bps,
+        )
+        gross_profit = gross_profit_before_flash_fee - flash_loan_fee
+        print("\n--- QUOTE BREAKDOWN ---", file=sys.stderr)
+        print(
+            f"Flash Provider:          {flash_provider.label} "
+            f"({raw_to_amount(flash_provider.available)} {loan_symbol} available)",
+            file=sys.stderr,
+        )
+        print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
+        print(f"Leg 1 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
+        print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
+        if flash_loan_fee:
+            print(
+                f"Flash Loan Fee:          {raw_to_amount(flash_loan_fee)} "
+                f"{loan_symbol} ({flash_provider.premium_bps} bps)",
+                file=sys.stderr,
+            )
+            print(
+                f"Gross Before Flash Fee:  "
+                f"{raw_to_signed_amount(gross_profit_before_flash_fee)} {loan_symbol}",
+                file=sys.stderr,
+            )
+        print(f"Gross Profit:            {raw_to_signed_amount(gross_profit)} {loan_symbol}", file=sys.stderr)
+        print("-----------------------\n", file=sys.stderr)
+
+        if gross_profit < min_profit:
+            raise ArbError(
+                "quoted route is below the on-chain profit floor: "
+                f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
+                f"{raw_to_amount(min_profit)} {loan_symbol}"
+            )
+        stable_order = stable_client.create_order(
             args.executor,
             intermediate_symbol,
             loan_symbol,
-            stable_amount_in,
-        )
-        capacity_raw = (
-            _stable_raw_amount(
-                stable_quote.capacity,
-                "capacity",
-                fractional_rounding=ROUND_DOWN,
-            )
-            if stable_quote.capacity is not None
-            else None
-        )
-        stable_minimum_raw = (
-            _stable_raw_amount(
-                stable_quote.minimum,
-                "minimum",
-                fractional_rounding=ROUND_CEILING,
-            )
-            if stable_quote.minimum is not None
-            else None
-        )
-        stable_maximum_raw = (
-            _stable_raw_amount(
-                stable_quote.maximum,
-                "maximum",
-                fractional_rounding=ROUND_DOWN,
-            )
-            if stable_quote.maximum is not None
-            else None
-        )
-        if capacity_raw is not None:
-            if capacity_raw <= 0:
-                raise ArbError("Stable.com pool has no remaining capacity")
-            usable_capacity_raw = (
-                capacity_raw - capacity_buffer
-                if capacity_raw > capacity_buffer
-                else (capacity_raw - 1 if capacity_raw > 1 else capacity_raw)
-            )
-        else:
-            usable_capacity_raw = None
-
-        if stable_maximum_raw is not None and usable_capacity_raw is not None:
-            usable_capacity_raw = min(usable_capacity_raw, stable_maximum_raw)
-
-        if usable_capacity_raw is not None and usable_capacity_raw <= 0:
-            raise ArbError("Stable.com pool has no remaining capacity")
-        if (
-            usable_capacity_raw is not None
-            and stable_minimum_raw is not None
-            and usable_capacity_raw < stable_minimum_raw
-        ):
-            raise ArbError(
-                "Stable.com pool capacity is below its minimum order: "
-                f"{raw_to_amount(usable_capacity_raw)} {intermediate_symbol} < "
-                f"{raw_to_amount(stable_minimum_raw)} {intermediate_symbol}"
-            )
-        if (
-            usable_capacity_raw is None
-            or stable_quote.amount_in <= usable_capacity_raw
-        ):
-            break
-
-        adjusted_loan_amount = capacity_limited_loan_amount(
-            loan_amount,
             stable_quote.amount_in,
-            usable_capacity_raw,
+            stable_quote.amount_out,
         )
-        print(
-            f"Stable.com capacity reduced the {loan_symbol} loan from "
-            f"{raw_to_amount(loan_amount)} to "
-            f"{raw_to_amount(adjusted_loan_amount)}; requesting fresh quotes...",
-            file=sys.stderr,
-        )
-        loan_amount = adjusted_loan_amount
-        capacity_adjusted = True
-    else:
-        raise ArbError(
-            "Stable.com capacity kept changing; could not size an executable route"
-        )
-
-    if (
-        stable_minimum_raw is not None
-        and stable_quote.amount_in < stable_minimum_raw
-    ):
-        raise ArbError(
-            "Stable.com order is below its minimum: "
-            f"{raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} < "
-            f"{raw_to_amount(stable_minimum_raw)} {intermediate_symbol}"
-        )
-
-    gross_profit_before_flash_fee = stable_quote.amount_out - loan_amount
-    flash_loan_fee = flash_provider_fee(
-        loan_amount,
-        flash_provider.premium_bps,
-    )
-    gross_profit = gross_profit_before_flash_fee - flash_loan_fee
-    print("\n--- QUOTE BREAKDOWN ---", file=sys.stderr)
-    print(
-        f"Flash Provider:          {flash_provider.label} "
-        f"({raw_to_amount(flash_provider.available)} {loan_symbol} available)",
-        file=sys.stderr,
-    )
-    print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
-    print(f"Leg 1 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
-    print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
-    if flash_loan_fee:
-        print(
-            f"Flash Loan Fee:          {raw_to_amount(flash_loan_fee)} "
-            f"{loan_symbol} ({flash_provider.premium_bps} bps)",
-            file=sys.stderr,
-        )
-        print(
-            f"Gross Before Flash Fee:  "
-            f"{raw_to_signed_amount(gross_profit_before_flash_fee)} {loan_symbol}",
-            file=sys.stderr,
-        )
-    print(f"Gross Profit:            {raw_to_signed_amount(gross_profit)} {loan_symbol}", file=sys.stderr)
-    print("-----------------------\n", file=sys.stderr)
-
-    if gross_profit < min_profit:
-        raise ArbError(
-            "quoted route is below the on-chain profit floor: "
-            f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
-            f"{raw_to_amount(min_profit)} {loan_symbol}"
-        )
-    stable_order = stable_client.create_order(
-        args.executor,
-        intermediate_symbol,
-        loan_symbol,
-        stable_quote.amount_in,
-        stable_quote.amount_out,
-    )
 
     web3, transaction, estimated_gas, max_fee_per_gas = prepare_transaction(
         args.rpc_url,
@@ -1757,6 +1899,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         min_profit,
         args.gas_limit_multiplier,
         args.max_fee_gwei,
+        args.swap_order,
     )
     gas_limit = int(transaction["gas"])
     max_gas_cost = gas_cost_usdc_raw(

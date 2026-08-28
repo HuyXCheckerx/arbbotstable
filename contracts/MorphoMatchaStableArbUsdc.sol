@@ -86,6 +86,11 @@ contract MorphoMatchaStableArbUsdc {
         AaveV3
     }
 
+    enum SwapOrder {
+        DexFirst,
+        StableFirst
+    }
+
     address public owner;
     Phase public phase;
 
@@ -152,6 +157,7 @@ contract MorphoMatchaStableArbUsdc {
             loanToken,
             intermediate,
             FlashProvider.Morpho,
+            SwapOrder.DexFirst,
             matcha,
             stable,
             minProfit
@@ -172,6 +178,7 @@ contract MorphoMatchaStableArbUsdc {
             loanToken,
             intermediateToken,
             FlashProvider.Morpho,
+            SwapOrder.DexFirst,
             matcha,
             stable,
             minProfit
@@ -193,6 +200,30 @@ contract MorphoMatchaStableArbUsdc {
             loanToken,
             intermediateToken,
             flashProvider,
+            SwapOrder.DexFirst,
+            matcha,
+            stable,
+            minProfit
+        );
+    }
+
+    /// @notice Explicit entry point supporting selectable SwapOrder (DexFirst or StableFirst).
+    function executeArbitrageWithTokensAndProviderAndOrder(
+        uint256 loanAmount,
+        address loanToken,
+        address intermediateToken,
+        FlashProvider flashProvider,
+        SwapOrder swapOrder,
+        MatchaRoute calldata matcha,
+        StableOrder calldata stable,
+        uint256 minProfit
+    ) external payable onlyOwner onlyIdle {
+        _executeArbitrage(
+            loanAmount,
+            loanToken,
+            intermediateToken,
+            flashProvider,
+            swapOrder,
             matcha,
             stable,
             minProfit
@@ -204,6 +235,7 @@ contract MorphoMatchaStableArbUsdc {
         address loanToken,
         address intermediateToken,
         FlashProvider flashProvider,
+        SwapOrder swapOrder,
         MatchaRoute calldata matcha,
         StableOrder calldata stable,
         uint256 minProfit
@@ -217,9 +249,15 @@ contract MorphoMatchaStableArbUsdc {
         if (
             matcha.target.code.length == 0 ||
             matcha.allowanceTarget.code.length == 0 ||
-            matcha.data.length < 4 ||
-            matcha.sellAmount != loanAmount
+            matcha.data.length < 4
         ) revert InvalidRoute();
+
+        if (swapOrder == SwapOrder.DexFirst) {
+            if (matcha.sellAmount != loanAmount) revert InvalidRoute();
+        } else {
+            if (stable.amountIn != loanAmount) revert InvalidRoute();
+        }
+
         if (stable.deadline <= block.timestamp) revert InvalidRoute();
 
         uint256 requiredValue = matcha.value + stable.executionFeeNative;
@@ -238,7 +276,8 @@ contract MorphoMatchaStableArbUsdc {
             loanToken,
             intermediateToken,
             matcha,
-            stable
+            stable,
+            swapOrder
         );
         if (flashProvider == FlashProvider.Morpho) {
             IMorphoFlashLoan(MORPHO).flashLoan(
@@ -315,12 +354,13 @@ contract MorphoMatchaStableArbUsdc {
             address loanToken,
             address intermediateToken,
             MatchaRoute memory matcha,
-            StableOrder memory stable
+            StableOrder memory stable,
+            SwapOrder swapOrder
         ) = abi.decode(
             data,
-            (address, address, MatchaRoute, StableOrder)
+            (address, address, MatchaRoute, StableOrder, SwapOrder)
         );
-        _runArbitrage(assets, 0, loanToken, intermediateToken, matcha, stable);
+        _runArbitrage(assets, 0, loanToken, intermediateToken, matcha, stable, swapOrder);
         _forceApprove(loanToken, MORPHO, assets);
     }
 
@@ -346,15 +386,17 @@ contract MorphoMatchaStableArbUsdc {
             address loanToken,
             address intermediateToken,
             MatchaRoute memory matcha,
-            StableOrder memory stable
-        ) = abi.decode(data, (address, address, MatchaRoute, StableOrder));
+            StableOrder memory stable,
+            SwapOrder swapOrder
+        ) = abi.decode(data, (address, address, MatchaRoute, StableOrder, SwapOrder));
         _runArbitrage(
             amount,
             premium,
             loanToken,
             intermediateToken,
             matcha,
-            stable
+            stable,
+            swapOrder
         );
         _forceApprove(loanToken, AAVE_V3_POOL, amount + premium);
         return true;
@@ -374,20 +416,16 @@ contract MorphoMatchaStableArbUsdc {
             address loanToken,
             address intermediateToken,
             MatchaRoute memory matcha,
-            StableOrder memory stable
-        ) = abi.decode(data, (address, address, MatchaRoute, StableOrder));
+            StableOrder memory stable,
+            SwapOrder swapOrder
+        ) = abi.decode(data, (address, address, MatchaRoute, StableOrder, SwapOrder));
         uint256 assets = _pendingLoanAmount;
-        if (
-            matcha.sellAmount != assets ||
-            loanToken != _loanToken ||
-            intermediateToken != _intermediateToken
-        ) revert InvalidRoute();
 
         IUniswapV4PoolManager manager = IUniswapV4PoolManager(
             UNISWAP_V4_POOL_MANAGER
         );
         manager.take(loanToken, address(this), assets);
-        _runArbitrage(assets, 0, loanToken, intermediateToken, matcha, stable);
+        _runArbitrage(assets, 0, loanToken, intermediateToken, matcha, stable, swapOrder);
 
         manager.sync(loanToken);
         _safeTransfer(loanToken, UNISWAP_V4_POOL_MANAGER, assets);
@@ -401,43 +439,75 @@ contract MorphoMatchaStableArbUsdc {
         address loanToken,
         address intermediateToken,
         MatchaRoute memory matcha,
-        StableOrder memory stable
+        StableOrder memory stable,
+        SwapOrder swapOrder
     ) private {
-        if (
-            matcha.sellAmount != assets ||
-            loanToken != _loanToken ||
-            intermediateToken != _intermediateToken
-        ) revert InvalidRoute();
+        if (loanToken != _loanToken || intermediateToken != _intermediateToken) {
+            revert InvalidRoute();
+        }
         if (_balanceOf(loanToken) < _startingLoanToken + assets) {
             revert InvalidCallback();
         }
 
-        _forceApprove(loanToken, matcha.allowanceTarget, assets);
-        _call(matcha.target, matcha.value, matcha.data);
-        _forceApprove(loanToken, matcha.allowanceTarget, 0);
+        if (swapOrder == SwapOrder.StableFirst) {
+            if (stable.amountIn != assets || matcha.sellAmount == 0) revert InvalidRoute();
 
-        uint256 currentIntermediate = _balanceOf(intermediateToken);
-        uint256 receivedIntermediate = currentIntermediate > _startingIntermediate
-            ? currentIntermediate - _startingIntermediate
-            : 0;
-        if (receivedIntermediate < stable.amountIn) {
-            revert InsufficientMatchaOutput(receivedIntermediate, stable.amountIn);
+            _forceApprove(loanToken, STABLE_POOL, stable.amountIn);
+            IStablePool.SwapLocal memory params = IStablePool.SwapLocal({
+                amountIn: stable.amountIn,
+                tokenIn: loanToken,
+                tokenOut: intermediateToken,
+                chainId: uint64(block.chainid),
+                recipient: address(this),
+                deadline: stable.deadline,
+                nonce: stable.nonce
+            });
+            IStablePool(STABLE_POOL).singleChainSwap{
+                value: stable.executionFeeNative
+            }(params, stable.maintainerSignature, stable.executionFeeNative);
+            _forceApprove(loanToken, STABLE_POOL, 0);
+
+            uint256 currentIntermediate = _balanceOf(intermediateToken);
+            uint256 receivedIntermediate = currentIntermediate > _startingIntermediate
+                ? currentIntermediate - _startingIntermediate
+                : 0;
+            if (receivedIntermediate < matcha.sellAmount) {
+                revert InsufficientMatchaOutput(receivedIntermediate, matcha.sellAmount);
+            }
+
+            _forceApprove(intermediateToken, matcha.allowanceTarget, matcha.sellAmount);
+            _call(matcha.target, matcha.value, matcha.data);
+            _forceApprove(intermediateToken, matcha.allowanceTarget, 0);
+        } else {
+            if (matcha.sellAmount != assets || stable.amountIn == 0) revert InvalidRoute();
+
+            _forceApprove(loanToken, matcha.allowanceTarget, assets);
+            _call(matcha.target, matcha.value, matcha.data);
+            _forceApprove(loanToken, matcha.allowanceTarget, 0);
+
+            uint256 currentIntermediate = _balanceOf(intermediateToken);
+            uint256 receivedIntermediate = currentIntermediate > _startingIntermediate
+                ? currentIntermediate - _startingIntermediate
+                : 0;
+            if (receivedIntermediate < stable.amountIn) {
+                revert InsufficientMatchaOutput(receivedIntermediate, stable.amountIn);
+            }
+
+            _forceApprove(intermediateToken, STABLE_POOL, stable.amountIn);
+            IStablePool.SwapLocal memory params = IStablePool.SwapLocal({
+                amountIn: stable.amountIn,
+                tokenIn: intermediateToken,
+                tokenOut: loanToken,
+                chainId: uint64(block.chainid),
+                recipient: address(this),
+                deadline: stable.deadline,
+                nonce: stable.nonce
+            });
+            IStablePool(STABLE_POOL).singleChainSwap{
+                value: stable.executionFeeNative
+            }(params, stable.maintainerSignature, stable.executionFeeNative);
+            _forceApprove(intermediateToken, STABLE_POOL, 0);
         }
-
-        _forceApprove(intermediateToken, STABLE_POOL, stable.amountIn);
-        IStablePool.SwapLocal memory params = IStablePool.SwapLocal({
-            amountIn: stable.amountIn,
-            tokenIn: intermediateToken,
-            tokenOut: loanToken,
-            chainId: uint64(block.chainid),
-            recipient: address(this),
-            deadline: stable.deadline,
-            nonce: stable.nonce
-        });
-        IStablePool(STABLE_POOL).singleChainSwap{
-            value: stable.executionFeeNative
-        }(params, stable.maintainerSignature, stable.executionFeeNative);
-        _forceApprove(intermediateToken, STABLE_POOL, 0);
 
         uint256 currentLoanToken = _balanceOf(loanToken);
         uint256 requiredLoanToken = _startingLoanToken +

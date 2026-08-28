@@ -128,6 +128,7 @@ def build_route_invocation(
     output_path = str(PLAN_DIR / f"{route.key}.json")
 
     if route.chain == "ethereum":
+        is_stable_first = (route.loan == "PYUSD" and route.intermediate == "USDG")
         command = [
             sys.executable,
             str(PROJECT_ROOT / "src" / "engines" / "eth_flash_arb_pyusd_usdc.py"),
@@ -135,6 +136,8 @@ def build_route_invocation(
             route.loan,
             "--intermediate-token",
             route.intermediate,
+            "--swap-order",
+            "stable-first" if is_stable_first else "dex-first",
             "--min-profit",
             floor,
             "--min-net-profit",
@@ -147,16 +150,20 @@ def build_route_invocation(
                 ["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"]
             )
     elif route.chain == "solana":
+        is_stable_first = (route.loan == "PYUSD" and route.intermediate == "USDG")
         executable = "npx.cmd" if sys.platform == "win32" else "npx"
         command = [
             executable,
             "tsx",
             str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
+            "--swap-order",
+            "stable-first" if is_stable_first else "dex-first",
         ]
         environment.update(
             {
                 "SOL_FLASH_ARB_LOAN_TOKEN": route.loan,
                 "SOL_FLASH_ARB_INTERMEDIATE_TOKEN": route.intermediate,
+                "SOL_FLASH_ARB_SWAP_ORDER": "stable-first" if is_stable_first else "dex-first",
                 "SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC": floor,
                 "SOL_FLASH_ARB_MIN_NET_PROFIT_USDC": floor,
                 f"SOL_FLASH_ARB_MIN_GROSS_PROFIT_{route.loan}": floor,
@@ -164,7 +171,11 @@ def build_route_invocation(
                 "SOL_FLASH_ARB_OUTPUT_PATH": output_path,
             }
         )
-        if route.loan != "USDC":
+        if is_stable_first:
+            environment["SOL_FLASH_ARB_SLIPPAGE_BPS"] = "0"
+            environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
+            environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "14"
+        elif route.loan != "USDC":
             environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
         if live:
             command.extend(

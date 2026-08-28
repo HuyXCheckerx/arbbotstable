@@ -218,6 +218,7 @@ def run_arb_command(
 ) -> tuple[bool, str, dict[str, str]]:
     env = os.environ.copy()
     intermediate, loan = pair.split("/", 1)
+    is_stable_first = (loan == "PYUSD" and intermediate == "USDG")
 
     if chain == "solana":
         env["SOL_FLASH_ARB_AMOUNT_USDC"] = amount
@@ -225,7 +226,10 @@ def run_arb_command(
         env["SOL_FLASH_ARB_LOAN_TOKEN"] = loan
         env["SOL_FLASH_ARB_SLIPPAGE_BPS"] = slippage_bps
         env["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"] = intermediate
-        if loan != "USDC":
+        if is_stable_first:
+            env["SOL_FLASH_ARB_SWAP_ORDER"] = "stable-first"
+            env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
+        elif loan != "USDC":
             env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
         executable = "npx.cmd" if sys.platform == "win32" else "npx"
         cmd = [
@@ -233,6 +237,8 @@ def run_arb_command(
             "tsx",
             str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
         ]
+        if is_stable_first:
+            cmd.extend(["--swap-order", "stable-first"])
         if mode == "quote":
             cmd.append("--quote-only")
         else:
@@ -254,6 +260,8 @@ def run_arb_command(
         ]
         if generic_route:
             cmd.extend(["--intermediate-token", intermediate])
+        if is_stable_first:
+            cmd.extend(["--swap-order", "stable-first"])
         if mode == "live":
             cmd.extend(["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"])
     elif chain in ("polygon", "bsc"):

@@ -200,6 +200,7 @@ interface Config {
   outputPath: string;
   commitment: Commitment;
   provider: "marginfi" | "solend" | "auto";
+  swapOrder: "dex-first" | "stable-first";
 }
 
 interface CliOptions {
@@ -207,6 +208,7 @@ interface CliOptions {
   send: boolean;
   createMarginfiAccount: boolean;
   provider?: "marginfi" | "solend" | "auto";
+  swapOrder?: "dex-first" | "stable-first";
   confirmation?: string;
 }
 
@@ -492,6 +494,7 @@ function readConfig(): Config {
     outputPath: process.env.SOL_FLASH_ARB_OUTPUT_PATH || "/tmp/solana-flash-arb-plan.json",
     commitment: "confirmed",
     provider: (process.env.SOL_FLASH_ARB_PROVIDER?.trim().toLowerCase() || "auto") as "marginfi" | "solend" | "auto",
+    swapOrder: (process.env.SOL_FLASH_ARB_SWAP_ORDER?.trim().toLowerCase() === "stable-first" ? "stable-first" : "dex-first") as "dex-first" | "stable-first",
   };
 }
 
@@ -509,6 +512,10 @@ function parseCli(argv: string[]): CliOptions {
     else if (arg === "--provider") {
       const p = argv[++index]?.toLowerCase();
       if (p === "marginfi" || p === "solend" || p === "auto") options.provider = p;
+    }
+    else if (arg === "--swap-order") {
+      const order = argv[++index]?.toLowerCase();
+      if (order === "dex-first" || order === "stable-first") options.swapOrder = order;
     }
     else if (arg === "--confirm-mainnet") options.confirmation = argv[++index];
     else if (arg === "--help" || arg === "-h") {
@@ -594,11 +601,14 @@ function stableRequestPayload(
   inputRaw: bigint,
   outputRaw?: bigint,
 ): JsonRecord {
+  const isStableFirst = config.swapOrder === "stable-first";
+  const assetFrom = isStableFirst ? config.loanSymbol : config.intermediateSymbol;
+  const assetTo = isStableFirst ? config.intermediateSymbol : config.loanSymbol;
   const payload: JsonRecord = {
     chainFrom: config.stableChainId,
-    assetFrom: config.intermediateSymbol,
+    assetFrom,
     chainTo: config.stableChainId,
-    assetTo: config.loanSymbol,
+    assetTo,
     gasLess: false,
     amountFrom: formatRaw(inputRaw),
     addressFrom: wallet.toBase58(),
@@ -859,14 +869,16 @@ async function getStableLeg(
   if (!order?.maintainerSignature) {
     throw new Error("Stable.com create order omitted maintainerSignature");
   }
+  const intermediateMint = config.swapOrder === "stable-first" ? config.loanMint : config.intermediateMint;
+  const outputMint = config.swapOrder === "stable-first" ? config.intermediateMint : config.loanMint;
   const leg = buildStableSwapInstruction(
     wallet,
     quote.inputRaw,
     quote.outputRaw,
     order,
     config.stableMaxExecutionFeeLamports,
-    config.intermediateMint,
-    config.loanMint,
+    intermediateMint,
+    outputMint,
   );
   const minimumDeadline = BigInt(Math.floor(Date.now() / 1_000) + 5);
   if (leg.deadline <= minimumDeadline) {
@@ -932,6 +944,58 @@ async function getCapacitySizedCycle(
     attempt < config.stableCapacitySizingAttempts;
     attempt += 1
   ) {
+    if (config.swapOrder === "stable-first") {
+      const stableQuote = await getStableQuote(config, wallet, loanAmountRaw);
+      const capacityRaw = parseDecimalToRawFloor(String(stableQuote.status.balance));
+      const minimumRaw = parseDecimalToRawCeil(String(stableQuote.status.min));
+      const maximumRaw = parseDecimalToRawFloor(String(stableQuote.status.max));
+      if (capacityRaw <= 0n) {
+        throw new Error(
+          `Stable.com pool has no remaining ${config.intermediateSymbol} capacity`,
+        );
+      }
+      const capacityAfterBufferRaw =
+        capacityRaw > config.stableCapacityBufferRaw
+          ? capacityRaw - config.stableCapacityBufferRaw
+          : (capacityRaw > 1n ? capacityRaw - 1n : capacityRaw);
+      const usableCapacityRaw =
+        maximumRaw > 0n && maximumRaw < capacityAfterBufferRaw
+          ? maximumRaw
+          : capacityAfterBufferRaw;
+      if (usableCapacityRaw < minimumRaw) {
+        throw new Error(
+          `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} ${config.intermediateSymbol} is below its ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum order`,
+        );
+      }
+
+      const jupiterQuote = await getJupiterQuote(
+        config,
+        config.intermediateMint,
+        config.loanMint,
+        stableQuote.outputRaw,
+        attempt,
+      );
+      const otherAmountThresholdRaw = BigInt(jupiterQuote.otherAmountThreshold);
+      const grossProfitRaw = otherAmountThresholdRaw - loanAmountRaw;
+
+      const cycle: ConservativeCycle = {
+        firstLegMinimumRaw: stableQuote.outputRaw,
+        secondLegMinimumRaw: otherAmountThresholdRaw,
+        grossProfitRaw,
+      };
+
+      return {
+        loanAmountRaw,
+        firstQuote: jupiterQuote,
+        secondJupiterQuote: undefined,
+        stableQuote,
+        cycle,
+        capacityRaw,
+        usableCapacityRaw,
+        capacityAdjusted,
+      };
+    }
+
     let firstQuote: JupiterQuote;
     let secondJupiterQuote: JupiterQuote | undefined;
     let firstMinimumRaw: bigint;
@@ -1586,7 +1650,10 @@ async function main(): Promise<void> {
       client.addressLookupTables ?? [],
       jupiterLookupTables,
     );
-    swapInstructions = [...firstSwap.instructions, stableLeg.instruction];
+    swapInstructions =
+      config.swapOrder === "stable-first"
+        ? [stableLeg.instruction, ...firstSwap.instructions]
+        : [...firstSwap.instructions, stableLeg.instruction];
     ignoredComputeBudgetCount = firstSwap.ignoredComputeBudgetInstructionCount;
   }
 
