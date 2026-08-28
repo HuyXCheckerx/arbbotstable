@@ -29,7 +29,7 @@ PID_PATH = LOG_DIR / "crosschain-sniper.pid"
 STOP_PATH = LOG_DIR / ".crosschain-sniper.stop"
 LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("5")
-SOLANA_CROSS_TOKEN_MINIMUM_ALLOWED_THRESHOLD = Decimal("1")
+SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("1")
 TOKEN_QUANTUM = Decimal("0.000001")
 
 
@@ -79,12 +79,8 @@ def decimal_setting(name: str, fallback: str) -> Decimal:
 
 
 def route_minimum_allowed_threshold(route: Route | None = None) -> Decimal:
-    if (
-        route
-        and route.chain == "solana"
-        and route.pair in ("USDG/PYUSD", "PYUSD/USDG")
-    ):
-        return SOLANA_CROSS_TOKEN_MINIMUM_ALLOWED_THRESHOLD
+    if route and route.chain == "solana":
+        return SOLANA_MINIMUM_ALLOWED_THRESHOLD
     return MINIMUM_ALLOWED_THRESHOLD
 
 
@@ -100,7 +96,7 @@ def strict_execution_floor(threshold: Decimal, route: Route | None = None) -> De
 
 
 def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
-    if route.chain == "solana" and route.pair in ("USDG/PYUSD", "PYUSD/USDG"):
+    if route.chain == "solana":
         effective_threshold = (
             Decimal("1") if base_threshold == Decimal("5") else base_threshold
         )
@@ -372,7 +368,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--threshold-usd",
         type=Decimal,
         default=decimal_setting("SNIPER_PROFIT_THRESHOLD_USD", "5"),
-        help="execute only above this net loan-stablecoin profit (default 5; 1 for Solana USDG/PYUSD & PYUSD/USDG)",
+        help="execute only above this net loan-stablecoin profit (default 5 for Ethereum; 1 for all Solana pairs)",
     )
     parser.add_argument(
         "--chains",
