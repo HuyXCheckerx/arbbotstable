@@ -276,7 +276,7 @@ def build_route_invocation(
             # The PYUSD/USDG return market may need a Jupiter-managed hop
             # through USDC. The engine still enforces Solana's wire-size cap.
             environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
-            environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "20"
+            environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "24"
         else:
             environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
         if live:

@@ -53,6 +53,8 @@ export const STABLE_PROGRAM_ID = new PublicKey(
 const TOKEN_DECIMALS = 6;
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const MAX_WIRE_TRANSACTION_BYTES = 1232;
+const JUPITER_API_BASE = "https://api.jup.ag/swap/v1";
+const JUPITER_LITE_API_BASE = "https://lite-api.jup.ag/swap/v1";
 const SINGLE_CHAIN_SWAP_DISCRIMINATOR = createHash("sha256")
   .update("global:single_chain_swap")
   .digest()
@@ -284,6 +286,21 @@ export function isTwoHopJupiterRoute(
   return false;
 }
 
+export function jupiterRouteConstraints(
+  loanMint: PublicKey,
+  intermediateMint: PublicKey,
+  maxAccounts: number,
+  onlyDirectRoutes: boolean,
+): Pick<Config, "maxAccounts" | "onlyDirectRoutes"> {
+  const isPyusdUsdgPair =
+    (loanMint.equals(PYUSD_MINT) && intermediateMint.equals(USDG_MINT)) ||
+    (loanMint.equals(USDG_MINT) && intermediateMint.equals(PYUSD_MINT));
+  return {
+    maxAccounts: isPyusdUsdgPair ? Math.max(24, maxAccounts) : maxAccounts,
+    onlyDirectRoutes: isPyusdUsdgPair ? false : onlyDirectRoutes,
+  };
+}
+
 export function stableInputSymbol(
   swapOrder: "dex-first" | "stable-first",
   loanSymbol: string,
@@ -493,12 +510,18 @@ function readConfig(cli: CliOptions): Config {
   const capacityBuffer =
     process.env[`SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_${capacitySymbol}`] ||
     "1";
+  const routeConstraints = jupiterRouteConstraints(
+    loanMint,
+    intermediateMint,
+    envInt("SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS", 20, 1),
+    envBool("SOL_FLASH_ARB_ONLY_DIRECT_ROUTES", true),
+  );
   return {
     rpcUrl: requiredEnv("SOLANA_RPC_URL"),
     keypair: loadKeypair(requiredEnv("SOLANA_PRIVATE_KEY")),
     jupiterApiBase: (
       process.env.SOL_FLASH_ARB_JUPITER_API_BASE ||
-      "https://api.jup.ag/swap/v1"
+      (apiKeys.length ? JUPITER_API_BASE : JUPITER_LITE_API_BASE)
     ).replace(/\/$/, ""),
     jupiterApiKeys: apiKeys,
     stableApiBase: (
@@ -537,8 +560,8 @@ function readConfig(cli: CliOptions): Config {
         process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC ||
         "1",
     ),
-    maxAccounts: envInt("SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS", 20, 1),
-    onlyDirectRoutes: envBool("SOL_FLASH_ARB_ONLY_DIRECT_ROUTES", true),
+    maxAccounts: routeConstraints.maxAccounts,
+    onlyDirectRoutes: routeConstraints.onlyDirectRoutes,
     httpTimeoutMs: envInt("SOL_FLASH_ARB_HTTP_TIMEOUT_MS", 15_000, 1),
     httpAttempts: envInt("SOL_FLASH_ARB_HTTP_ATTEMPTS", 3, 1),
     marginfiAccount: accountValue ? new PublicKey(accountValue) : undefined,
@@ -686,6 +709,20 @@ function jupiterHeaders(config: Config, requestNumber: number): HeadersInit {
       config.jupiterApiKeys[requestNumber % config.jupiterApiKeys.length];
   }
   return headers;
+}
+
+export function shouldFallbackToJupiterLite(
+  apiBase: string,
+  error: unknown,
+): boolean {
+  try {
+    return (
+      new URL(apiBase).hostname === "api.jup.ag" &&
+      /HTTP 401\b/.test(errorMessage(error))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function stableHeaders(): HeadersInit {
@@ -1012,12 +1049,28 @@ async function getJupiterQuote(
   if (maxAccounts !== undefined) {
     params.set("maxAccounts", String(maxAccounts));
   }
-  const quote = await fetchJson<JupiterQuote>(
-    `${config.jupiterApiBase}/quote?${params}`,
-    { headers: jupiterHeaders(config, requestNumber) },
-    config,
-    "Jupiter quote",
-  );
+  let quote: JupiterQuote;
+  try {
+    quote = await fetchJson<JupiterQuote>(
+      `${config.jupiterApiBase}/quote?${params}`,
+      { headers: jupiterHeaders(config, requestNumber) },
+      config,
+      "Jupiter quote",
+    );
+  } catch (error) {
+    if (!shouldFallbackToJupiterLite(config.jupiterApiBase, error)) throw error;
+    console.warn(
+      "Jupiter API key was rejected; retrying through the public Lite API.",
+    );
+    config.jupiterApiBase = JUPITER_LITE_API_BASE;
+    config.jupiterApiKeys = [];
+    quote = await fetchJson<JupiterQuote>(
+      `${config.jupiterApiBase}/quote?${params}`,
+      { headers: jupiterHeaders(config, requestNumber) },
+      config,
+      "Jupiter Lite quote",
+    );
+  }
   if (!quote.routePlan?.length) throw new Error("Jupiter returned no swap route");
   if (BigInt(quote.inAmount) !== amountRaw) {
     throw new Error(`Jupiter changed the requested input amount to ${quote.inAmount}`);
@@ -1257,7 +1310,10 @@ async function getSwapLeg(
         payer: wallet.toBase58(),
         quoteResponse: quote,
         wrapAndUnwrapSol: false,
-        useSharedAccounts: true,
+        // The wallet already has every route ATA. Reusing those accounts keeps
+        // PYUSD/USDG flash-loan transactions smaller than Jupiter's shared
+        // intermediate-account form, which can exceed Solana's wire limit.
+        useSharedAccounts: false,
         dynamicComputeUnitLimit: false,
         skipUserAccountsRpcCalls: false,
       }),
