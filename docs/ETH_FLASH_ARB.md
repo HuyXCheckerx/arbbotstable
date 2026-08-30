@@ -36,7 +36,8 @@ This is a prototype, not production-ready trading infrastructure:
 
 1. Matcha Meta's `/api/competitions` and `/api/quotes` routes are private web-app
    endpoints, not a documented public API. Their schema, aggregator names, and
-   Cloudflare policy may change without notice.
+   Cloudflare policy may change without notice. Cloud VMs should use the
+   authenticated official 0x AllowanceHolder API described below.
 2. Stable.com's order endpoints can also return HTTP 403 outside a browser
    session. The script treats any such response as a hard failure; it does not
    attempt to bypass Cloudflare or extract browser credentials.
@@ -92,6 +93,9 @@ ETH_ARB_RPC_TIMEOUT_SECONDS=90
 ETH_ARB_GAS_LIMIT_MULTIPLIER=1.20
 ETH_ARB_MAX_FEE_GWEI=
 ETH_ARB_AGGREGATORS=0x,Lightning,1inch,Barter,Bebop,Bitget,KyberSwap,OKX,ParaSwap,Enso
+ETH_ARB_QUOTE_PROVIDER=auto
+ETH_ARB_ZERO_EX_API_KEY=
+ETH_ARB_ZERO_EX_BASE_URL=https://api.0x.org
 ETH_ARB_MATCHA_BASE_URL=https://meta.matcha.xyz
 ETH_ARB_STABLE_BASE_URL=https://api-defi.stable.com
 ETH_ARB_OUTPUT_PATH=/tmp/eth-arb-plan.json
@@ -108,6 +112,14 @@ deploying the updated contract and replacing `ETH_EXECUTOR_ADDRESS` with the new
 address.
 
 The Ethereum scripts load these values from `.env` automatically.
+
+`ETH_ARB_QUOTE_PROVIDER=auto` first uses the Matcha website endpoint and falls
+back to 0x when `ETH_ARB_ZERO_EX_API_KEY` (or `ZERO_EX_API_KEY`) is set. On a VM
+that receives a Cloudflare 403, set `ETH_ARB_QUOTE_PROVIDER=zero-ex` to skip the
+undocumented endpoint entirely. The returned AllowanceHolder spender and
+transaction are still subjected to the executor's full atomic `eth_call`, gas,
+and profit checks before broadcast. A 0x API key can be created in the 0x
+developer dashboard; do not commit it.
 
 Construct and simulate the route configured in `.env`:
 
