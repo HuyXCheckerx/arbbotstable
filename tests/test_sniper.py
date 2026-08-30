@@ -4,8 +4,9 @@ import tempfile
 from decimal import Decimal
 from pathlib import Path
 import sys
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
@@ -17,6 +18,9 @@ for sub in ("core", "recovery", "engines", "web", "deployers"):
         sys.path.insert(0, subpath)
 
 from crosschain_sniper import (
+    AdaptiveBackoff,
+    CooldownPolicy,
+    Outcome,
     Route,
     SniperError,
     build_route_invocation,
@@ -33,6 +37,7 @@ from crosschain_sniper import (
     strict_execution_floor,
     subprocess_output_text,
     unresolved_submission,
+    worker,
 )
 
 
@@ -309,6 +314,38 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertEqual(outcome.category, "expired")
         self.assertFalse(outcome.executed)
         self.assertIn("continuing", outcome.detail)
+
+    def test_unresolved_submission_does_not_stop_the_script(self):
+        stop = threading.Event()
+        policy = CooldownPolicy(
+            transient_base_seconds=30,
+            transient_max_seconds=300,
+            provider_access_seconds=3600,
+            no_route_seconds=300,
+            capacity_seconds=300,
+            unstable_capacity_seconds=30,
+            reverted_seconds=60,
+        )
+        with patch(
+            "crosschain_sniper.run_route",
+            return_value=Outcome(False, "receipt was not observed", "submitted"),
+        ):
+            worker(
+                "ethereum",
+                [Route("ethereum", "PYUSD/USDG")],
+                live=True,
+                base_threshold=Decimal("5"),
+                interval_seconds=1,
+                cooldown_seconds=15,
+                timeout_seconds=300,
+                cooldown_policy=policy,
+                backoff=AdaptiveBackoff(),
+                once=True,
+                stop=stop,
+                logger=Mock(),
+            )
+
+        self.assertFalse(stop.is_set())
 
     def test_engine_timeout_preserves_an_already_broadcast_transaction(self):
         timeout = subprocess.TimeoutExpired(
