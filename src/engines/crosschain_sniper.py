@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import json
 import logging
+from logging.handlers import RotatingFileHandler
+import math
 import os
 from pathlib import Path
 import re
@@ -31,6 +33,14 @@ LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("5")
 SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("1")
 TOKEN_QUANTUM = Decimal("0.000001")
+ROUTE_TOKENS = ("USDC", "USDG", "PYUSD")
+DEFAULT_SWAP_ORDERS = ("dex-first", "stable-first")
+DEFAULT_ROUTE_PAIRS = tuple(
+    f"{loan}/{counter}"
+    for loan in ROUTE_TOKENS
+    for counter in ROUTE_TOKENS
+    if loan != counter
+)
 
 
 class SniperError(RuntimeError):
@@ -41,18 +51,56 @@ class SniperError(RuntimeError):
 class Route:
     chain: str
     pair: str
-
-    @property
-    def intermediate(self) -> str:
-        return self.pair.split("/", 1)[0]
+    swap_order: str = "stable-first"
 
     @property
     def loan(self) -> str:
+        """Flash-loan token and the token returned at the end of the cycle."""
+        return self.pair.split("/", 1)[0]
+
+    @property
+    def intermediate(self) -> str:
+        """Counter-token used between the two atomic swap legs."""
         return self.pair.split("/", 1)[1]
 
     @property
+    def stable_from(self) -> str:
+        return self.loan if self.swap_order == "stable-first" else self.intermediate
+
+    @property
+    def stable_to(self) -> str:
+        return self.intermediate if self.swap_order == "stable-first" else self.loan
+
+    @property
+    def dex_from(self) -> str:
+        return self.loan if self.swap_order == "dex-first" else self.intermediate
+
+    @property
+    def dex_to(self) -> str:
+        return self.intermediate if self.swap_order == "dex-first" else self.loan
+
+    @property
+    def dex_name(self) -> str:
+        return "Jupiter" if self.chain == "solana" else "MetaMatcha"
+
+    @property
+    def display(self) -> str:
+        if self.swap_order == "dex-first":
+            return (
+                f"{self.loan} -> {self.intermediate} ({self.dex_name}) -> "
+                f"{self.loan} (Stable.com)"
+            )
+        return (
+            f"{self.loan} -> {self.intermediate} (Stable.com) -> "
+            f"{self.loan} ({self.dex_name})"
+        )
+
+    @property
     def key(self) -> str:
-        return f"{self.chain}-{self.intermediate.lower()}-{self.loan.lower()}"
+        return (
+            f"{self.chain}-{self.swap_order}-loan-{self.loan.lower()}-via-"
+            f"{self.intermediate.lower()}"
+        )
 
 
 @dataclass(frozen=True)
@@ -65,6 +113,56 @@ class Invocation:
 class Outcome:
     executed: bool
     detail: str
+    category: str = "normal"
+
+
+@dataclass(frozen=True)
+class CooldownPolicy:
+    transient_base_seconds: float
+    transient_max_seconds: float
+    no_route_seconds: float
+    capacity_seconds: float
+    unstable_capacity_seconds: float
+    reverted_seconds: float
+
+
+class AdaptiveBackoff:
+    """Thread-safe, process-local backoff shared by both chain workers."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._deadlines: dict[str, float] = {}
+        self._failures: dict[str, int] = {}
+
+    def remaining(self, keys: tuple[str, ...]) -> float:
+        now = time.monotonic()
+        with self._lock:
+            return max(
+                (self._deadlines.get(key, 0.0) - now for key in keys),
+                default=0.0,
+            )
+
+    def block(self, key: str, seconds: float) -> float:
+        with self._lock:
+            deadline = time.monotonic() + seconds
+            self._deadlines[key] = max(self._deadlines.get(key, 0.0), deadline)
+        return seconds
+
+    def fail(self, key: str, base_seconds: float, max_seconds: float) -> float:
+        with self._lock:
+            failures = self._failures.get(key, 0) + 1
+            self._failures[key] = failures
+            delay = min(
+                max_seconds,
+                base_seconds * (2 ** min(failures - 1, 20)),
+            )
+            self._deadlines[key] = time.monotonic() + delay
+        return delay
+
+    def succeed(self, key: str) -> None:
+        with self._lock:
+            self._failures.pop(key, None)
+            self._deadlines.pop(key, None)
 
 
 def decimal_setting(name: str, fallback: str) -> Decimal:
@@ -108,8 +206,17 @@ def amount_text(value: Decimal) -> str:
     return format(value, "f").rstrip("0").rstrip(".")
 
 
-def selected_routes(chains: list[str], pairs: list[str]) -> list[Route]:
-    return [Route(chain, pair) for chain in chains for pair in pairs]
+def selected_routes(
+    chains: list[str],
+    pairs: list[str],
+    swap_orders: list[str],
+) -> list[Route]:
+    return [
+        Route(chain, pair, swap_order)
+        for chain in chains
+        for pair in pairs
+        for swap_order in swap_orders
+    ]
 
 
 def build_route_invocation(
@@ -124,7 +231,6 @@ def build_route_invocation(
     output_path = str(PLAN_DIR / f"{route.key}.json")
 
     if route.chain == "ethereum":
-        is_stable_first = (route.loan == "PYUSD" and route.intermediate == "USDG")
         command = [
             sys.executable,
             str(PROJECT_ROOT / "src" / "engines" / "eth_flash_arb_pyusd_usdc.py"),
@@ -133,7 +239,7 @@ def build_route_invocation(
             "--intermediate-token",
             route.intermediate,
             "--swap-order",
-            "stable-first" if is_stable_first else "dex-first",
+            route.swap_order,
             "--min-profit",
             floor,
             "--min-net-profit",
@@ -146,20 +252,19 @@ def build_route_invocation(
                 ["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"]
             )
     elif route.chain == "solana":
-        is_stable_first = (route.loan == "PYUSD" and route.intermediate == "USDG")
         executable = "npx.cmd" if sys.platform == "win32" else "npx"
         command = [
             executable,
             "tsx",
             str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
             "--swap-order",
-            "stable-first" if is_stable_first else "dex-first",
+            route.swap_order,
         ]
         environment.update(
             {
                 "SOL_FLASH_ARB_LOAN_TOKEN": route.loan,
                 "SOL_FLASH_ARB_INTERMEDIATE_TOKEN": route.intermediate,
-                "SOL_FLASH_ARB_SWAP_ORDER": "stable-first" if is_stable_first else "dex-first",
+                "SOL_FLASH_ARB_SWAP_ORDER": route.swap_order,
                 "SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC": floor,
                 "SOL_FLASH_ARB_MIN_NET_PROFIT_USDC": floor,
                 f"SOL_FLASH_ARB_MIN_GROSS_PROFIT_{route.loan}": floor,
@@ -167,12 +272,13 @@ def build_route_invocation(
                 "SOL_FLASH_ARB_OUTPUT_PATH": output_path,
             }
         )
-        if is_stable_first:
-            environment["SOL_FLASH_ARB_SLIPPAGE_BPS"] = "0"
-            environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
-            environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "14"
-        elif route.loan != "USDC":
+        if {route.stable_from, route.stable_to} == {"USDG", "PYUSD"}:
+            # The PYUSD/USDG return market may need a Jupiter-managed hop
+            # through USDC. The engine still enforces Solana's wire-size cap.
             environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
+            environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "20"
+        else:
+            environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
         if live:
             command.extend(
                 [
@@ -187,16 +293,131 @@ def build_route_invocation(
     return Invocation(tuple(command), environment)
 
 
-def execution_detail(route: Route, stdout: str) -> str | None:
+def execution_reference(route: Route, stdout: str) -> tuple[str | None, str | None]:
     if route.chain == "ethereum":
         try:
             plan = json.loads(stdout)
         except (json.JSONDecodeError, TypeError):
-            return None
+            submitted = re.search(
+                r"Submitted:\s*(https://etherscan\.io/tx/0x[0-9a-fA-F]+)",
+                stdout,
+            )
+            return ("submitted", submitted.group(1)) if submitted else (None, None)
         tx_hash = plan.get("transactionHash") if isinstance(plan, dict) else None
-        return f"https://etherscan.io/tx/0x{str(tx_hash).removeprefix('0x')}" if tx_hash else None
-    match = re.search(r"Confirmed:\s*([1-9A-HJ-NP-Za-km-z]+)", stdout)
-    return f"https://solscan.io/tx/{match.group(1)}" if match else None
+        if not tx_hash:
+            return None, None
+        status = str(plan.get("transactionStatus") or "submitted").lower()
+        link = f"https://etherscan.io/tx/0x{str(tx_hash).removeprefix('0x')}"
+        return status, link
+    try:
+        plan = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        plan = None
+    if isinstance(plan, dict) and plan.get("transactionSignature"):
+        status = str(plan.get("transactionStatus") or "submitted").lower()
+        signature = str(plan["transactionSignature"])
+        return status, f"https://solscan.io/tx/{signature}"
+    confirmed = re.search(r"Confirmed:\s*([1-9A-HJ-NP-Za-km-z]+)", stdout)
+    if confirmed:
+        return "confirmed", f"https://solscan.io/tx/{confirmed.group(1)}"
+    submitted = re.search(
+        r"Submitted:\s*(?:https://solscan\.io/tx/)?([1-9A-HJ-NP-Za-km-z]+)",
+        stdout,
+    )
+    if submitted:
+        return "submitted", f"https://solscan.io/tx/{submitted.group(1)}"
+    return None, None
+
+
+def execution_detail(route: Route, stdout: str) -> str | None:
+    status, link = execution_reference(route, stdout)
+    return link if status == "confirmed" else None
+
+
+def failure_category(detail: str) -> str:
+    lowered = detail.lower()
+    if (
+        "no_routes_found" in lowered
+        or "no routes found" in lowered
+        or "no executable simulated quote" in lowered
+        or "no executable matcha liquidity" in lowered
+        or "solana 1232-byte size limit" in lowered
+        or "exceeds solana 1232-byte size limit" in lowered
+    ):
+        return "no-route"
+    if "capacity kept changing" in lowered:
+        return "unstable-capacity"
+    if (
+        "pool capacity is below" in lowered
+        or "usable capacity" in lowered and "below" in lowered
+        or "pool has no remaining" in lowered
+    ):
+        return "capacity"
+    transient = any(
+        marker in lowered
+        for marker in (
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "internal server error",
+            "rate limits exceeded",
+            "timed out",
+            "temporarily failed",
+            "connection reset",
+        )
+    )
+    if transient and "stable.com" in lowered:
+        return "transient-stable"
+    if transient and "jupiter" in lowered:
+        return "transient-jupiter"
+    if transient and ("matcha" in lowered or "metamatcha" in lowered):
+        return "transient-matcha"
+    if transient:
+        return "transient-rpc"
+    if "below" in lowered or "no executable opportunity" in lowered:
+        return "unprofitable"
+    return "failure"
+
+
+def jupiter_market_key(route: Route) -> str:
+    return f"jupiter:{route.dex_from}/{route.dex_to}"
+
+
+def dex_market_key(route: Route) -> str:
+    venue = "jupiter" if route.chain == "solana" else "metamatcha"
+    return f"{venue}:{route.dex_from}/{route.dex_to}"
+
+
+def dependency_keys(route: Route) -> tuple[str, ...]:
+    keys = [f"stable:{route.chain}", f"rpc:{route.chain}"]
+    if route.chain == "solana":
+        keys.extend(("jupiter:solana", jupiter_market_key(route)))
+    else:
+        keys.extend(("metamatcha:ethereum", dex_market_key(route)))
+    return tuple(keys)
+
+
+def unresolved_submission(
+    routes: list[Route],
+) -> tuple[Route | None, Path, str] | None:
+    route_paths = {PLAN_DIR / f"{route.key}.json": route for route in routes}
+    try:
+        candidate_paths = set(PLAN_DIR.glob("*.json")) | set(route_paths)
+    except OSError:
+        candidate_paths = set(route_paths)
+    for path in sorted(candidate_paths, key=str):
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(plan, dict) or plan.get("transactionStatus") != "submitted":
+            continue
+        reference = plan.get("transactionHash") or plan.get("transactionSignature")
+        if reference:
+            return route_paths.get(path), path, str(reference)
+    return None
 
 
 def concise_failure(stdout: str, stderr: str, returncode: int) -> str:
@@ -209,6 +430,110 @@ def concise_failure(stdout: str, stderr: str, returncode: int) -> str:
         if "No executable opportunity" in line or "below" in line:
             return line.removeprefix("Error:").strip()
     return lines[-1] if lines else f"engine exited with status {returncode}"
+
+
+def readable_failure(route: Route, detail: str, category: str) -> str:
+    """Turn provider/engine jargon into a short operator-facing explanation."""
+    lowered = detail.lower()
+    dex_leg = f"{route.dex_from} -> {route.dex_to}"
+    if category == "no-route":
+        if "1232-byte" in lowered:
+            return (
+                f"{route.dex_name} found a {dex_leg} route, but the full "
+                "atomic transaction is too large for Solana"
+            )
+        return f"{route.dex_name} has no executable {dex_leg} route right now"
+    if category == "transient-stable":
+        status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else ""
+        return f"Stable.com is temporarily unavailable{suffix}"
+    if category == "transient-jupiter":
+        return "Jupiter is temporarily unavailable"
+    if category == "transient-matcha":
+        return "MetaMatcha is temporarily unavailable"
+    if category == "transient-rpc":
+        return f"{route.chain.title()} RPC is temporarily unavailable"
+    if category == "capacity":
+        return "Stable.com does not currently have enough usable input capacity"
+    if category == "unstable-capacity":
+        return "Stable.com capacity changed repeatedly while the route was being sized"
+    if category == "unprofitable":
+        comparison = re.search(
+            r"(?:floor:\s*|guaranteed net\s+)([-+\d.]+\s+[A-Z]+)\s+"
+            r"(?:is below|<)\s+([-+\d.]+\s+[A-Z]+)",
+            detail,
+            re.IGNORECASE,
+        )
+        if comparison:
+            return (
+                f"guaranteed result {comparison.group(1)}; required "
+                f"{comparison.group(2)}"
+            )
+        return detail.removeprefix("No executable opportunity: ")
+    return detail
+
+
+def dry_run_detail(route: Route, stdout: str, elapsed: float) -> str:
+    if route.chain == "ethereum":
+        try:
+            plan = json.loads(stdout)
+        except (json.JSONDecodeError, TypeError):
+            plan = None
+        if isinstance(plan, dict) and plan.get("predictedNetProfit") is not None:
+            return (
+                f"guaranteed net {plan['predictedNetProfit']} {route.loan}; "
+                f"simulation passed in {elapsed:.1f}s; not sent"
+            )
+    match = re.search(
+        r"Guaranteed net result:\s*([-+\d.]+\s+[A-Z]+)",
+        stdout,
+        re.IGNORECASE,
+    )
+    if match:
+        return f"guaranteed net {match.group(1)}; simulation passed in {elapsed:.1f}s; not sent"
+    return f"executable simulation passed in {elapsed:.1f}s; not sent"
+
+
+def outcome_label(outcome: Outcome) -> str:
+    if outcome.category == "confirmed":
+        return "CONFIRMED"
+    if outcome.category == "submitted":
+        return "STOPPED"
+    if outcome.category == "reverted":
+        return "REVERTED"
+    if outcome.category == "eligible":
+        return "READY"
+    if outcome.category == "unprofitable":
+        return "NO TRADE"
+    if outcome.category in {
+        "no-route",
+        "capacity",
+        "unstable-capacity",
+        "transient-stable",
+        "transient-jupiter",
+        "transient-matcha",
+        "transient-rpc",
+    }:
+        return "PAUSED"
+    return "ERROR"
+
+
+def dependency_label(key: str) -> str:
+    provider, _, market = key.partition(":")
+    names = {
+        "stable": "Stable.com",
+        "jupiter": "Jupiter",
+        "metamatcha": "MetaMatcha",
+        "rpc": "chain RPC",
+    }
+    label = names.get(provider, provider)
+    return f"{label} {market}".strip()
+
+
+def subprocess_output_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
 
 
 def run_route(
@@ -224,6 +549,7 @@ def run_route(
         execution_floor=execution_floor,
     )
     started = time.monotonic()
+    started_wall = time.time()
     try:
         result = subprocess.run(
             invocation.command,
@@ -236,26 +562,96 @@ def run_route(
             timeout=timeout_seconds,
             check=False,
         )
-    except subprocess.TimeoutExpired:
-        return Outcome(False, f"quote timed out after {timeout_seconds:g}s")
+    except subprocess.TimeoutExpired as exc:
+        captured = "\n".join(
+            (
+                subprocess_output_text(exc.stdout),
+                subprocess_output_text(exc.stderr),
+            )
+        )
+        transaction_status, transaction = execution_reference(route, captured)
+        plan_path = PLAN_DIR / f"{route.key}.json"
+        try:
+            if (
+                transaction_status is None
+                and plan_path.stat().st_mtime >= started_wall
+            ):
+                transaction_status, transaction = execution_reference(
+                    route,
+                    plan_path.read_text(encoding="utf-8"),
+                )
+        except OSError:
+            pass
+        if transaction_status == "confirmed" and transaction:
+            return Outcome(
+                True,
+                f"confirmed before the engine timed out after {timeout_seconds:g}s: "
+                f"{transaction}",
+                "confirmed",
+            )
+        if transaction_status == "submitted" and transaction:
+            return Outcome(
+                False,
+                f"submitted but the engine timed out after {timeout_seconds:g}s: "
+                f"{transaction}",
+                "submitted",
+            )
+        if transaction_status == "reverted" and transaction:
+            return Outcome(
+                False,
+                f"reverted before the engine timed out after {timeout_seconds:g}s: "
+                f"{transaction}",
+                "reverted",
+            )
+        return Outcome(
+            False,
+            f"quote timed out after {timeout_seconds:g}s",
+            "transient-rpc",
+        )
     except OSError as exc:
         return Outcome(False, f"could not start engine: {exc}")
 
     elapsed = time.monotonic() - started
-    transaction = execution_detail(route, result.stdout or "")
+    transaction_status, transaction = execution_reference(route, result.stdout or "")
+    if transaction_status == "confirmed" and transaction:
+        return Outcome(
+            True,
+            f"confirmed in {elapsed:.1f}s: {transaction}",
+            "confirmed",
+        )
+    if transaction_status == "submitted" and transaction:
+        failure = (
+            concise_failure(result.stdout or "", result.stderr or "", result.returncode)
+            if result.returncode
+            else "receipt confirmation was not observed"
+        )
+        return Outcome(
+            False,
+            f"submitted in {elapsed:.1f}s but confirmation is ambiguous: "
+            f"{transaction} ({failure})",
+            "submitted",
+        )
+    if transaction_status == "reverted" and transaction:
+        return Outcome(
+            False,
+            f"reverted in {elapsed:.1f}s: {transaction}",
+            "reverted",
+        )
     if result.returncode == 0:
-        if live and not transaction:
+        if live:
             return Outcome(
                 False,
                 f"engine succeeded in {elapsed:.1f}s without a transaction reference",
+                "failure",
             )
-        mode = "executed" if transaction else "eligible dry run"
-        suffix = f": {transaction}" if transaction else ""
-        return Outcome(bool(transaction), f"{mode} in {elapsed:.1f}s{suffix}")
+        return Outcome(False, dry_run_detail(route, result.stdout or "", elapsed), "eligible")
 
+    detail = concise_failure(result.stdout or "", result.stderr or "", result.returncode)
+    category = failure_category(detail)
     return Outcome(
         False,
-        concise_failure(result.stdout or "", result.stderr or "", result.returncode),
+        readable_failure(route, detail, category),
+        category,
     )
 
 
@@ -264,16 +660,62 @@ def configure_logging() -> logging.Logger:
     logger = logging.getLogger("crosschain-sniper")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(formatter)
-    file_handler = logging.FileHandler(
-        LOG_DIR / "crosschain-sniper.log", encoding="utf-8"
+    file_handler = RotatingFileHandler(
+        LOG_DIR / "crosschain-sniper.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
     logger.addHandler(console)
     logger.addHandler(file_handler)
     return logger
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        open_process.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        handle = open_process(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if not handle:
+            return False
+        close_handle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def running_sniper_pid() -> int | None:
+    try:
+        pid = int(PID_PATH.read_text(encoding="ascii").strip())
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return pid if process_is_running(pid) else None
 
 
 @contextmanager
@@ -328,24 +770,111 @@ def worker(
     interval_seconds: float,
     cooldown_seconds: float,
     timeout_seconds: float,
+    cooldown_policy: CooldownPolicy,
+    backoff: AdaptiveBackoff,
     once: bool,
     stop: threading.Event,
     logger: logging.Logger,
 ) -> None:
+    route_deadlines: dict[str, float] = {}
     while not stop.is_set():
         for route in routes:
             if stop.is_set():
                 return
+            now = time.monotonic()
+            if route_deadlines.get(route.key, 0.0) > now:
+                continue
+            if backoff.remaining(dependency_keys(route)) > 0:
+                continue
             floor = route_execution_floor(route, base_threshold)
-            logger.info("checking %s %s", chain.title(), route.pair)
+            logger.info("CHECK   | %-8s | %s", chain.title(), route.display)
             outcome = run_route(
                 route,
                 live=live,
                 execution_floor=floor,
                 timeout_seconds=timeout_seconds,
             )
-            level = logging.WARNING if outcome.executed else logging.INFO
-            logger.log(level, "%s %s: %s", chain.title(), route.pair, outcome.detail)
+            if outcome.category in {"submitted", "reverted", "failure"}:
+                level = logging.ERROR
+            elif outcome.executed:
+                level = logging.WARNING
+            else:
+                level = logging.INFO
+            logger.log(
+                level,
+                "RESULT  | %-9s | %-8s | %s | %s",
+                outcome_label(outcome),
+                chain.title(),
+                route.display,
+                outcome.detail,
+            )
+            if outcome.category == "submitted":
+                logger.error(
+                    "SAFETY  | STOPPED   | transaction was submitted but not confirmed; "
+                    "all routes are stopped until an operator reconciles it",
+                )
+                stop.set()
+                return
+            if outcome.category.startswith("transient-"):
+                dependency = {
+                    "transient-stable": f"stable:{route.chain}",
+                    "transient-jupiter": "jupiter:solana",
+                    "transient-matcha": "metamatcha:ethereum",
+                    "transient-rpc": f"rpc:{route.chain}",
+                }[outcome.category]
+                delay = backoff.fail(
+                    dependency,
+                    cooldown_policy.transient_base_seconds,
+                    cooldown_policy.transient_max_seconds,
+                )
+                logger.info(
+                    "PAUSE   | %-17s | %.0fs | temporary provider failure",
+                    dependency_label(dependency),
+                    delay,
+                )
+            else:
+                backoff.succeed(f"stable:{route.chain}")
+                backoff.succeed(f"rpc:{route.chain}")
+                if route.chain == "solana":
+                    backoff.succeed("jupiter:solana")
+                else:
+                    backoff.succeed("metamatcha:ethereum")
+
+            if outcome.category == "no-route":
+                dependency = dex_market_key(route)
+                backoff.block(dependency, cooldown_policy.no_route_seconds)
+                logger.info(
+                    "PAUSE   | %-17s | %.0fs | return market unavailable",
+                    dependency_label(dependency),
+                    cooldown_policy.no_route_seconds,
+                )
+            elif outcome.category == "capacity":
+                route_deadlines[route.key] = (
+                    time.monotonic() + cooldown_policy.capacity_seconds
+                )
+                logger.info(
+                    "PAUSE   | %-17s | %.0fs | insufficient Stable.com capacity",
+                    route.display,
+                    cooldown_policy.capacity_seconds,
+                )
+            elif outcome.category == "unstable-capacity":
+                route_deadlines[route.key] = (
+                    time.monotonic() + cooldown_policy.unstable_capacity_seconds
+                )
+                logger.info(
+                    "PAUSE   | %-17s | %.0fs | Stable.com capacity is changing",
+                    route.display,
+                    cooldown_policy.unstable_capacity_seconds,
+                )
+            elif outcome.category == "reverted":
+                route_deadlines[route.key] = (
+                    time.monotonic() + cooldown_policy.reverted_seconds
+                )
+                logger.info(
+                    "PAUSE   | %-17s | %.0fs | transaction reverted",
+                    route.display,
+                    cooldown_policy.reverted_seconds,
+                )
             if outcome.executed and stop.wait(cooldown_seconds):
                 return
         if once:
@@ -357,7 +886,7 @@ def worker(
 def watch_for_stop_request(stop: threading.Event, logger: logging.Logger) -> None:
     while not stop.wait(0.5):
         if STOP_PATH.exists():
-            logger.info("cooperative stop requested")
+            logger.info("SAFETY  | STOPPING  | cooperative stop requested")
             stop.set()
             return
 
@@ -368,7 +897,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--threshold-usd",
         type=Decimal,
         default=decimal_setting("SNIPER_PROFIT_THRESHOLD_USD", "5"),
-        help="execute only above this net loan-stablecoin profit (default 5 for Ethereum; 1 for all Solana pairs)",
+        help=(
+            "execute only above this net starting-token profit "
+            "(default 5 for Ethereum; 1 for Solana)"
+        ),
     )
     parser.add_argument(
         "--chains",
@@ -378,9 +910,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--pairs",
+        "--routes",
+        dest="pairs",
         nargs="+",
-        choices=("PYUSD/USDC", "USDG/USDC", "USDG/PYUSD", "PYUSD/USDG"),
-        default=["PYUSD/USDC", "USDG/USDC", "USDG/PYUSD", "PYUSD/USDG"],
+        choices=DEFAULT_ROUTE_PAIRS,
+        default=list(DEFAULT_ROUTE_PAIRS),
+        metavar="LOAN/COUNTER",
+        help=(
+            "flash-loan and counter-token pair (default: all six ordered "
+            "USDC/USDG/PYUSD pairs)"
+        ),
+    )
+    parser.add_argument(
+        "--orders",
+        "--swap-orders",
+        dest="swap_orders",
+        nargs="+",
+        choices=DEFAULT_SWAP_ORDERS,
+        default=list(DEFAULT_SWAP_ORDERS),
+        help="venue order to check (default: both dex-first and stable-first)",
     )
     parser.add_argument(
         "--interval-seconds",
@@ -396,6 +944,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--route-timeout-seconds",
         type=float,
         default=float(os.getenv("SNIPER_ROUTE_TIMEOUT_SECONDS", "300")),
+    )
+    parser.add_argument(
+        "--transient-backoff-seconds",
+        type=float,
+        default=float(os.getenv("SNIPER_TRANSIENT_BACKOFF_SECONDS", "30")),
+    )
+    parser.add_argument(
+        "--max-transient-backoff-seconds",
+        type=float,
+        default=float(os.getenv("SNIPER_MAX_TRANSIENT_BACKOFF_SECONDS", "300")),
+    )
+    parser.add_argument(
+        "--no-route-cooldown-seconds",
+        type=float,
+        default=float(os.getenv("SNIPER_NO_ROUTE_COOLDOWN_SECONDS", "300")),
+    )
+    parser.add_argument(
+        "--capacity-cooldown-seconds",
+        type=float,
+        default=float(os.getenv("SNIPER_CAPACITY_COOLDOWN_SECONDS", "300")),
+    )
+    parser.add_argument(
+        "--unstable-capacity-cooldown-seconds",
+        type=float,
+        default=float(os.getenv("SNIPER_UNSTABLE_CAPACITY_COOLDOWN_SECONDS", "30")),
+    )
+    parser.add_argument(
+        "--reverted-cooldown-seconds",
+        type=float,
+        default=float(os.getenv("SNIPER_REVERTED_COOLDOWN_SECONDS", "60")),
     )
     parser.add_argument("--once", action="store_true", help="check each route once")
     parser.add_argument("--live", action="store_true", help="allow guarded broadcasts")
@@ -413,35 +991,88 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.request_stop:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        if not PID_PATH.exists():
-            raise SniperError("no running sniper PID file was found")
+        pid = running_sniper_pid()
+        if pid is None:
+            PID_PATH.unlink(missing_ok=True)
+            STOP_PATH.unlink(missing_ok=True)
+            raise SniperError("no running sniper process was found")
         STOP_PATH.write_text(f"{os.getpid()}\n", encoding="ascii")
-        print("Stop requested; the sniper will exit after active route checks finish.")
+        print(
+            f"Stop requested for sniper PID {pid}; it will exit after active "
+            "route checks finish."
+        )
         return 0
-    if args.interval_seconds < 0.25:
+    if not math.isfinite(args.interval_seconds) or args.interval_seconds < 0.25:
         raise SniperError("--interval-seconds must be at least 0.25")
-    if args.cooldown_seconds < 0:
+    if not math.isfinite(args.cooldown_seconds) or args.cooldown_seconds < 0:
         raise SniperError("--cooldown-seconds cannot be negative")
-    if args.route_timeout_seconds < 30:
+    if not math.isfinite(args.route_timeout_seconds) or args.route_timeout_seconds < 30:
         raise SniperError("--route-timeout-seconds must be at least 30")
+    cooldown_values = {
+        "--transient-backoff-seconds": args.transient_backoff_seconds,
+        "--max-transient-backoff-seconds": args.max_transient_backoff_seconds,
+        "--no-route-cooldown-seconds": args.no_route_cooldown_seconds,
+        "--capacity-cooldown-seconds": args.capacity_cooldown_seconds,
+        "--unstable-capacity-cooldown-seconds": args.unstable_capacity_cooldown_seconds,
+        "--reverted-cooldown-seconds": args.reverted_cooldown_seconds,
+    }
+    for name, value in cooldown_values.items():
+        if not math.isfinite(value) or value < 0:
+            raise SniperError(f"{name} must be finite and non-negative")
+    if args.max_transient_backoff_seconds < args.transient_backoff_seconds:
+        raise SniperError(
+            "--max-transient-backoff-seconds cannot be below "
+            "--transient-backoff-seconds"
+        )
     if args.live and args.confirm_live != LIVE_CONFIRMATION:
         raise SniperError(
             f"--live requires --confirm-live {LIVE_CONFIRMATION}"
         )
 
-    routes = selected_routes(args.chains, args.pairs)
+    routes = selected_routes(args.chains, args.pairs, args.swap_orders)
     for route in routes:
         route_execution_floor(route, args.threshold_usd)
+    unresolved = unresolved_submission(routes)
+    if unresolved:
+        route, path, reference = unresolved
+        route_label = (
+            f"{route.chain}:{route.pair}:{route.swap_order}"
+            if route
+            else "a prior or unknown route"
+        )
+        raise SniperError(
+            f"unresolved submitted transaction for {route_label}: "
+            f"{reference}; reconcile it and update or remove {path} before restarting"
+        )
 
     logger = configure_logging()
     logger.info(
-        "starting %s sniper; execute only when guaranteed net profit is above route execution floor",
-        "LIVE" if args.live else "DRY-RUN",
+        "BOT     | %-9s | %d atomic route checks across both venue orders",
+        "LIVE" if args.live else "DRY RUN",
+        len(routes),
     )
-    logger.info("routes: %s", ", ".join(f"{r.chain}:{r.pair}" for r in routes))
+    logger.info(
+        "RULE    | Ethereum | guaranteed net >= %s per completed cycle (strict floor)",
+        amount_text(route_execution_floor(Route("ethereum", "USDC/USDG"), args.threshold_usd)),
+    )
+    logger.info(
+        "RULE    | Solana   | guaranteed net >= %s per completed cycle (strict floor)",
+        amount_text(route_execution_floor(Route("solana", "USDC/USDG"), args.threshold_usd)),
+    )
+    for route in routes:
+        logger.info("ROUTE   | %-8s | %s", route.chain.title(), route.display)
 
     with single_instance():
         stop = threading.Event()
+        backoff = AdaptiveBackoff()
+        cooldown_policy = CooldownPolicy(
+            transient_base_seconds=args.transient_backoff_seconds,
+            transient_max_seconds=args.max_transient_backoff_seconds,
+            no_route_seconds=args.no_route_cooldown_seconds,
+            capacity_seconds=args.capacity_cooldown_seconds,
+            unstable_capacity_seconds=args.unstable_capacity_cooldown_seconds,
+            reverted_seconds=args.reverted_cooldown_seconds,
+        )
         watcher = threading.Thread(
             target=watch_for_stop_request,
             name="sniper-stop-watcher",
@@ -462,6 +1093,8 @@ def main(argv: list[str] | None = None) -> int:
                     "interval_seconds": args.interval_seconds,
                     "cooldown_seconds": args.cooldown_seconds,
                     "timeout_seconds": args.route_timeout_seconds,
+                    "cooldown_policy": cooldown_policy,
+                    "backoff": backoff,
                     "once": args.once,
                     "stop": stop,
                     "logger": logger,
@@ -473,7 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
             for thread in threads:
                 thread.join()
         except KeyboardInterrupt:
-            logger.info("shutdown requested")
+            logger.info("SAFETY  | STOPPING  | keyboard shutdown requested")
             stop.set()
             for thread in threads:
                 thread.join()

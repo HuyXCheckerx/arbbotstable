@@ -1,6 +1,8 @@
 # Stablecoin Arbitrage Bot
 
-Solana stablecoin arbitrage bot with a live operational dashboard. The bot monitors Stable.com pools, evaluates reverse routes on Jupiter, executes eligible trades, and maintains a persistent execution/P&L ledger.
+Ethereum and Solana stablecoin arbitrage bot with a live operational dashboard.
+The profit sniper checks Stable.com first and then evaluates the atomic return
+leg through MetaMatcha on Ethereum or Jupiter on Solana.
 
 ## Dashboard
 
@@ -53,16 +55,19 @@ USDT/USDC command-line runs.
 
 ### Ethereum and Solana profit sniper
 
-The cross-chain sniper rotates `PYUSD/USDC`, `USDG/USDC`, `USDG/PYUSD`, and
-`PYUSD/USDG` sequentially on each chain, while Ethereum and Solana monitor in
-parallel. Pair names use `intermediate/loan`, so `USDG/PYUSD` borrows PYUSD,
-swaps PYUSD to USDG on Matcha or Jupiter, then settles USDG back to PYUSD on
-Stable.com. A `$5` threshold is converted to a `5.000001`-unit gross and
-guaranteed-net floor in the route's loan stablecoin, so equality at exactly `$5`
-never broadcasts. Each underlying engine still performs its atomic simulation,
-gas/fee accounting, mainnet check, and guarded submission logic.
+The cross-chain sniper checks all six ordered combinations of USDC, USDG, and
+PYUSD on both chains while Ethereum and Solana monitor in parallel. `A/B` means
+“flash-loan A and use B as the counter-token.” Each pair is checked in both
+venue orders: `A -> B` on MetaMatcha/Jupiter followed by `B -> A` on Stable.com,
+and `A -> B` on Stable.com followed by `B -> A` on MetaMatcha/Jupiter. For
+example, `PYUSD/USDC` always borrows and repays PYUSD, while `USDC/PYUSD` is the
+separate USDC-loan route. A `$5` threshold is converted to a
+`5.000001`-unit gross and guaranteed-net floor in the route's starting
+stablecoin, so equality at exactly `$5` never broadcasts. Each engine still
+performs its atomic simulation, gas/fee accounting, mainnet check, and guarded
+submission logic.
 
-Check all eight chain/pair routes once without broadcasting:
+Check all 24 chain/pair/order combinations once without broadcasting:
 
 ```bash
 python sniper.py --once
@@ -75,13 +80,22 @@ python sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
 ```
 
 On Windows, `start_sniper.cmd` starts the same live command. Runtime output is
-written to `logs/crosschain-sniper.log`, with one lock preventing duplicate
-sniper processes. Ethereum USDG requires the upgraded executor emitted by
+written to rotating `logs/crosschain-sniper.log` files, with one lock preventing
+duplicate sniper processes. Confirmed execution is logged only after the chain
+returns a successful receipt; an ambiguous submission stops every worker for
+manual reconciliation. Transient provider failures use exponential backoff,
+while unavailable markets and insufficient pools receive route cooldowns.
+Every line uses an operator-facing state such as `CHECK`, `NO TRADE`, `PAUSED`,
+`READY`, or `CONFIRMED`, followed by the complete venue-labeled route and its
+actual order.
+Ethereum USDG requires the upgraded executor emitted by
 `deploy_eth_executor_usdc.py`. Solana direct pairs also require exactly one
 standard Marginfi bank for the selected loan mint. A route without the required
 bank or sufficient Stable.com capacity remains in monitoring mode and cannot
-broadcast. The two direct USDG/PYUSD pair directions automatically allow a
-multi-hop Jupiter route; USDC-loan pairs retain the direct-route preference.
+broadcast. The two PYUSD/USDG return markets may need a constrained multi-hop
+Jupiter route; a route that cannot fit the complete 1,232-byte transaction is
+treated as unavailable and retried after its own directional cooldown. Routes
+containing USDC retain the direct-route preference.
 
 On Ethereum, `ETH_ARB_FLASH_PROVIDER=auto` checks funding liquidity before
 requesting venue quotes. It prefers zero-fee Morpho and falls back to Aave v3,

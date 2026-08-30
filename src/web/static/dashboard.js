@@ -3,9 +3,17 @@
 const LIVE_CONFIRMATION = "EXECUTE LIVE ARB";
 const REFRESH_INTERVAL_MS = 3000;
 const REFRESH_TIMEOUT_MS = 8000;
+const TOKEN_PAIRS = [
+  "USDC/USDG",
+  "USDG/USDC",
+  "USDC/PYUSD",
+  "PYUSD/USDC",
+  "USDG/PYUSD",
+  "PYUSD/USDG",
+];
 const SUPPORTED_PAIRS = {
-  ethereum: ["PYUSD/USDC", "USDT/USDC", "USDG/PYUSD", "PYUSD/USDG"],
-  solana: ["PYUSD/USDC", "USDT/USDC", "USDG/PYUSD", "PYUSD/USDG"],
+  ethereum: TOKEN_PAIRS,
+  solana: TOKEN_PAIRS,
   polygon: ["PYUSD/USDC"],
   bsc: ["USDT/USDC"],
 };
@@ -16,8 +24,10 @@ const elements = {
   amountPresets: [...document.querySelectorAll("[data-amount]")],
   logFilters: [...document.querySelectorAll("[data-log-filter]")],
   pair: document.getElementById("pair-select"),
+  swapOrder: document.getElementById("swap-order-select"),
   pairNote: document.getElementById("pair-note"),
   amount: document.getElementById("amount-input"),
+  principalToken: document.getElementById("principal-token"),
   slippage: document.getElementById("slippage-select"),
   quoteButton: document.getElementById("quote-button"),
   liveButton: document.getElementById("live-button"),
@@ -58,23 +68,34 @@ let lastLogs = [];
 let activeLogFilter = "all";
 
 function routeSymbols() {
-  const [intermediate, loan] = elements.pair.value.split("/");
+  const [first, second] = elements.pair.value.split("/");
+  const flexible = selectedChain === "ethereum" || selectedChain === "solana";
+  const [loan, intermediate] = flexible ? [first, second] : [second, first];
   return { intermediate, loan };
 }
 
 function dexName() {
-  return selectedChain === "solana" ? "Jupiter" : "Matcha";
+  return selectedChain === "solana" ? "Jupiter" : "MetaMatcha";
+}
+
+function routeFlow() {
+  const { intermediate, loan } = routeSymbols();
+  const stableFirst = elements.swapOrder.value === "stable-first";
+  return stableFirst
+    ? `${loan} → ${intermediate} (Stable.com) → ${loan} (${dexName()})`
+    : `${loan} → ${intermediate} (${dexName()}) → ${loan} (Stable.com)`;
 }
 
 function updateRoutePreview() {
   const { intermediate, loan } = routeSymbols();
-  elements.quoteFlow.textContent = `${loan} → ${intermediate} (${dexName()}) → ${loan} (Stable.com)`;
+  elements.quoteFlow.textContent = routeFlow();
   elements.quoteLoan.textContent = `${elements.amount.value || "—"} ${loan}`;
-  const zeroFee = intermediate !== "USDT";
-  elements.routeChip.textContent = zeroFee ? "0-fee route" : "standard route";
-  elements.pairNote.textContent = zeroFee
-    ? `${dexName()} entry with Stable.com par settlement.`
-    : `${dexName()} entry with Stable.com standard USDT settlement.`;
+  elements.principalToken.textContent = loan;
+  const stableFirst = elements.swapOrder.value === "stable-first";
+  elements.routeChip.textContent = stableFirst ? "Stable-first cycle" : "DEX-first cycle";
+  elements.pairNote.textContent = stableFirst
+    ? `Flash-loan ${loan}; Stable.com converts it to ${intermediate}; ${dexName()} returns it to ${loan}.`
+    : `Flash-loan ${loan}; ${dexName()} converts it to ${intermediate}; Stable.com returns it to ${loan}.`;
   for (const button of elements.amountPresets) {
     button.classList.toggle("is-active", button.dataset.amount === elements.amount.value);
   }
@@ -90,8 +111,18 @@ function selectChain(chain) {
   }
 
   const supported = SUPPORTED_PAIRS[chain];
+  const flexible = chain === "ethereum" || chain === "solana";
+  elements.swapOrder.disabled = !flexible;
+  if (!flexible) elements.swapOrder.value = "dex-first";
   for (const option of elements.pair.options) {
     option.disabled = !supported.includes(option.value);
+    if (supported.includes(option.value) && flexible) {
+      const [loan, counter] = option.value.split("/");
+      option.textContent = `${loan} / ${counter} · flash-loan ${loan}`;
+    } else if (supported.includes(option.value)) {
+      const [intermediate, loan] = option.value.split("/");
+      option.textContent = `${loan} → ${intermediate} (${dexName()}) → ${loan} (Stable.com)`;
+    }
   }
   if (!supported.includes(elements.pair.value)) {
     elements.pair.value = supported[0];
@@ -117,6 +148,7 @@ function setBusy(busy) {
     button.disabled = busy;
   }
   elements.pair.disabled = busy;
+  elements.swapOrder.disabled = busy || !(selectedChain === "ethereum" || selectedChain === "solana");
   elements.amount.disabled = busy;
   elements.slippage.disabled = busy;
   for (const button of elements.amountPresets) {
@@ -142,6 +174,7 @@ function requestPayload(mode, confirmation = "") {
   return {
     chain: selectedChain,
     pair: elements.pair.value,
+    swapOrder: elements.swapOrder.value,
     mode,
     amount: elements.amount.value.trim(),
     slippageBps: elements.slippage.value,
@@ -181,7 +214,7 @@ async function runArbitrage(mode, confirmation = "") {
     if (!data.ok) {
       throw new Error(data.error || `Request failed with HTTP ${response.status}`);
     }
-    setQuoteStatus("success", mode === "live" ? "Transaction submitted" : "Quote ready");
+    setQuoteStatus("success", mode === "live" ? "Transaction confirmed" : "Quote ready");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Request failed";
     elements.formError.textContent = message;
@@ -193,10 +226,10 @@ async function runArbitrage(mode, confirmation = "") {
 }
 
 function openLiveConfirmation() {
-  const { intermediate, loan } = routeSymbols();
+  const { loan } = routeSymbols();
   elements.confirmationInput.value = "";
   elements.confirmationError.textContent = "";
-  elements.confirmationSummary.textContent = `${selectedChain.toUpperCase()} · ${elements.amount.value} ${loan} · ${loan} → ${intermediate} → ${loan}`;
+  elements.confirmationSummary.textContent = `${selectedChain.toUpperCase()} · ${elements.amount.value} ${loan} · ${routeFlow()}`;
   elements.liveDialog.showModal();
   elements.confirmationInput.focus();
 }
@@ -232,6 +265,7 @@ for (const button of elements.chainButtons) {
   button.addEventListener("click", () => selectChain(button.dataset.chain));
 }
 elements.pair.addEventListener("change", updateRoutePreview);
+elements.swapOrder.addEventListener("change", updateRoutePreview);
 elements.amount.addEventListener("input", updateRoutePreview);
 elements.slippage.addEventListener("change", saveSettings);
 for (const button of elements.amountPresets) {
@@ -248,6 +282,7 @@ function saveSettings() {
       JSON.stringify({
         chain: selectedChain,
         pair: elements.pair.value,
+        swapOrder: elements.swapOrder.value,
         amount: elements.amount.value,
         slippage: elements.slippage.value,
       }),
@@ -267,6 +302,9 @@ function restoreSettings() {
     }
     if ([...elements.slippage.options].some((option) => option.value === saved.slippage)) {
       elements.slippage.value = saved.slippage;
+    }
+    if (["dex-first", "stable-first"].includes(saved.swapOrder)) {
+      elements.swapOrder.value = saved.swapOrder;
     }
     selectChain(selectedChain);
     if (SUPPORTED_PAIRS[selectedChain].includes(saved.pair)) {

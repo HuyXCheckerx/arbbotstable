@@ -69,7 +69,7 @@
             <p class="eyebrow">Execution setup</p>
             <h1>Build a route</h1>
           </div>
-          <span class="mode-chip" id="route-chip">0-fee route</span>
+          <span class="mode-chip" id="route-chip">DEX-first cycle</span>
         </div>
 
         <form id="execution-form" novalidate>
@@ -96,14 +96,25 @@
           </fieldset>
 
           <div class="field-group">
-            <label for="pair-select">Trading pair</label>
+            <label for="pair-select">Route direction</label>
             <select id="pair-select" name="pair">
-              <option value="PYUSD/USDC">PYUSD / USDC · zero-fee settlement</option>
-              <option value="USDT/USDC">USDT / USDC · standard settlement</option>
-              <option value="USDG/PYUSD">USDG / PYUSD · zero-fee settlement</option>
-              <option value="PYUSD/USDG">PYUSD / USDG · zero-fee settlement</option>
+              <option value="USDC/USDG">USDC / USDG · flash-loan USDC</option>
+              <option value="USDG/USDC">USDG / USDC · flash-loan USDG</option>
+              <option value="USDC/PYUSD">USDC / PYUSD · flash-loan USDC</option>
+              <option value="PYUSD/USDC">PYUSD / USDC · flash-loan PYUSD</option>
+              <option value="USDG/PYUSD">USDG / PYUSD · flash-loan USDG</option>
+              <option value="PYUSD/USDG">PYUSD / USDG · flash-loan PYUSD</option>
+              <option value="USDT/USDC">USDT / USDC · legacy route</option>
             </select>
-            <p class="field-note" id="pair-note">Matcha entry with Stable.com par settlement.</p>
+            <p class="field-note" id="pair-note">Flash-loan USDC; MetaMatcha converts it to USDG; Stable.com returns it to USDC.</p>
+          </div>
+
+          <div class="field-group">
+            <label for="swap-order-select">Venue order</label>
+            <select id="swap-order-select" name="swapOrder">
+              <option value="dex-first">MetaMatcha/Jupiter first, then Stable.com</option>
+              <option value="stable-first">Stable.com first, then MetaMatcha/Jupiter</option>
+            </select>
           </div>
 
           <div class="field-row">
@@ -111,7 +122,7 @@
               <label for="amount-input">Maximum principal</label>
               <div class="input-suffix">
                 <input id="amount-input" name="amount" inputmode="decimal" autocomplete="off" value="100000" required>
-                <span>USDC</span>
+                <span id="principal-token">USDC</span>
               </div>
               <div class="amount-presets" aria-label="Principal presets">
                 <button type="button" data-amount="25000">25K</button>
@@ -157,7 +168,7 @@
         <dl class="quote-grid">
           <div class="quote-row wide-row">
             <dt>Route</dt>
-            <dd id="quote-flow">USDC → PYUSD (Matcha) → USDC (Stable.com)</dd>
+            <dd id="quote-flow">USDC → USDG (MetaMatcha) → USDC (Stable.com)</dd>
           </div>
           <div class="quote-row">
             <dt>Loan principal</dt>
@@ -168,11 +179,11 @@
             <dd id="quote-cost">—</dd>
           </div>
           <div class="quote-row wide-row">
-            <dt>Leg 1 guaranteed output</dt>
+            <dt>Leg 1 result</dt>
             <dd id="quote-leg1">—</dd>
           </div>
           <div class="quote-row wide-row">
-            <dt>Leg 2 executable output</dt>
+            <dt>Leg 2 guaranteed result</dt>
             <dd id="quote-leg2">—</dd>
           </div>
           <div class="quote-row result-row">

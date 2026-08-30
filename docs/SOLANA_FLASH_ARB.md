@@ -4,16 +4,17 @@
 
 1. Begin a zero-fee Marginfi/P0 flash loan.
 2. Borrow the configured loan stablecoin from the Marginfi/P0 liquidity layer.
-3. Swap the loan stablecoin to the configured intermediate with Jupiter.
-4. Swap the conservative intermediate amount back to the loan stablecoin with a Stable.com signed
-   single-chain instruction.
+3. Convert the borrowed token to the counter-token through either Jupiter or
+   Stable.com.
+4. Return the counter-token to the borrowed token through the other venue.
 5. Repay all flash-borrowed principal.
 6. End the flash loan.
 
 If either swap or repayment fails, Solana reverts the complete transaction. No
 custom program deployment is required. The maintained P0 SDK builds the
 Marginfi program instructions. The wallet does need one Marginfi
-account, exactly one standard Marginfi bank for the loan mint, and existing
+account with no existing liability in the selected loan bank, exactly one
+standard Marginfi bank for the loan mint, and existing
 associated token accounts for both route tokens.
 
 ## Install
@@ -26,22 +27,29 @@ npm install
 Put all configuration in `.env`; the available variables and safe defaults are
 documented in `.env.example`.
 
-`SOL_FLASH_ARB_LOAN_TOKEN` selects USDC, PYUSD, or USDG. The route is written as
-`intermediate/loan`: for example, `SOL_FLASH_ARB_INTERMEDIATE_TOKEN=USDG` with
-`SOL_FLASH_ARB_LOAN_TOKEN=PYUSD` runs `USDG/PYUSD`. The token-specific
+The implemented flash-loan provider is Marginfi/P0. `--provider auto` resolves
+to Marginfi; selecting the unimplemented `solend` value now fails explicitly
+instead of silently running against Marginfi.
+
+`SOL_FLASH_ARB_LOAN_TOKEN` selects USDC, PYUSD, or USDG and is always the token
+borrowed, repaid, and used for the profit floor. `SOL_FLASH_ARB_INTERMEDIATE_TOKEN`
+selects a different counter-token. `SOL_FLASH_ARB_SWAP_ORDER=stable-first`
+means Stable.com then Jupiter; `dex-first` means Jupiter then Stable.com. Loan
+`PYUSD` plus intermediate `USDC` therefore always borrows PYUSD, regardless of
+the selected venue order. The token-specific
 `SOL_FLASH_ARB_AMOUNT_<LOAN>` value is the maximum principal; the legacy
 `SOL_FLASH_ARB_AMOUNT_USDC` value remains the fallback. Before requesting a
-signed Stable.com order, the bot compares the first Jupiter leg's guaranteed
-minimum output with Stable.com's current `balance`, leaves the matching
-`SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_<INTERMEDIATE>` unused, and re-quotes at a
-smaller loan size when necessary.
+signed Stable.com order, the bot compares the Stable input with Stable.com's
+current `balance`, leaves the matching capacity buffer unused, and re-quotes at
+a smaller loan size when necessary. This applies to both venue orders; neither
+route can request more than Stable.com's reported input pool.
 
-The default Jupiter account ceiling is 20. That keeps the combined Marginfi,
-Jupiter, and Stable.com transaction below Solana's 1,232-byte wire limit while
-still allowing current stablecoin routes. On Solana, the `USDG/PYUSD` and
-`PYUSD/USDG` routes automatically execute Jupiter swaps through USDC
-(`PYUSD -> USDC -> USDG` or `USDG -> USDC -> PYUSD`) before the Stable.com
-redemption leg to eliminate routing inefficiency.
+The default Jupiter account ceiling is 20. Every built transaction is still
+serialized and rejected if the combined Marginfi, Jupiter, and Stable.com
+instructions exceed Solana's 1,232-byte wire limit. The directional PYUSD/USDG
+Jupiter return markets may require a Jupiter-managed hop through USDC; when one
+direction cannot fit atomically, the sniper marks that direction unavailable
+and waits for its cooldown instead of repeatedly calling the quote services.
 
 If the wallet has no Marginfi account, create a dedicated empty one once:
 

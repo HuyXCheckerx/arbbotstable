@@ -108,6 +108,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn('data-amount="100000"', web.HTML_TEMPLATE)
         self.assertIn('data-log-filter="error"', web.HTML_TEMPLATE)
         self.assertIn('id="copy-logs-button"', web.HTML_TEMPLATE)
+        self.assertIn('id="swap-order-select"', web.HTML_TEMPLATE)
 
     def test_homepage_sets_a_restrictive_content_security_policy(self):
         status, headers, _ = self.request("/")
@@ -137,10 +138,17 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("PYUSD/USDC", web.SUPPORTED_PAIRS["polygon"])
         self.assertNotIn("USDT/USDC", web.SUPPORTED_PAIRS["polygon"])
 
-    def test_cross_token_pairs_are_supported_on_ethereum_and_solana(self):
+    def test_all_six_loan_counter_pairs_are_supported_on_both_sniper_chains(self):
         for chain in ("ethereum", "solana"):
-            self.assertIn("USDG/PYUSD", web.SUPPORTED_PAIRS[chain])
-            self.assertIn("PYUSD/USDG", web.SUPPORTED_PAIRS[chain])
+            self.assertEqual(len(web.SUPPORTED_PAIRS[chain]), 6)
+            for stable_from in ("USDC", "USDG", "PYUSD"):
+                for stable_to in ("USDC", "USDG", "PYUSD"):
+                    if stable_from != stable_to:
+                        self.assertIn(
+                            f"{stable_from}/{stable_to}",
+                            web.SUPPORTED_PAIRS[chain],
+                        )
+            self.assertNotIn("USDT/USDC", web.SUPPORTED_PAIRS[chain])
 
     def test_ethereum_cross_token_pair_reaches_the_generic_engine(self):
         with patch(
@@ -151,10 +159,30 @@ class DashboardServerTests(unittest.TestCase):
 
         command = run.call_args.args[0]
         self.assertTrue(command[1].endswith("eth_flash_arb_pyusd_usdc.py"))
-        self.assertEqual(command[command.index("--loan-token") + 1], "PYUSD")
+        self.assertEqual(command[command.index("--loan-token") + 1], "USDG")
         self.assertEqual(
-            command[command.index("--intermediate-token") + 1], "USDG"
+            command[command.index("--intermediate-token") + 1], "PYUSD"
         )
+        self.assertEqual(command[command.index("--swap-order") + 1], "stable-first")
+
+    def test_ethereum_dashboard_can_request_dex_first(self):
+        with patch(
+            "web.subprocess.run",
+            return_value=CompletedProcess([], 2, stdout="", stderr="ERROR: no route\n"),
+        ) as run:
+            web.run_arb_command(
+                "ethereum",
+                "PYUSD/USDC",
+                "quote",
+                "1000",
+                "1",
+                "dex-first",
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--loan-token") + 1], "PYUSD")
+        self.assertEqual(command[command.index("--intermediate-token") + 1], "USDC")
+        self.assertEqual(command[command.index("--swap-order") + 1], "dex-first")
 
     def test_solana_cross_token_pair_reaches_both_engine_settings(self):
         with patch(
@@ -164,10 +192,77 @@ class DashboardServerTests(unittest.TestCase):
             web.run_arb_command("solana", "PYUSD/USDG", "quote", "1000", "1")
 
         environment = run.call_args.kwargs["env"]
-        self.assertEqual(environment["SOL_FLASH_ARB_AMOUNT_USDG"], "1000")
-        self.assertEqual(environment["SOL_FLASH_ARB_LOAN_TOKEN"], "USDG")
-        self.assertEqual(environment["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"], "PYUSD")
+        self.assertEqual(environment["SOL_FLASH_ARB_AMOUNT_PYUSD"], "1000")
+        self.assertEqual(environment["SOL_FLASH_ARB_LOAN_TOKEN"], "PYUSD")
+        self.assertEqual(environment["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"], "USDG")
+        self.assertEqual(environment["SOL_FLASH_ARB_SWAP_ORDER"], "stable-first")
         self.assertEqual(environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"], "false")
+
+    def test_dashboard_route_summary_is_stable_first(self):
+        summary = web.parse_output_summary(
+            "",
+            chain="ethereum",
+            pair="PYUSD/USDC",
+        )
+
+        dex_first = web.parse_output_summary(
+            "",
+            chain="ethereum",
+            pair="PYUSD/USDC",
+            swap_order="dex-first",
+        )
+        self.assertEqual(
+            dex_first["flow"],
+            "PYUSD → USDC (MetaMatcha) → PYUSD (Stable.com)",
+        )
+        self.assertEqual(
+            summary["flow"],
+            "PYUSD → USDC (Stable.com) → PYUSD (MetaMatcha)",
+        )
+
+    def test_solana_dashboard_can_request_dex_first(self):
+        with patch(
+            "web.subprocess.run",
+            return_value=CompletedProcess([], 2, stdout="", stderr="ERROR: no route\n"),
+        ) as run:
+            web.run_arb_command(
+                "solana",
+                "USDC/PYUSD",
+                "quote",
+                "1000",
+                "1",
+                "dex-first",
+            )
+
+        environment = run.call_args.kwargs["env"]
+        command = run.call_args.args[0]
+        self.assertEqual(environment["SOL_FLASH_ARB_LOAN_TOKEN"], "USDC")
+        self.assertEqual(environment["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"], "PYUSD")
+        self.assertEqual(environment["SOL_FLASH_ARB_SWAP_ORDER"], "dex-first")
+        self.assertEqual(command[command.index("--swap-order") + 1], "dex-first")
+
+    def test_dashboard_orders_structured_stable_and_metamatcha_legs(self):
+        summary = web.parse_output_summary(
+            "",
+            {
+                "swapOrder": "stable-first",
+                "loanToken": {"symbol": "PYUSD"},
+                "intermediateToken": {"symbol": "USDC"},
+                "stable": {
+                    "sellToken": {"symbol": "PYUSD", "amount": "100"},
+                    "buyToken": {"symbol": "USDC", "amount": "100.1"},
+                },
+                "matcha": {
+                    "sellToken": {"symbol": "USDC", "amount": "100.1"},
+                    "buyToken": {"symbol": "PYUSD", "amount": "100.2"},
+                },
+            },
+            chain="ethereum",
+            pair="PYUSD/USDC",
+        )
+
+        self.assertEqual(summary["leg1"], "100 PYUSD → 100.1 USDC (Stable.com)")
+        self.assertEqual(summary["leg2"], "100.1 USDC → 100.2 PYUSD (MetaMatcha)")
 
     def test_failed_engine_process_is_not_reported_as_success(self):
         with patch(

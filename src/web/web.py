@@ -52,8 +52,22 @@ MAX_REQUEST_BYTES = 64 * 1024
 LIVE_CONFIRMATION = "EXECUTE LIVE ARB"
 
 SUPPORTED_PAIRS = {
-    "ethereum": {"PYUSD/USDC", "USDT/USDC", "USDG/PYUSD", "PYUSD/USDG"},
-    "solana": {"PYUSD/USDC", "USDT/USDC", "USDG/PYUSD", "PYUSD/USDG"},
+    "ethereum": {
+        "USDC/USDG",
+        "USDG/USDC",
+        "USDC/PYUSD",
+        "PYUSD/USDC",
+        "USDG/PYUSD",
+        "PYUSD/USDG",
+    },
+    "solana": {
+        "USDC/USDG",
+        "USDG/USDC",
+        "USDC/PYUSD",
+        "PYUSD/USDC",
+        "USDG/PYUSD",
+        "PYUSD/USDG",
+    },
     "polygon": {"PYUSD/USDC"},
     "bsc": {"USDT/USDC"},
 }
@@ -90,14 +104,20 @@ def add_log(entry: str, log_type: str = "info") -> None:
 add_log("Arbitrage console online and listening for commands.", "system")
 
 
-def _route_symbols(pair: str) -> tuple[str, str]:
-    intermediate, loan = pair.split("/", 1)
-    return loan, intermediate
+def _route_symbols(chain: str, pair: str) -> tuple[str, str]:
+    first, second = pair.split("/", 1)
+    if chain in ("ethereum", "solana"):
+        return first, second
+    return second, first
 
 
-def _route_flow(chain: str, pair: str) -> str:
-    loan, intermediate = _route_symbols(pair)
-    venue = "Jupiter" if chain == "solana" else "Matcha"
+def _route_flow(chain: str, pair: str, swap_order: str = "stable-first") -> str:
+    loan, intermediate = _route_symbols(chain, pair)
+    venue = "Jupiter" if chain == "solana" else "MetaMatcha"
+    if chain in ("ethereum", "solana"):
+        if swap_order == "dex-first":
+            return f"{loan} → {intermediate} ({venue}) → {loan} (Stable.com)"
+        return f"{loan} → {intermediate} (Stable.com) → {loan} ({venue})"
     return f"{loan} → {intermediate} ({venue}) → {loan} (Stable.com)"
 
 
@@ -115,11 +135,23 @@ def parse_output_summary(
     *,
     chain: str = "ethereum",
     pair: str = "PYUSD/USDC",
+    swap_order: str = "stable-first",
 ) -> dict[str, str]:
-    loan_symbol, intermediate_symbol = _route_symbols(pair)
-    summary: dict[str, str] = {"flow": _route_flow(chain, pair)}
+    loan_symbol, intermediate_symbol = _route_symbols(chain, pair)
+    effective_swap_order = (
+        str(plan.get("swapOrder") or swap_order) if plan else swap_order
+    )
+    stable_first = (
+        chain in ("ethereum", "solana")
+        and effective_swap_order == "stable-first"
+    )
+    summary: dict[str, str] = {
+        "flow": _route_flow(chain, pair, effective_swap_order)
+    }
 
     if plan:
+        if plan.get("route"):
+            summary["flow"] = str(plan["route"]).replace("->", "→")
         loan_token = plan.get("loanToken")
         intermediate_token = plan.get("intermediateToken")
         if isinstance(loan_token, dict):
@@ -134,22 +166,62 @@ def parse_output_summary(
             summary["loan"] = f"{loan_amount} {loan_symbol}"
 
         matcha = plan.get("matcha")
+        matcha_leg: str | None = None
         if isinstance(matcha, dict):
-            sold = matcha.get("sellLoanToken", matcha.get("sellUSDC"))
-            bought = matcha.get("buyIntermediate", matcha.get("buyUSDT"))
-            if sold is not None and bought is not None:
-                summary["leg1"] = (
-                    f"{sold} {loan_symbol} → {bought} {intermediate_symbol}"
+            sell_token = matcha.get("sellToken")
+            buy_token = matcha.get("buyToken")
+            if isinstance(sell_token, dict) and isinstance(buy_token, dict):
+                matcha_leg = (
+                    f"{sell_token.get('amount')} {sell_token.get('symbol')} → "
+                    f"{buy_token.get('amount')} {buy_token.get('symbol')} (MetaMatcha)"
                 )
+            else:
+                sold = matcha.get("sellLoanToken", matcha.get("sellUSDC"))
+                bought = matcha.get("buyIntermediate", matcha.get("buyUSDT"))
+                if sold is not None and bought is not None:
+                    if stable_first:
+                        matcha_leg = (
+                            f"{sold} {intermediate_symbol} → {bought} {loan_symbol} "
+                            "(MetaMatcha)"
+                        )
+                    else:
+                        matcha_leg = (
+                            f"{sold} {loan_symbol} → {bought} {intermediate_symbol} "
+                            "(MetaMatcha)"
+                        )
 
         stable = plan.get("stable")
+        stable_leg: str | None = None
         if isinstance(stable, dict):
-            sold = stable.get("sellIntermediate", stable.get("sellUSDT"))
-            bought = stable.get("buyLoanToken", stable.get("buyUSDC"))
-            if sold is not None and bought is not None:
-                summary["leg2"] = (
-                    f"{sold} {intermediate_symbol} → {bought} {loan_symbol}"
+            sell_token = stable.get("sellToken")
+            buy_token = stable.get("buyToken")
+            if isinstance(sell_token, dict) and isinstance(buy_token, dict):
+                stable_leg = (
+                    f"{sell_token.get('amount')} {sell_token.get('symbol')} → "
+                    f"{buy_token.get('amount')} {buy_token.get('symbol')} (Stable.com)"
                 )
+            else:
+                sold = stable.get("sellIntermediate", stable.get("sellUSDT"))
+                bought = stable.get("buyLoanToken", stable.get("buyUSDC"))
+                if sold is not None and bought is not None:
+                    if stable_first:
+                        stable_leg = (
+                            f"{sold} {loan_symbol} → {bought} {intermediate_symbol} "
+                            "(Stable.com)"
+                        )
+                    else:
+                        stable_leg = (
+                            f"{sold} {intermediate_symbol} → {bought} {loan_symbol} "
+                            "(Stable.com)"
+                        )
+
+        first_leg, second_leg = (
+            (stable_leg, matcha_leg) if stable_first else (matcha_leg, stable_leg)
+        )
+        if first_leg:
+            summary["leg1"] = first_leg
+        if second_leg:
+            summary["leg2"] = second_leg
 
         gross = plan.get("grossProfit", plan.get("grossProfitAfterFlashFee"))
         if gross is not None:
@@ -215,10 +287,10 @@ def run_arb_command(
     mode: str,
     amount: str,
     slippage_bps: str,
+    swap_order: str = "stable-first",
 ) -> tuple[bool, str, dict[str, str]]:
     env = os.environ.copy()
-    intermediate, loan = pair.split("/", 1)
-    is_stable_first = (loan == "PYUSD" and intermediate == "USDG")
+    loan, intermediate = _route_symbols(chain, pair)
 
     if chain == "solana":
         env["SOL_FLASH_ARB_AMOUNT_USDC"] = amount
@@ -226,19 +298,19 @@ def run_arb_command(
         env["SOL_FLASH_ARB_LOAN_TOKEN"] = loan
         env["SOL_FLASH_ARB_SLIPPAGE_BPS"] = slippage_bps
         env["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"] = intermediate
-        if is_stable_first:
-            env["SOL_FLASH_ARB_SWAP_ORDER"] = "stable-first"
-            env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
-        elif loan != "USDC":
+        env["SOL_FLASH_ARB_SWAP_ORDER"] = swap_order
+        if {loan, intermediate} == {"USDG", "PYUSD"}:
             env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
+            env["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "20"
+        else:
+            env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
         executable = "npx.cmd" if sys.platform == "win32" else "npx"
         cmd = [
             executable,
             "tsx",
             str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
         ]
-        if is_stable_first:
-            cmd.extend(["--swap-order", "stable-first"])
+        cmd.extend(["--swap-order", swap_order])
         if mode == "quote":
             cmd.append("--quote-only")
         else:
@@ -246,22 +318,20 @@ def run_arb_command(
                 ["--send", "--confirm-mainnet", "EXECUTE_SOLANA_FLASH_ARB"]
             )
     elif chain == "ethereum":
-        generic_route = intermediate != "USDT"
-        script_name = "eth_flash_arb_pyusd_usdc.py" if generic_route else "eth_flash_arb.py"
         cmd = [
             sys.executable,
-            str(PROJECT_ROOT / "src" / "engines" / script_name),
+            str(PROJECT_ROOT / "src" / "engines" / "eth_flash_arb_pyusd_usdc.py"),
             "--amount",
             amount,
             "--loan-token",
             loan,
             "--slippage-bps",
             slippage_bps,
+            "--intermediate-token",
+            intermediate,
+            "--swap-order",
+            swap_order,
         ]
-        if generic_route:
-            cmd.extend(["--intermediate-token", intermediate])
-        if is_stable_first:
-            cmd.extend(["--swap-order", "stable-first"])
         if mode == "live":
             cmd.extend(["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"])
     elif chain in ("polygon", "bsc"):
@@ -285,7 +355,8 @@ def run_arb_command(
         return False, f"Unsupported chain: {chain}", {}
 
     add_log(
-        f"Starting {mode} · {chain.title()} · {pair} · {amount} · {slippage_bps} bps",
+        f"CHECK | {chain.title()} | {_route_flow(chain, pair, swap_order)} | "
+        f"maximum {amount} {loan} | {slippage_bps} bps",
         "system",
     )
     timeout_seconds = LIVE_TIMEOUT_SECONDS if mode == "live" else QUOTE_TIMEOUT_SECONDS
@@ -316,21 +387,39 @@ def run_arb_command(
     # EVM stdout is a large JSON plan; stderr contains the human-readable trace.
     _log_process_output(stdout if chain == "solana" else stderr)
     plan = _json_plan(stdout)
-    parsed = parse_output_summary(output, plan, chain=chain, pair=pair)
+    parsed = parse_output_summary(
+        output,
+        plan,
+        chain=chain,
+        pair=pair,
+        swap_order=swap_order,
+    )
     if result.returncode != 0:
-        return False, _error_message(output, result.returncode), parsed
+        message = _error_message(output, result.returncode)
+        add_log(
+            f"NOT EXECUTED | {chain.title()} | "
+            f"{_route_flow(chain, pair, swap_order)} | {message}",
+            "error",
+        )
+        return False, message, parsed
 
-    completion = "Live transaction submitted." if mode == "live" else "Quote ready."
+    completion = (
+        f"CONFIRMED | {chain.title()} | live transaction confirmed"
+        if mode == "live"
+        else f"READY | {chain.title()} | quote passed; nothing was sent"
+    )
     add_log(completion, "success")
     return True, output, parsed
 
 
-def _validated_request(data: Any) -> tuple[str, str, str, str, str]:
+def _validated_request(data: Any) -> tuple[str, str, str, str, str, str]:
     if not isinstance(data, dict):
         raise ValueError("request body must be an object")
     chain = str(data.get("chain", "")).lower()
     pair = str(data.get("pair", "")).upper()
     mode = str(data.get("mode", "")).lower()
+    default_order = "stable-first" if chain in ("ethereum", "solana") else "dex-first"
+    swap_order = str(data.get("swapOrder", default_order)).lower()
     amount = str(data.get("amount", "")).strip()
     slippage_text = str(data.get("slippageBps", "")).strip()
 
@@ -340,6 +429,10 @@ def _validated_request(data: Any) -> tuple[str, str, str, str, str]:
         raise ValueError(f"{pair or 'selected pair'} is not supported on {chain.title()}")
     if mode not in ("quote", "live"):
         raise ValueError("mode must be quote or live")
+    if swap_order not in ("dex-first", "stable-first"):
+        raise ValueError("swap order must be dex-first or stable-first")
+    if chain not in ("ethereum", "solana") and swap_order != "dex-first":
+        raise ValueError(f"{chain.title()} only supports its legacy DEX-first route")
     try:
         parsed_amount = Decimal(amount)
     except (InvalidOperation, ValueError):
@@ -356,7 +449,7 @@ def _validated_request(data: Any) -> tuple[str, str, str, str, str]:
         raise ValueError("slippage must be between 0 and 100 bps")
     if mode == "live" and data.get("confirmation") != LIVE_CONFIRMATION:
         raise PermissionError(f'type "{LIVE_CONFIRMATION}" to authorize a live run')
-    return chain, pair, mode, amount, str(slippage)
+    return chain, pair, mode, amount, str(slippage), swap_order
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -480,7 +573,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         try:
             data = self._read_json_body()
-            chain, pair, mode, amount, slippage_bps = _validated_request(data)
+            chain, pair, mode, amount, slippage_bps, swap_order = _validated_request(data)
         except OverflowError as exc:
             self._json(413, {"ok": False, "error": str(exc)})
             return
@@ -501,6 +594,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 mode,
                 amount,
                 slippage_bps,
+                swap_order,
             )
         finally:
             EXECUTION_LOCK.release()

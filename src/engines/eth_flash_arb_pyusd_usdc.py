@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -1073,6 +1074,60 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+def write_plan(path: str | None, plan: dict[str, Any]) -> None:
+    if not path:
+        return
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(plan, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def record_transaction_receipt(
+    plan: dict[str, Any],
+    web3: Any,
+    transaction_hash: Any,
+    timeout_seconds: float,
+    output_path: str | None = None,
+) -> None:
+    """Record a broadcast conservatively; only a successful receipt is confirmed."""
+    hash_text = str(transaction_hash.hex()).removeprefix("0x")
+    plan["transactionHash"] = f"0x{hash_text}"
+    plan["transactionStatus"] = "submitted"
+    print(
+        f"Submitted: https://etherscan.io/tx/{plan['transactionHash']}",
+        file=sys.stderr,
+        flush=True,
+    )
+    write_plan(output_path, plan)
+    try:
+        receipt = web3.eth.wait_for_transaction_receipt(
+            transaction_hash,
+            timeout=timeout_seconds,
+            poll_latency=1,
+        )
+    except Exception as exc:
+        plan["receiptConfirmation"] = (
+            "timed-out"
+            if type(exc).__name__ == "TimeExhausted"
+            else "rpc-error"
+        )
+        write_plan(output_path, plan)
+        return
+
+    status = int(receipt.get("status", 0))
+    plan["transactionStatus"] = "confirmed" if status == 1 else "reverted"
+    plan["transactionReceipt"] = {
+        "status": status,
+        "blockNumber": int(receipt["blockNumber"]),
+        "gasUsed": int(receipt["gasUsed"]),
+        "effectiveGasPrice": int(receipt.get("effectiveGasPrice", 0)),
+    }
+    write_plan(output_path, plan)
+
+
 def require_web3() -> Any:
     try:
         from web3 import Web3
@@ -1416,8 +1471,8 @@ def parser() -> argparse.ArgumentParser:
         choices=tuple(LOAN_TOKENS.keys()),
         default=setting("ETH_ARB_INTERMEDIATE_TOKEN"),
         help=(
-            "token bought on Matcha and returned through Stable.com; defaults "
-            "to the legacy PYUSD/USDC counterpart"
+            "the other token in the cycle; with --swap-order stable-first this "
+            "is received from Stable.com and sold through MetaMatcha"
         ),
     )
     result.add_argument(
@@ -1454,7 +1509,7 @@ def parser() -> argparse.ArgumentParser:
         "--slippage-bps",
         type=int,
         default=int(setting("ETH_ARB_SLIPPAGE_BPS", "0")),
-        help="Matcha -> Stable slippage tolerance in basis points (0-100)",
+        help="MetaMatcha leg slippage tolerance in basis points (0-100)",
     )
     result.add_argument(
         "--stable-capacity-buffer",
@@ -1483,6 +1538,12 @@ def parser() -> argparse.ArgumentParser:
         type=float,
         default=setting("ETH_ARB_RPC_TIMEOUT_SECONDS", "90"),
         help="timeout in seconds for complex Ethereum RPC simulations",
+    )
+    result.add_argument(
+        "--receipt-timeout",
+        type=float,
+        default=setting("ETH_ARB_RECEIPT_TIMEOUT_SECONDS", "120"),
+        help="seconds to wait for a mined receipt after broadcasting",
     )
     result.add_argument(
         "--aggregators",
@@ -1524,8 +1585,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--swap-order",
         choices=("dex-first", "stable-first"),
-        default=setting("ETH_ARB_SWAP_ORDER", "dex-first"),
-        help="execution order: dex-first (Matcha -> Stable) or stable-first (Stable -> Matcha)",
+        default=setting("ETH_ARB_SWAP_ORDER", "stable-first"),
+        help="execution order: dex-first (MetaMatcha -> Stable) or stable-first (Stable -> MetaMatcha)",
     )
     result.add_argument("--send", action="store_true", help="sign and broadcast after all checks")
     result.add_argument(
@@ -1544,8 +1605,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ArbError("--slippage-bps must be between 0 and 100")
     if not 1 <= args.quote_attempts <= 10:
         raise ArbError("--quote-attempts must be between 1 and 10")
-    if not 1 <= args.rpc_timeout <= 300:
+    if not math.isfinite(args.rpc_timeout) or not 1 <= args.rpc_timeout <= 300:
         raise ArbError("--rpc-timeout must be between 1 and 300 seconds")
+    if not math.isfinite(args.receipt_timeout) or not 1 <= args.receipt_timeout <= 300:
+        raise ArbError("--receipt-timeout must be between 1 and 300 seconds")
     if not 0 <= args.eth_price_buffer_bps <= 1_000:
         raise ArbError("--eth-price-buffer-bps must be between 0 and 1000")
     if args.gas_limit_multiplier < 1:
@@ -1714,7 +1777,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
         print(f"Leg 1 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {loan_symbol} -> {raw_to_amount(stable_quote.amount_out)} {intermediate_symbol}", file=sys.stderr)
-        print(f"Leg 2 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {intermediate_symbol} -> {raw_to_amount(matcha.buy_amount)} {loan_symbol}", file=sys.stderr)
+        print(f"Leg 2 (MetaMatcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {intermediate_symbol} -> {raw_to_amount(matcha.buy_amount)} {loan_symbol}", file=sys.stderr)
         if flash_loan_fee:
             print(
                 f"Flash Loan Fee:          {raw_to_amount(flash_loan_fee)} "
@@ -1859,7 +1922,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             file=sys.stderr,
         )
         print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
-        print(f"Leg 1 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
+        print(f"Leg 1 (MetaMatcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
         print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
         if flash_loan_fee:
             print(
@@ -1919,9 +1982,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     maximum_execution_cost = max_gas_cost + native_execution_cost
     predicted_net = gross_profit - maximum_execution_cost
 
+    if args.swap_order == "stable-first":
+        route_flow = (
+            f"{loan_symbol} -> {intermediate_symbol} (Stable.com) -> "
+            f"{loan_symbol} (MetaMatcha)"
+        )
+        matcha_sell_symbol, matcha_buy_symbol = intermediate_symbol, loan_symbol
+        stable_sell_symbol, stable_buy_symbol = loan_symbol, intermediate_symbol
+    else:
+        route_flow = (
+            f"{loan_symbol} -> {intermediate_symbol} (MetaMatcha) -> "
+            f"{loan_symbol} (Stable.com)"
+        )
+        matcha_sell_symbol, matcha_buy_symbol = loan_symbol, intermediate_symbol
+        stable_sell_symbol, stable_buy_symbol = intermediate_symbol, loan_symbol
+
     plan = {
         "mode": "broadcast" if args.send else "dry-run",
         "chainId": CHAIN_ID,
+        "pair": f"{loan_symbol}/{intermediate_symbol}",
+        "stablePair": f"{stable_sell_symbol}/{stable_buy_symbol}",
+        "dexPair": f"{matcha_sell_symbol}/{matcha_buy_symbol}",
+        "route": route_flow,
+        "swapOrder": args.swap_order,
         "flashLoanProvider": flash_provider.address,
         "flashLoanProviderName": flash_provider.label,
         "flashLoanProviderLiquidity": raw_to_amount(flash_provider.available),
@@ -1948,30 +2031,42 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "capacityAdjusted": capacity_adjusted,
         "matcha": {
             "aggregator": matcha.aggregator,
-            "sellLoanToken": raw_to_amount(matcha.sell_amount),
-            "buyIntermediate": raw_to_amount(matcha.buy_amount),
+            "sellToken": {
+                "symbol": matcha_sell_symbol,
+                "amount": raw_to_amount(matcha.sell_amount),
+            },
+            "buyToken": {
+                "symbol": matcha_buy_symbol,
+                "amount": raw_to_amount(matcha.buy_amount),
+            },
             "target": matcha.target,
             "allowanceTarget": matcha.allowance_target,
         },
         "stable": {
             "pool": STABLE_POOL,
-            "sellIntermediate": raw_to_amount(stable_quote.amount_in),
-            "buyLoanToken": raw_to_amount(stable_quote.amount_out),
+            "sellToken": {
+                "symbol": stable_sell_symbol,
+                "amount": raw_to_amount(stable_quote.amount_in),
+            },
+            "buyToken": {
+                "symbol": stable_buy_symbol,
+                "amount": raw_to_amount(stable_quote.amount_out),
+            },
             "tokenFee": (
                 raw_to_amount(stable_quote.token_fee)
                 if stable_quote.token_fee is not None
                 else None
             ),
-            "capacityIntermediate": (
+            "capacityInput": (
                 raw_to_amount(capacity_raw) if capacity_raw is not None else None
             ),
-            "capacityBufferIntermediate": raw_to_amount(capacity_buffer),
-            "minimumIntermediate": (
+            "capacityBufferInput": raw_to_amount(capacity_buffer),
+            "minimumInput": (
                 raw_to_amount(stable_minimum_raw)
                 if stable_minimum_raw is not None
                 else None
             ),
-            "maximumIntermediate": (
+            "maximumInput": (
                 raw_to_amount(stable_maximum_raw)
                 if stable_maximum_raw is not None
                 else None
@@ -2003,7 +2098,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.send:
         signed = web3.eth.account.sign_transaction(transaction, private_key)
         transaction_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
-        plan["transactionHash"] = transaction_hash.hex()
+        record_transaction_receipt(
+            plan,
+            web3,
+            transaction_hash,
+            args.receipt_timeout,
+            args.output,
+        )
 
     return plan
 
@@ -2028,10 +2129,21 @@ def main() -> int:
                     file=sys.stderr,
                 )
         rendered = json.dumps(plan, indent=2, sort_keys=True)
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as output:
-                output.write(rendered + "\n")
+        write_plan(args.output, plan)
         print(rendered)
+        transaction_status = plan.get("transactionStatus")
+        if transaction_status == "reverted":
+            print(
+                f"ERROR: Ethereum transaction reverted: {plan['transactionHash']}",
+                file=sys.stderr,
+            )
+            return 3
+        if transaction_status == "submitted":
+            print(
+                "WARNING: Ethereum transaction was submitted but its receipt is "
+                "not confirmed; do not submit another route until it is reconciled.",
+                file=sys.stderr,
+            )
         if not args.send:
             print("\nDry run only: no transaction was signed or broadcast.", file=sys.stderr)
         return 0

@@ -1,26 +1,33 @@
-# Ethereum USDC/PYUSD flash-arbitrage prototype
+# Ethereum stablecoin flash arbitrage
 
-This prototype atomically runs:
+The profit sniper uses `eth_flash_arb_pyusd_usdc.py` and the upgraded
+`MorphoMatchaStableArbUsdc` executor. For every ordered pair of USDC, USDG, and
+PYUSD it atomically runs:
 
 ```text
-Morpho flash-loan USDC or PYUSD
-  -> Matcha Meta loan token to USDT
-  -> Stable.com USDT back to the loan token
-  -> repay the same USDC or PYUSD principal
+flash-loan token A
+  -> A to B on MetaMatcha, then B to A on Stable.com
+     OR
+  -> A to B on Stable.com, then B to A on MetaMatcha
+  -> repay A and keep only the guarded A profit
 ```
 
-It uses Morpho rather than Uniswap v4. Morpho exposes a conventional flash-loan
-callback, charges zero flash-loan fee, and has substantially less settlement
-logic for this route. Uniswap v4 can provide flash accounting through
-`PoolManager.unlock`, but every currency delta must be settled before the unlock
-ends; it does not improve this two-venue route.
+`A/B` means flash-loan A and use B as the counter-token. Thus `PYUSD/USDC`
+always borrows and repays PYUSD, and both venue orders are checked. The inverse
+`USDC/PYUSD` is a separate USDC-loan route. Funding selection prefers zero-fee
+Morpho and can fall back to Aave v3 when the selected token lacks Morpho
+liquidity. The older
+`eth_flash_arb.py` USDT route remains available as a separate legacy prototype;
+it is not part of the 24-variant sniper rotation.
 
 ## Files
 
-- `contracts/MorphoMatchaStableArb.sol` is the on-chain atomic executor.
-- `eth_flash_arb.py` requests both quotes, requests a Stable.com signed order,
+- `contracts/MorphoMatchaStableArbUsdc.sol` is the current on-chain atomic executor.
+- `eth_flash_arb_pyusd_usdc.py` requests both quotes, requests a Stable.com signed order,
   constructs the executor call, performs `eth_call`, estimates gas, and emits an
   unsigned transaction plan.
+- `contracts/MorphoMatchaStableArb.sol` and `eth_flash_arb.py` implement the
+  legacy USDT-intermediate route.
 - `requirements-eth.txt` contains the additional Python dependencies.
 
 ## Important limitations
@@ -143,9 +150,12 @@ profit gates:
 The private key is read only from the environment and is not included in output.
 Use a dedicated operator wallet. The transaction is broadcast only when the
 atomic simulation succeeds and predicted profit after the configured maximum gas
-cost remains above `--min-net-profit`.
+cost remains above `--min-net-profit`. After broadcast, the engine waits up to
+`ETH_ARB_RECEIPT_TIMEOUT_SECONDS` for a receipt and reports success only when its
+status is successful. An unconfirmed submission is left explicitly ambiguous so
+the sniper stops rather than risking a duplicate transaction.
 
-## Contract safeguards
+## Legacy USDT contract safeguards
 
 - Ethereum mainnet, Morpho, USDC/PYUSD loan tokens, the USDT intermediate, and
   Stable's swap contract are fixed.

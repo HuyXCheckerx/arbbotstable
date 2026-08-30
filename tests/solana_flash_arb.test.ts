@@ -10,7 +10,9 @@ import {
   bufferedFeeRaw,
   buildStableSwapInstruction,
   capacityLimitedLoanAmount,
+  capacityLimitedStableFirstLoanAmount,
   conservativeCycle,
+  fetchJson,
   finalComputeUnitLimit,
   formatRaw,
   intermediateTokenProgram,
@@ -18,7 +20,12 @@ import {
   parseDecimalToRawCeil,
   parseDecimalToRawFloor,
   parseUiAmountToRaw,
+  parseCli,
+  resolveIntermediateMint,
   resolveLoanMint,
+  assertNoExistingLoanLiability,
+  stableInputSymbol,
+  stableOutputSymbol,
 } from "../src/engines/solana_flash_arb.js";
 import { PublicKey } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
@@ -97,6 +104,83 @@ test("scales the flash loan to Stable's usable capacity", () => {
       53_056_160_000n,
     ),
     50_000_000_000n,
+  );
+});
+
+test("resolves all three sniper tokens as Stable.com output mints", () => {
+  assert.ok(resolveIntermediateMint("USDC").equals(USDC_MINT));
+  assert.ok(resolveIntermediateMint("PYUSD").equals(PYUSD_MINT));
+  assert.ok(resolveIntermediateMint("USDG").equals(USDG_MINT));
+});
+
+test("stable-first sizing cannot exceed Stable's input capacity", () => {
+  assert.equal(stableInputSymbol("stable-first", "PYUSD", "USDG"), "PYUSD");
+  assert.equal(stableInputSymbol("dex-first", "PYUSD", "USDG"), "USDG");
+  assert.equal(stableOutputSymbol("stable-first", "PYUSD", "USDG"), "USDG");
+  assert.equal(stableOutputSymbol("dex-first", "PYUSD", "USDG"), "PYUSD");
+  assert.equal(
+    capacityLimitedStableFirstLoanAmount(
+      100_000_000_000n,
+      100_000_000_000n,
+      32_625_824_000n,
+    ),
+    32_625_824_000n,
+  );
+});
+
+test("does not retry a definitive Jupiter HTTP 400", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(
+      JSON.stringify({ error: "No routes found", errorCode: "NO_ROUTES_FOUND" }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    await assert.rejects(
+      fetchJson(
+        "https://api.jup.ag/swap/v1/quote",
+        {},
+        { httpTimeoutMs: 1_000, httpAttempts: 3 },
+        "Jupiter quote",
+      ),
+      /Jupiter quote failed: Jupiter quote returned HTTP 400/,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("validates CLI route and provider choices", () => {
+  const options = parseCli([
+    "--swap-order",
+    "stable-first",
+    "--provider",
+    "marginfi",
+  ]);
+  assert.equal(options.swapOrder, "stable-first");
+  assert.equal(options.provider, "marginfi");
+  assert.throws(() => parseCli(["--swap-order", "sideways"]), /must be/);
+  assert.throws(() => parseCli(["--provider", "solana"]), /must be/);
+});
+
+test("rejects a Marginfi account with an existing loan liability", () => {
+  const bankAddress = new PublicKey("11111111111111111111111111111111");
+  const account = {
+    balances: [
+      {
+        bankPk: bankAddress,
+        active: true,
+        liabilityShares: { isZero: () => false },
+      },
+    ],
+  };
+  assert.throws(
+    () => assertNoExistingLoanLiability(account as never, bankAddress, "PYUSD"),
+    /already has a PYUSD liability/,
   );
 });
 

@@ -203,13 +203,18 @@ interface Config {
   swapOrder: "dex-first" | "stable-first";
 }
 
-interface CliOptions {
+export interface CliOptions {
   quoteOnly: boolean;
   send: boolean;
   createMarginfiAccount: boolean;
   provider?: "marginfi" | "solend" | "auto";
   swapOrder?: "dex-first" | "stable-first";
   confirmation?: string;
+}
+
+export interface HttpRetryConfig {
+  httpTimeoutMs: number;
+  httpAttempts: number;
 }
 
 interface SwapLeg {
@@ -241,12 +246,25 @@ function envBool(name: string, fallback: boolean): boolean {
   throw new Error(`${name} must be true or false`);
 }
 
+function configuredChoice<T extends string>(
+  name: string,
+  fallback: T,
+  choices: readonly T[],
+): T {
+  const value = (process.env[name]?.trim().toLowerCase() || fallback) as T;
+  if (!choices.includes(value)) {
+    throw new Error(`${name} must be one of: ${choices.join(", ")}`);
+  }
+  return value;
+}
+
 export function resolveIntermediateMint(symbol: string): PublicKey {
+  if (symbol === "USDC") return USDC_MINT;
   if (symbol === "PYUSD") return PYUSD_MINT;
   if (symbol === "USDG") return USDG_MINT;
   if (symbol === "USDT") return USDT_MINT;
   throw new Error(
-    `SOL_FLASH_ARB_INTERMEDIATE_TOKEN must be PYUSD, USDG, or USDT; received ${symbol}`,
+    `SOL_FLASH_ARB_INTERMEDIATE_TOKEN must be USDC, PYUSD, USDG, or USDT; received ${symbol}`,
   );
 }
 
@@ -264,6 +282,22 @@ export function isTwoHopJupiterRoute(
   _intermediateMint: PublicKey,
 ): boolean {
   return false;
+}
+
+export function stableInputSymbol(
+  swapOrder: "dex-first" | "stable-first",
+  loanSymbol: string,
+  intermediateSymbol: string,
+): string {
+  return swapOrder === "stable-first" ? loanSymbol : intermediateSymbol;
+}
+
+export function stableOutputSymbol(
+  swapOrder: "dex-first" | "stable-first",
+  loanSymbol: string,
+  intermediateSymbol: string,
+): string {
+  return swapOrder === "stable-first" ? intermediateSymbol : loanSymbol;
 }
 
 export function intermediateTokenProgram(mint: PublicKey): PublicKey {
@@ -349,6 +383,16 @@ export function capacityLimitedLoanAmount(
   return adjusted;
 }
 
+export function capacityLimitedStableFirstLoanAmount(
+  loanAmountRaw: bigint,
+  stableInputRaw: bigint,
+  usableCapacityRaw: bigint,
+): bigint {
+  return stableInputRaw > usableCapacityRaw
+    ? capacityLimitedLoanAmount(loanAmountRaw, stableInputRaw, usableCapacityRaw)
+    : loanAmountRaw;
+}
+
 export function bufferedFeeRaw(
   feeLamports: bigint,
   solUsd: number,
@@ -412,7 +456,7 @@ function loadKeypair(secret: string): Keypair {
   throw new Error(`SOLANA_PRIVATE_KEY decoded to ${bytes.length} bytes; expected 32 or 64`);
 }
 
-function readConfig(): Config {
+function readConfig(cli: CliOptions): Config {
   const accountValue = process.env.SOL_FLASH_ARB_MARGINFI_ACCOUNT?.trim();
   const apiKeys = (process.env.JUP_API_KEYS || process.env.JUP_API_KEY || "")
     .split(",")
@@ -427,9 +471,27 @@ function readConfig(): Config {
   if (loanMint.equals(intermediateMint)) {
     throw new Error("SOL_FLASH_ARB_LOAN_TOKEN must differ from SOL_FLASH_ARB_INTERMEDIATE_TOKEN");
   }
+  const provider =
+    cli.provider ??
+    configuredChoice(
+      "SOL_FLASH_ARB_PROVIDER",
+      "auto",
+      ["marginfi", "solend", "auto"] as const,
+    );
+  const swapOrder =
+    cli.swapOrder ??
+    configuredChoice(
+      "SOL_FLASH_ARB_SWAP_ORDER",
+      "stable-first",
+      ["dex-first", "stable-first"] as const,
+    );
+  const capacitySymbol = stableInputSymbol(
+    swapOrder,
+    loanSymbol,
+    intermediateSymbol,
+  );
   const capacityBuffer =
-    process.env[`SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_${intermediateSymbol}`] ||
-    process.env.SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_USDT ||
+    process.env[`SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_${capacitySymbol}`] ||
     "1";
   return {
     rpcUrl: requiredEnv("SOLANA_RPC_URL"),
@@ -493,12 +555,12 @@ function readConfig(): Config {
     solUsdBufferBps: envInt("SOL_FLASH_ARB_SOL_PRICE_BUFFER_BPS", 100, 0),
     outputPath: process.env.SOL_FLASH_ARB_OUTPUT_PATH || "/tmp/solana-flash-arb-plan.json",
     commitment: "confirmed",
-    provider: (process.env.SOL_FLASH_ARB_PROVIDER?.trim().toLowerCase() || "auto") as "marginfi" | "solend" | "auto",
-    swapOrder: (process.env.SOL_FLASH_ARB_SWAP_ORDER?.trim().toLowerCase() === "stable-first" ? "stable-first" : "dex-first") as "dex-first" | "stable-first",
+    provider,
+    swapOrder,
   };
 }
 
-function parseCli(argv: string[]): CliOptions {
+export function parseCli(argv: string[]): CliOptions {
   const options: CliOptions = {
     quoteOnly: false,
     send: false,
@@ -511,11 +573,17 @@ function parseCli(argv: string[]): CliOptions {
     else if (arg === "--create-marginfi-account") options.createMarginfiAccount = true;
     else if (arg === "--provider") {
       const p = argv[++index]?.toLowerCase();
-      if (p === "marginfi" || p === "solend" || p === "auto") options.provider = p;
+      if (p !== "marginfi" && p !== "solend" && p !== "auto") {
+        throw new Error("--provider must be marginfi, solend, or auto");
+      }
+      options.provider = p;
     }
     else if (arg === "--swap-order") {
       const order = argv[++index]?.toLowerCase();
-      if (order === "dex-first" || order === "stable-first") options.swapOrder = order;
+      if (order !== "dex-first" && order !== "stable-first") {
+        throw new Error("--swap-order must be dex-first or stable-first");
+      }
+      options.swapOrder = order;
     }
     else if (arg === "--confirm-mainnet") options.confirmation = argv[++index];
     else if (arg === "--help" || arg === "-h") {
@@ -542,10 +610,37 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function fetchJson<T>(
+class HttpResponseError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+  }
+}
+
+function writePlan(outputPath: string, plan: JsonRecord): void {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, `${JSON.stringify(plan, null, 2)}\n`, {
+    mode: 0o600,
+  });
+}
+
+function responseRetryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value) return undefined;
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    return Math.max(0, Math.ceil(Number(value) * 1_000));
+  }
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
+
+export async function fetchJson<T>(
   url: string,
   init: RequestInit,
-  config: Pick<Config, "httpTimeoutMs" | "httpAttempts">,
+  config: HttpRetryConfig,
   description: string,
 ): Promise<T> {
   let lastError: unknown;
@@ -558,21 +653,28 @@ async function fetchJson<T>(
       if (!response.ok) {
         const retryable = response.status === 429 || response.status >= 500;
         const excerpt = body.replace(/\s+/g, " ").slice(0, 300);
-        const failure = new Error(
-          `${description} returned HTTP ${response.status}${excerpt ? `: ${excerpt}` : ""}`,
+        const failure = `${description} returned HTTP ${response.status}${excerpt ? `: ${excerpt}` : ""}`;
+        throw new HttpResponseError(
+          failure,
+          retryable,
+          responseRetryAfterMs(response),
         );
-        if (!retryable || attempt === config.httpAttempts) throw failure;
-        lastError = failure;
       } else {
         return JSON.parse(body) as T;
       }
     } catch (error) {
+      if (error instanceof HttpResponseError && !error.retryable) {
+        throw new Error(`${description} failed: ${error.message}`);
+      }
       lastError = error;
       if (attempt === config.httpAttempts) break;
     } finally {
       clearTimeout(timeout);
     }
-    await new Promise((resolve) => setTimeout(resolve, attempt * 400));
+    const retryAfterMs =
+      lastError instanceof HttpResponseError ? lastError.retryAfterMs : undefined;
+    const delayMs = Math.min(30_000, Math.max(retryAfterMs ?? 0, attempt * 400));
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   throw new Error(`${description} failed: ${errorMessage(lastError)}`);
 }
@@ -653,12 +755,14 @@ async function getStableQuote(
   const quotedInputRaw = parseDecimalToRawFloor(status.amountFrom);
   if (quotedInputRaw !== inputRaw) {
     throw new Error(
-      `Stable.com changed the requested input to ${status.amountFrom} ${config.intermediateSymbol}`,
+      `Stable.com changed the requested input to ${status.amountFrom} ${stableInputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol)}`,
     );
   }
   const outputRaw = parseDecimalToRawFloor(status.amountTo);
   if (outputRaw <= 0n) {
-    throw new Error(`Stable.com returned no ${config.loanSymbol} output`);
+    throw new Error(
+      `Stable.com returned no ${stableOutputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol)} output`,
+    );
   }
   return {
     inputRaw,
@@ -951,7 +1055,7 @@ async function getCapacitySizedCycle(
       const maximumRaw = parseDecimalToRawFloor(String(stableQuote.status.max));
       if (capacityRaw <= 0n) {
         throw new Error(
-          `Stable.com pool has no remaining ${config.intermediateSymbol} capacity`,
+          `Stable.com pool has no remaining ${config.loanSymbol} capacity`,
         );
       }
       const capacityAfterBufferRaw =
@@ -964,7 +1068,25 @@ async function getCapacitySizedCycle(
           : capacityAfterBufferRaw;
       if (usableCapacityRaw < minimumRaw) {
         throw new Error(
-          `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} ${config.intermediateSymbol} is below its ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum order`,
+          `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} ${config.loanSymbol} is below its ${formatRaw(minimumRaw)} ${config.loanSymbol} minimum order`,
+        );
+      }
+      if (stableQuote.inputRaw > usableCapacityRaw) {
+        const adjustedLoanAmountRaw = capacityLimitedStableFirstLoanAmount(
+          loanAmountRaw,
+          stableQuote.inputRaw,
+          usableCapacityRaw,
+        );
+        console.log(
+          `Stable.com capacity reduced the loan from ${formatRaw(loanAmountRaw)} to ${formatRaw(adjustedLoanAmountRaw)} ${config.loanSymbol}; requesting fresh quotes...`,
+        );
+        loanAmountRaw = adjustedLoanAmountRaw;
+        capacityAdjusted = true;
+        continue;
+      }
+      if (stableQuote.inputRaw < minimumRaw) {
+        throw new Error(
+          `Sized Stable.com order ${formatRaw(stableQuote.inputRaw)} ${config.loanSymbol} is below its ${formatRaw(minimumRaw)} ${config.loanSymbol} minimum`,
         );
       }
 
@@ -1225,7 +1347,7 @@ async function selectMarginfiAccount(
   return client.fetchAccount(addresses[0], true);
 }
 
-function assertNoExistingLoanLiability(
+export function assertNoExistingLoanLiability(
   account: MarginfiAccountWrapper,
   bankAddress: PublicKey,
   loanSymbol: string,
@@ -1507,7 +1629,12 @@ function wrapConnectionWithResilientBatchRequest(connection: Connection): Connec
 
 async function main(): Promise<void> {
   const cli = parseCli(process.argv.slice(2));
-  const config = readConfig();
+  const config = readConfig(cli);
+  if (config.provider === "solend") {
+    throw new Error(
+      "Solend flash loans are not implemented by this engine; use --provider marginfi or auto",
+    );
+  }
   const connection = wrapConnectionWithResilientBatchRequest(
     new Connection(config.rpcUrl, config.commitment),
   );
@@ -1558,6 +1685,7 @@ async function main(): Promise<void> {
       );
     }
     loanBank = loanBanks[0];
+    assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
     try {
       const vaultBalance = await connection.getTokenAccountBalance(loanBank.liquidityVault);
       const vaultRaw = BigInt(vaultBalance.value.amount);
@@ -1575,11 +1703,22 @@ async function main(): Promise<void> {
   const sized = await getCapacitySizedCycle(config, walletAddress, availableBankLiquidityRaw);
   const { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
   const isTwoHop = isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);
+  const routeFlow = config.swapOrder === "stable-first"
+    ? `${config.loanSymbol} -> ${config.intermediateSymbol} (Stable.com) -> ${config.loanSymbol} (Jupiter)`
+    : `${config.loanSymbol} -> ${config.intermediateSymbol} (Jupiter) -> ${config.loanSymbol} (Stable.com)`;
+  console.log(`Route: ${routeFlow}`);
   console.log(`Flash-loan principal: ${formatRaw(loanAmountRaw)} ${config.loanSymbol}`);
   console.log(
-    `Stable.com capacity: ${formatRaw(sized.capacityRaw)} ${config.intermediateSymbol} (${formatRaw(sized.usableCapacityRaw)} usable)`,
+    `Stable.com capacity: ${formatRaw(sized.capacityRaw)} ${stableInputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol)} (${formatRaw(sized.usableCapacityRaw)} usable)`,
   );
-  if (isTwoHop && secondJupiterQuote) {
+  if (config.swapOrder === "stable-first") {
+    console.log(
+      `Leg 1 (Stable.com): ${config.loanSymbol} -> ${config.intermediateSymbol} | executable output: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+    );
+    console.log(
+      `Leg 2 (Jupiter): ${config.intermediateSymbol} -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
+    );
+  } else if (isTwoHop && secondJupiterQuote) {
     console.log(
       `Leg 1 (Jupiter): ${config.loanSymbol} -> USDC -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
     );
@@ -1588,10 +1727,14 @@ async function main(): Promise<void> {
       `Leg 1 (Jupiter): ${config.loanSymbol} -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
     );
   }
+  if (config.swapOrder !== "stable-first") {
+    console.log(
+      `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
+    );
+  }
   console.log(
-    `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
+    `Stable.com token fee: ${formatRaw(stableQuote.tokenFeeRaw)} ${stableOutputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol)}`,
   );
-  console.log(`Stable.com token fee: ${formatRaw(stableQuote.tokenFeeRaw)} ${config.loanSymbol}`);
   console.log(`Guaranteed gross result: ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol}`);
 
   if (cycle.grossProfitRaw < config.minimumGrossProfitRaw) {
@@ -1724,11 +1867,27 @@ async function main(): Promise<void> {
   console.log(`Buffered execution cost: ${formatRaw(executionCostRaw)} ${config.loanSymbol}`);
   console.log(`Guaranteed net result: ${formatRaw(netProfitRaw)} ${config.loanSymbol}`);
 
-  const plan = {
+  const stableFromSymbol = stableInputSymbol(
+    config.swapOrder,
+    config.loanSymbol,
+    config.intermediateSymbol,
+  );
+  const stableToSymbol = stableOutputSymbol(
+    config.swapOrder,
+    config.loanSymbol,
+    config.intermediateSymbol,
+  );
+  const plan: JsonRecord = {
     createdAt: new Date().toISOString(),
     wallet: walletAddress.toBase58(),
     marginfiAccount: account.address.toBase58(),
-    pair: `${config.intermediateSymbol}/${config.loanSymbol}`,
+    pair: `${config.loanSymbol}/${config.intermediateSymbol}`,
+    stablePair: `${stableFromSymbol}/${stableToSymbol}`,
+    dexPair: config.swapOrder === "dex-first"
+      ? `${config.loanSymbol}/${config.intermediateSymbol}`
+      : `${config.intermediateSymbol}/${config.loanSymbol}`,
+    route: routeFlow,
+    swapOrder: config.swapOrder,
     loanSymbol: config.loanSymbol,
     intermediateSymbol: config.intermediateSymbol,
     marginfiBank: loanBank.address.toBase58(),
@@ -1755,10 +1914,7 @@ async function main(): Promise<void> {
     secondJupiterQuote,
     stableStatus: stableQuote.status,
   };
-  fs.mkdirSync(path.dirname(config.outputPath), { recursive: true });
-  fs.writeFileSync(config.outputPath, `${JSON.stringify(plan, null, 2)}\n`, {
-    mode: 0o600,
-  });
+  writePlan(config.outputPath, plan);
   console.log(`Plan: ${config.outputPath}`);
 
   if (netProfitRaw < config.minimumNetProfitRaw) {
@@ -1777,6 +1933,9 @@ async function main(): Promise<void> {
     preflightCommitment: "processed",
     maxRetries: 3,
   });
+  plan.transactionSignature = signature;
+  plan.transactionStatus = "submitted";
+  writePlan(config.outputPath, plan);
   console.log(`Submitted: https://solscan.io/tx/${signature}`);
   const confirmation = await connection.confirmTransaction(
     {
@@ -1787,8 +1946,13 @@ async function main(): Promise<void> {
     config.commitment,
   );
   if (confirmation.value.err) {
+    plan.transactionStatus = "reverted";
+    plan.transactionError = confirmation.value.err;
+    writePlan(config.outputPath, plan);
     throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
   }
+  plan.transactionStatus = "confirmed";
+  writePlan(config.outputPath, plan);
   console.log(`Confirmed: ${signature}`);
 }
 

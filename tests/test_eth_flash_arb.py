@@ -1,8 +1,10 @@
 import unittest
 from decimal import Decimal
+import json
 import os
 from unittest.mock import patch
 import sys
+import tempfile
 from pathlib import Path
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
@@ -105,6 +107,7 @@ class EthereumFlashArbTests(unittest.TestCase):
             "ETH_ARB_INTERMEDIATE_TOKEN": "USDG",
             "ETH_ARB_STABLECOIN_EXECUTOR": TARGET,
             "ETH_ARB_FLASH_PROVIDER": "uniswap-v4",
+            "ETH_ARB_RECEIPT_TIMEOUT_SECONDS": "45",
         }
         with patch.dict(os.environ, configured, clear=False):
             args = pyusd_arb.parser().parse_args([])
@@ -112,6 +115,7 @@ class EthereumFlashArbTests(unittest.TestCase):
         self.assertEqual(args.intermediate_token, "USDG")
         self.assertEqual(args.executor, TARGET)
         self.assertEqual(args.flash_provider, "uniswap-v4")
+        self.assertEqual(args.receipt_timeout, 45.0)
 
     def test_flash_provider_auto_falls_back_to_aave_v3_for_usdg(self):
         provider = pyusd_arb.select_flash_provider(
@@ -426,6 +430,59 @@ class EthereumFlashArbTests(unittest.TestCase):
             wei_cost_usdc_raw(4_000_000_000_000_000, Decimal("3000")),
             12_000_000,
         )
+
+    def test_broadcast_is_confirmed_only_after_successful_receipt(self):
+        class FakeHash:
+            def hex(self):
+                return "abc123"
+
+        class FakeEth:
+            def wait_for_transaction_receipt(self, *_args, **_kwargs):
+                return {
+                    "status": 1,
+                    "blockNumber": 123,
+                    "gasUsed": 456,
+                    "effectiveGasPrice": 789,
+                }
+
+        plan = {}
+        pyusd_arb.record_transaction_receipt(
+            plan,
+            type("FakeWeb3", (), {"eth": FakeEth()})(),
+            FakeHash(),
+            10,
+        )
+
+        self.assertEqual(plan["transactionStatus"], "confirmed")
+        self.assertEqual(plan["transactionHash"], "0xabc123")
+        self.assertEqual(plan["transactionReceipt"]["status"], 1)
+
+    def test_receipt_timeout_remains_ambiguous_not_successful(self):
+        TimeExhausted = type("TimeExhausted", (Exception,), {})
+
+        class FakeHash:
+            def hex(self):
+                return "def456"
+
+        class FakeEth:
+            def wait_for_transaction_receipt(self, *_args, **_kwargs):
+                raise TimeExhausted()
+
+        plan = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            output = str(Path(temporary) / "plan.json")
+            pyusd_arb.record_transaction_receipt(
+                plan,
+                type("FakeWeb3", (), {"eth": FakeEth()})(),
+                FakeHash(),
+                10,
+                output,
+            )
+            persisted = json.loads(Path(output).read_text())
+
+        self.assertEqual(plan["transactionStatus"], "submitted")
+        self.assertEqual(plan["receiptConfirmation"], "timed-out")
+        self.assertEqual(persisted["transactionStatus"], "submitted")
 
 
 if __name__ == "__main__":
