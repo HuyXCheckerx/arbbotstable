@@ -17,14 +17,12 @@ import {
   formatRaw,
   intermediateTokenProgram,
   isTwoHopJupiterRoute,
-  jupiterRouteConstraints,
   parseDecimalToRawCeil,
   parseDecimalToRawFloor,
   parseUiAmountToRaw,
   parseCli,
   resolveIntermediateMint,
   resolveLoanMint,
-  shouldFallbackToJupiterLite,
   assertNoExistingLoanLiability,
   stableInputSymbol,
   stableOutputSymbol,
@@ -59,21 +57,6 @@ test("identifies direct Jupiter routing for atomic flash loans", () => {
   assert.equal(isTwoHopJupiterRoute(USDC_MINT, PYUSD_MINT), false);
   assert.equal(isTwoHopJupiterRoute(USDC_MINT, USDG_MINT), false);
   assert.equal(isTwoHopJupiterRoute(PYUSD_MINT, USDC_MINT), false);
-});
-
-test("gives PYUSD/USDG enough accounts for Jupiter-managed USDC routing", () => {
-  assert.deepEqual(jupiterRouteConstraints(PYUSD_MINT, USDG_MINT, 20, true), {
-    maxAccounts: 24,
-    onlyDirectRoutes: false,
-  });
-  assert.deepEqual(jupiterRouteConstraints(USDG_MINT, PYUSD_MINT, 30, true), {
-    maxAccounts: 30,
-    onlyDirectRoutes: false,
-  });
-  assert.deepEqual(jupiterRouteConstraints(USDC_MINT, PYUSD_MINT, 20, true), {
-    maxAccounts: 20,
-    onlyDirectRoutes: true,
-  });
 });
 
 test("parses and formats six-decimal stablecoin amounts exactly", () => {
@@ -169,30 +152,6 @@ test("does not retry a definitive Jupiter HTTP 400", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
-});
-
-test("falls back to Jupiter Lite only for api.jup.ag authentication failures", () => {
-  assert.equal(
-    shouldFallbackToJupiterLite(
-      "https://api.jup.ag/swap/v1",
-      new Error("Jupiter quote returned HTTP 401: Unauthorized"),
-    ),
-    true,
-  );
-  assert.equal(
-    shouldFallbackToJupiterLite(
-      "https://lite-api.jup.ag/swap/v1",
-      new Error("Jupiter quote returned HTTP 401: Unauthorized"),
-    ),
-    false,
-  );
-  assert.equal(
-    shouldFallbackToJupiterLite(
-      "https://api.jup.ag/swap/v1",
-      new Error("Jupiter quote returned HTTP 400: No routes found"),
-    ),
-    false,
-  );
 });
 
 test("validates CLI route and provider choices", () => {

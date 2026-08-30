@@ -44,17 +44,12 @@ current `balance`, leaves the matching capacity buffer unused, and re-quotes at
 a smaller loan size when necessary. This applies to both venue orders; neither
 route can request more than Stable.com's reported input pool.
 
-The default Jupiter account ceiling is 20 for ordinary pairs. PYUSD/USDG routes
-automatically use at least 24 because the profitable Jupiter return route needs
-a USDC hop; 20 accounts can force a materially worse quote. Jupiter instructions
-reuse the wallet's existing token accounts instead of shared route accounts to
-keep the atomic transaction compact. Every built transaction is still
+The default Jupiter account ceiling is 20. Every built transaction is still
 serialized and rejected if the combined Marginfi, Jupiter, and Stable.com
-instructions exceed Solana's 1,232-byte wire limit.
-
-The engine uses Jupiter Lite when no API key is configured and falls back to it
-when `api.jup.ag` rejects a configured key with HTTP 401. The paid endpoint is
-still used when its key is accepted.
+instructions exceed Solana's 1,232-byte wire limit. The directional PYUSD/USDG
+Jupiter return markets may require a Jupiter-managed hop through USDC; when one
+direction cannot fit atomically, the sniper marks that direction unavailable
+and waits for its cooldown instead of repeatedly calling the quote services.
 
 If the wallet has no Marginfi account, create a dedicated empty one once:
 
@@ -82,11 +77,10 @@ transaction without sending it:
 npm run solana:flash
 ```
 
-For dex-first routes, the Stable.com leg spends Jupiter's
-`otherAmountThreshold`, not its optimistic output. For stable-first routes, the
-profitability check likewise uses Jupiter's minimum acceptable return. The bot
-reads Stable.com's executable output from `/swap/status`, then requests the
-signed Solana instruction from `/swap/create/singleChain`. Net profitability
+The Stable.com leg spends the first Jupiter leg's `otherAmountThreshold`, not
+its optimistic output. The bot first reads Stable.com's executable output from
+`/swap/status`, then requests the signed Solana instruction from
+`/swap/create/singleChain`. The profitability check uses that signed output and
 subtracts the RPC-calculated network fee, any Stable native execution fee, and
 a SOL-price buffer.
 

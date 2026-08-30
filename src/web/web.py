@@ -301,7 +301,7 @@ def run_arb_command(
         env["SOL_FLASH_ARB_SWAP_ORDER"] = swap_order
         if {loan, intermediate} == {"USDG", "PYUSD"}:
             env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
-            env["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "24"
+            env["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "20"
         else:
             env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
         executable = "npx.cmd" if sys.platform == "win32" else "npx"
