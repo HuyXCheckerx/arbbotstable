@@ -120,6 +120,7 @@ class Outcome:
 class CooldownPolicy:
     transient_base_seconds: float
     transient_max_seconds: float
+    provider_access_seconds: float
     no_route_seconds: float
     capacity_seconds: float
     unstable_capacity_seconds: float
@@ -336,6 +337,17 @@ def execution_detail(route: Route, stdout: str) -> str | None:
 
 def failure_category(detail: str) -> str:
     lowered = detail.lower()
+    matcha_access_block = (
+        "http 403" in lowered
+        and ("cloudflare" in lowered or "access blocked" in lowered)
+        and ("matcha" in lowered or "metamatcha" in lowered)
+    )
+    zero_ex_auth_block = (
+        ("http 401" in lowered or "http 403" in lowered)
+        and ("api.0x.org" in lowered or "official 0x" in lowered)
+    )
+    if matcha_access_block or zero_ex_auth_block:
+        return "access-blocked-matcha"
     if (
         "no_routes_found" in lowered
         or "no routes found" in lowered
@@ -372,7 +384,12 @@ def failure_category(detail: str) -> str:
         return "transient-stable"
     if transient and "jupiter" in lowered:
         return "transient-jupiter"
-    if transient and ("matcha" in lowered or "metamatcha" in lowered):
+    if transient and (
+        "matcha" in lowered
+        or "metamatcha" in lowered
+        or "api.0x.org" in lowered
+        or "official 0x" in lowered
+    ):
         return "transient-matcha"
     if transient:
         return "transient-rpc"
@@ -455,6 +472,16 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
         return f"MetaMatcha is temporarily unavailable{suffix}"
+    if category == "access-blocked-matcha":
+        if "api.0x.org" in lowered or "official 0x" in lowered:
+            return (
+                "the official 0x API rejected this request (HTTP 401/403); "
+                "check ETH_ARB_ZERO_EX_API_KEY and this machine's egress"
+            )
+        return (
+            "MetaMatcha denied this machine's network access (Cloudflare HTTP 403); "
+            "configure the official 0x quote provider or use an allowed egress"
+        )
     if category == "transient-rpc":
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
@@ -519,6 +546,7 @@ def outcome_label(outcome: Outcome) -> str:
         "transient-jupiter",
         "transient-matcha",
         "transient-rpc",
+        "access-blocked-matcha",
     }:
         return "PAUSED"
     return "ERROR"
@@ -857,6 +885,14 @@ def worker(
                     dependency_label(dependency),
                     cooldown_policy.no_route_seconds,
                 )
+            elif outcome.category == "access-blocked-matcha":
+                dependency = "metamatcha:ethereum"
+                backoff.block(dependency, cooldown_policy.provider_access_seconds)
+                logger.info(
+                    "PAUSE   | %-17s | %.0fs | provider denied this machine's access",
+                    dependency_label(dependency),
+                    cooldown_policy.provider_access_seconds,
+                )
             elif outcome.category == "capacity":
                 route_deadlines[route.key] = (
                     time.monotonic() + cooldown_policy.capacity_seconds
@@ -965,6 +1001,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=float(os.getenv("SNIPER_MAX_TRANSIENT_BACKOFF_SECONDS", "300")),
     )
     parser.add_argument(
+        "--provider-access-cooldown-seconds",
+        type=float,
+        default=float(os.getenv("SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS", "3600")),
+    )
+    parser.add_argument(
         "--no-route-cooldown-seconds",
         type=float,
         default=float(os.getenv("SNIPER_NO_ROUTE_COOLDOWN_SECONDS", "300")),
@@ -1020,6 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
     cooldown_values = {
         "--transient-backoff-seconds": args.transient_backoff_seconds,
         "--max-transient-backoff-seconds": args.max_transient_backoff_seconds,
+        "--provider-access-cooldown-seconds": args.provider_access_cooldown_seconds,
         "--no-route-cooldown-seconds": args.no_route_cooldown_seconds,
         "--capacity-cooldown-seconds": args.capacity_cooldown_seconds,
         "--unstable-capacity-cooldown-seconds": args.unstable_capacity_cooldown_seconds,
@@ -1077,6 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
         cooldown_policy = CooldownPolicy(
             transient_base_seconds=args.transient_backoff_seconds,
             transient_max_seconds=args.max_transient_backoff_seconds,
+            provider_access_seconds=args.provider_access_cooldown_seconds,
             no_route_seconds=args.no_route_cooldown_seconds,
             capacity_seconds=args.capacity_cooldown_seconds,
             unstable_capacity_seconds=args.unstable_capacity_cooldown_seconds,

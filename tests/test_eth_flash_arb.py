@@ -65,6 +65,67 @@ def matcha_response(buy_amount, simulation_result="success", include_data=True):
 
 
 class EthereumFlashArbTests(unittest.TestCase):
+    def test_cloudflare_block_is_concise_and_distinct_from_a_transient_error(self):
+        class Response:
+            status_code = 403
+            text = "<html><title>Attention Required! | Cloudflare</title></html>"
+            headers = {"cf-ray": "test"}
+
+        with self.assertRaisesRegex(
+            pyusd_arb.ProviderAccessBlockedError,
+            r"access blocked by Cloudflare \(HTTP 403\)",
+        ) as caught:
+            pyusd_arb.HttpJsonClient._decode(
+                Response(),
+                "https://meta.matcha.xyz/api/competitions",
+            )
+
+        self.assertNotIn("<html>", str(caught.exception))
+
+    def test_official_zero_ex_quote_fallback_normalizes_allowance_holder_route(self):
+        class RecordingHttp:
+            def __init__(self):
+                self.official_headers = None
+
+            def get(self, url, *, headers=None):
+                if url.startswith("https://meta.matcha.xyz"):
+                    raise pyusd_arb.ProviderAccessBlockedError("Cloudflare HTTP 403")
+                self.official_headers = headers
+                return {
+                    "liquidityAvailable": True,
+                    "sellAmount": "50000000000",
+                    "buyAmount": "50011000000",
+                    "issues": {
+                        "allowance": {
+                            "spender": ALLOWANCE_TARGET,
+                            "actual": "0",
+                        }
+                    },
+                    "transaction": {
+                        "to": TARGET,
+                        "data": "0x12345678",
+                        "value": "0",
+                        "gas": "245000",
+                    },
+                }
+
+        http = RecordingHttp()
+        client = pyusd_arb.MatchaClient(http, zero_ex_api_key="test-key")
+        responses = client.quotes(
+            TARGET,
+            50_000_000_000,
+            1,
+            ("0x",),
+            sell_token_address=PYUSD,
+            buy_token_address=pyusd_arb.USDC,
+        )
+        quote = pyusd_arb.select_best_matcha_quote(responses, 50_000_000_000)
+
+        self.assertEqual(quote.aggregator, "0x-official")
+        self.assertEqual(quote.allowance_target, ALLOWANCE_TARGET)
+        self.assertEqual(quote.buy_amount, 50_011_000_000)
+        self.assertEqual(http.official_headers["0x-api-key"], "test-key")
+
     def test_pyusd_route_checksums_lowercase_matcha_addresses_for_web3(self):
         quote = pyusd_arb.MatchaQuote(
             aggregator="1inch",
@@ -108,6 +169,8 @@ class EthereumFlashArbTests(unittest.TestCase):
             "ETH_ARB_STABLECOIN_EXECUTOR": TARGET,
             "ETH_ARB_FLASH_PROVIDER": "uniswap-v4",
             "ETH_ARB_RECEIPT_TIMEOUT_SECONDS": "45",
+            "ETH_ARB_QUOTE_PROVIDER": "zero-ex",
+            "ETH_ARB_ZERO_EX_BASE_URL": "https://zero-ex.example",
         }
         with patch.dict(os.environ, configured, clear=False):
             args = pyusd_arb.parser().parse_args([])
@@ -116,6 +179,8 @@ class EthereumFlashArbTests(unittest.TestCase):
         self.assertEqual(args.executor, TARGET)
         self.assertEqual(args.flash_provider, "uniswap-v4")
         self.assertEqual(args.receipt_timeout, 45.0)
+        self.assertEqual(args.quote_provider, "zero-ex")
+        self.assertEqual(args.zero_ex_base_url, "https://zero-ex.example")
 
     def test_flash_provider_auto_falls_back_to_aave_v3_for_usdg(self):
         provider = pyusd_arb.select_flash_provider(

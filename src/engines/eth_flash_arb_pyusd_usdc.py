@@ -19,6 +19,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any, Iterable
+from urllib.parse import urlencode
 import uuid
 
 try:
@@ -55,6 +56,7 @@ AAVE_V3_POOL = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
 AAVE_V3_DATA_PROVIDER = "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD"
 STABLE_POOL = "0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da"
 MATCHA_BASE_URL = "https://meta.matcha.xyz"
+ZERO_EX_BASE_URL = "https://api.0x.org"
 STABLE_BASE_URL = "https://api-defi.stable.com"
 BINANCE_ETH_PRICE_URL = (
     "https://data-api.binance.vision/api/v3/ticker/price?symbol=ETHUSDC"
@@ -359,6 +361,10 @@ class ArbError(RuntimeError):
 
 
 class RetryableArbError(ArbError):
+    pass
+
+
+class ProviderAccessBlockedError(ArbError):
     pass
 
 
@@ -826,17 +832,10 @@ class HttpJsonClient:
             {
                 "accept": "application/json, text/plain, */*",
                 "accept-language": "en-US,en;q=0.9",
-                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-site",
                 "user-agent": user_agent,
-                "accept-language": "en-US,en;q=0.9",
-                "sec-ch-ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"macOS"',
             }
         )
         cookies = os.environ.get("ETH_ARB_MATCHA_COOKIES") or os.environ.get("MATCHA_COOKIES")
@@ -875,13 +874,19 @@ class HttpJsonClient:
     def _decode(response: Any, url: str) -> Any:
         excerpt = " ".join(response.text.split())[:400]
         if response.status_code >= 400:
-            cloudflare = (
-                " Cloudflare may be blocking this undocumented API."
-                if response.status_code == 403
-                else ""
+            response_headers = getattr(response, "headers", {}) or {}
+            cloudflare_block = response.status_code in (403, 503) and (
+                "cloudflare" in response.text.lower()
+                or "cf-ray" in {str(key).lower() for key in response_headers}
             )
+            if cloudflare_block:
+                raise ProviderAccessBlockedError(
+                    f"{url} access blocked by Cloudflare "
+                    f"(HTTP {response.status_code}); the provider may reject "
+                    "data-center egress IPs"
+                )
             detail = f": {excerpt}" if excerpt else ""
-            message = f"{url} returned HTTP {response.status_code}{detail}.{cloudflare}"
+            message = f"{url} returned HTTP {response.status_code}{detail}"
             if response.status_code in (429, 502, 503, 504):
                 raise RetryableArbError(message)
             raise ArbError(message)
@@ -896,9 +901,20 @@ class HttpJsonClient:
 
 
 class MatchaClient:
-    def __init__(self, http: HttpJsonClient, base_url: str = MATCHA_BASE_URL):
+    def __init__(
+        self,
+        http: HttpJsonClient,
+        base_url: str = MATCHA_BASE_URL,
+        *,
+        quote_provider: str = "auto",
+        zero_ex_api_key: str | None = None,
+        zero_ex_base_url: str = ZERO_EX_BASE_URL,
+    ):
         self.http = http
         self.base_url = base_url.rstrip("/")
+        self.quote_provider = quote_provider
+        self.zero_ex_api_key = zero_ex_api_key
+        self.zero_ex_base_url = zero_ex_base_url.rstrip("/")
         self.headers = {
             "origin": "https://matcha.xyz",
             "referer": "https://matcha.xyz/",
@@ -912,7 +928,7 @@ class MatchaClient:
         value = first_key(payload, ("price", "gasPrice", "fast", "standard"))
         return parse_integer(value, "Matcha gas price")
 
-    def quotes(
+    def _matcha_quotes(
         self,
         executor: str,
         sell_amount: int,
@@ -953,17 +969,123 @@ class MatchaClient:
 
         responses: list[tuple[str, Any]] = []
         errors: list[str] = []
+        access_blocks: list[ProviderAccessBlockedError] = []
         selected = tuple(aggregators)
         with ThreadPoolExecutor(max_workers=min(4, len(selected))) as pool:
             futures = {pool.submit(fetch, name): name for name in selected}
             for future in as_completed(futures):
                 try:
                     responses.append(future.result())
+                except ProviderAccessBlockedError as exc:
+                    access_blocks.append(exc)
                 except ArbError as exc:
                     errors.append(f"{futures[future]}: {exc}")
         if not responses:
+            if access_blocks:
+                raise access_blocks[0]
             raise ArbError("all Matcha quote requests failed: " + "; ".join(errors))
         return responses
+
+    def _zero_ex_quotes(
+        self,
+        executor: str,
+        sell_amount: int,
+        slippage_bps: int,
+        sell_token_address: str,
+        buy_token_address: str,
+    ) -> list[tuple[str, Any]]:
+        if not self.zero_ex_api_key:
+            raise ArbError(
+                "official 0x quote provider requires ETH_ARB_ZERO_EX_API_KEY "
+                "or ZERO_EX_API_KEY"
+            )
+        query = urlencode(
+            {
+                "chainId": CHAIN_ID,
+                "sellToken": sell_token_address,
+                "buyToken": buy_token_address,
+                "sellAmount": sell_amount,
+                "taker": executor,
+                "slippageBps": slippage_bps,
+            }
+        )
+        payload = self.http.get(
+            f"{self.zero_ex_base_url}/swap/allowance-holder/quote?{query}",
+            headers={
+                "0x-api-key": self.zero_ex_api_key,
+                "0x-version": "v2",
+            },
+        )
+        if not isinstance(payload, dict):
+            raise ArbError("official 0x quote response is not an object")
+        if payload.get("liquidityAvailable") is False:
+            raise ArbError("official 0x API has no liquidity for this route")
+
+        transaction = payload.get("transaction")
+        issues = payload.get("issues")
+        allowance_issue = issues.get("allowance") if isinstance(issues, dict) else None
+        allowance_target = payload.get("allowanceTarget")
+        if not allowance_target and isinstance(allowance_issue, dict):
+            allowance_target = allowance_issue.get("spender")
+        if not isinstance(transaction, dict) or not allowance_target:
+            raise ArbError(
+                "official 0x quote has no transaction or AllowanceHolder spender"
+            )
+
+        normalized = {
+            "allowanceHolder": {
+                # The executor performs its own full atomic eth_call simulation.
+                # A 0x simulation may be incomplete because the flash-borrowed
+                # sell tokens are intentionally absent before execution.
+                "simulation": {"result": "success"},
+                "quote": {
+                    "transaction": transaction,
+                    "allowanceTarget": allowance_target,
+                    "sellAmount": payload.get("sellAmount"),
+                    "buyAmount": payload.get("buyAmount"),
+                    "gas": transaction.get("gas"),
+                    "gasPrice": transaction.get("gasPrice"),
+                },
+            }
+        }
+        return [("0x-official", normalized)]
+
+    def quotes(
+        self,
+        executor: str,
+        sell_amount: int,
+        slippage_bps: int,
+        aggregators: Iterable[str],
+        sell_token_address: str = PYUSD,
+        buy_token_address: str = USDC,
+    ) -> list[tuple[str, Any]]:
+        if self.quote_provider == "zero-ex":
+            return self._zero_ex_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+            )
+        try:
+            return self._matcha_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                aggregators,
+                sell_token_address,
+                buy_token_address,
+            )
+        except ArbError:
+            if self.quote_provider != "auto" or not self.zero_ex_api_key:
+                raise
+            return self._zero_ex_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+            )
 
 
 class StableClient:
@@ -1564,6 +1686,20 @@ def parser() -> argparse.ArgumentParser:
         default=setting("ETH_ARB_MATCHA_BASE_URL", MATCHA_BASE_URL),
     )
     result.add_argument(
+        "--quote-provider",
+        choices=("auto", "matcha", "zero-ex"),
+        default=setting("ETH_ARB_QUOTE_PROVIDER", "auto"),
+        help=(
+            "Ethereum DEX quote source: auto uses MetaMatcha and falls back to "
+            "the official 0x API when a key is configured"
+        ),
+    )
+    result.add_argument(
+        "--zero-ex-base-url",
+        default=setting("ETH_ARB_ZERO_EX_BASE_URL", ZERO_EX_BASE_URL),
+        help="official 0x API base URL",
+    )
+    result.add_argument(
         "--stable-base-url",
         default=setting("ETH_ARB_STABLE_BASE_URL", STABLE_BASE_URL),
     )
@@ -1613,6 +1749,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ArbError("--eth-price-buffer-bps must be between 0 and 1000")
     if args.gas_limit_multiplier < 1:
         raise ArbError("--gas-limit-multiplier must be at least 1")
+    zero_ex_api_key = setting("ETH_ARB_ZERO_EX_API_KEY") or setting("ZERO_EX_API_KEY")
+    if args.quote_provider == "zero-ex" and not zero_ex_api_key:
+        raise ArbError(
+            "--quote-provider zero-ex requires ETH_ARB_ZERO_EX_API_KEY "
+            "or ZERO_EX_API_KEY"
+        )
 
     requested_loan_amount = amount_to_raw(args.amount)
     loan_amount = requested_loan_amount
@@ -1681,7 +1823,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
     )
     http = HttpJsonClient(args.timeout, user_agent)
-    matcha_client = MatchaClient(http, args.matcha_base_url)
+    matcha_client = MatchaClient(
+        http,
+        args.matcha_base_url,
+        quote_provider=args.quote_provider,
+        zero_ex_api_key=zero_ex_api_key,
+        zero_ex_base_url=args.zero_ex_base_url,
+    )
     stable_client = StableClient(http, args.stable_base_url)
 
     def fetch_eth_price(primary_url: str) -> Decimal:

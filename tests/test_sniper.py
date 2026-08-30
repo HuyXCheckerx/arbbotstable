@@ -345,6 +345,26 @@ class CrosschainSniperTests(unittest.TestCase):
         )
         self.assertEqual(
             failure_category(
+                "https://meta.matcha.xyz/api/competitions access blocked by "
+                "Cloudflare (HTTP 403); the provider may reject "
+                "data-center egress IPs"
+            ),
+            "access-blocked-matcha",
+        )
+        self.assertEqual(
+            failure_category(
+                "https://api.0x.org/swap/allowance-holder/quote returned HTTP 401"
+            ),
+            "access-blocked-matcha",
+        )
+        self.assertEqual(
+            failure_category(
+                "https://api.0x.org/swap/allowance-holder/quote returned HTTP 503"
+            ),
+            "transient-matcha",
+        )
+        self.assertEqual(
+            failure_category(
                 "Atomic transaction exceeds Solana 1232-byte size limit"
             ),
             "no-route",
@@ -368,6 +388,9 @@ class CrosschainSniperTests(unittest.TestCase):
 
     def test_stop_request_has_an_explicit_cli_flag(self):
         self.assertTrue(parse_args(["--request-stop"]).request_stop)
+
+    def test_provider_access_block_uses_a_long_default_cooldown(self):
+        self.assertEqual(parse_args([]).provider_access_cooldown_seconds, 3600)
 
     def test_process_check_distinguishes_this_process_from_a_stale_pid(self):
         self.assertTrue(process_is_running(os.getpid()))
