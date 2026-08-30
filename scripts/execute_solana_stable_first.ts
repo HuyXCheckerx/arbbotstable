@@ -394,7 +394,6 @@ async function main() {
   const signature = await connection.sendRawTransaction(flashTx.serialize(), {
     skipPreflight: false,
     preflightCommitment: "confirmed",
-    maxRetries: 3,
   });
 
   console.log(`\n======================================================`);

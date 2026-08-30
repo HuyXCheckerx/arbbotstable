@@ -28,6 +28,7 @@ const elements = {
   pairNote: document.getElementById("pair-note"),
   amount: document.getElementById("amount-input"),
   principalToken: document.getElementById("principal-token"),
+  slippageField: document.getElementById("slippage-field"),
   slippage: document.getElementById("slippage-select"),
   quoteButton: document.getElementById("quote-button"),
   liveButton: document.getElementById("live-button"),
@@ -113,6 +114,8 @@ function selectChain(chain) {
   const supported = SUPPORTED_PAIRS[chain];
   const flexible = chain === "ethereum" || chain === "solana";
   elements.swapOrder.disabled = !flexible;
+  elements.slippageField.hidden = chain === "solana";
+  elements.slippage.disabled = requestRunning || chain === "solana";
   if (!flexible) elements.swapOrder.value = "dex-first";
   for (const option of elements.pair.options) {
     option.disabled = !supported.includes(option.value);
@@ -150,7 +153,7 @@ function setBusy(busy) {
   elements.pair.disabled = busy;
   elements.swapOrder.disabled = busy || !(selectedChain === "ethereum" || selectedChain === "solana");
   elements.amount.disabled = busy;
-  elements.slippage.disabled = busy;
+  elements.slippage.disabled = busy || selectedChain === "solana";
   for (const button of elements.amountPresets) {
     button.disabled = busy;
   }
@@ -171,15 +174,18 @@ function validateForm() {
 }
 
 function requestPayload(mode, confirmation = "") {
-  return {
+  const payload = {
     chain: selectedChain,
     pair: elements.pair.value,
     swapOrder: elements.swapOrder.value,
     mode,
     amount: elements.amount.value.trim(),
-    slippageBps: elements.slippage.value,
     confirmation,
   };
+  if (selectedChain !== "solana") {
+    payload.slippageBps = elements.slippage.value;
+  }
+  return payload;
 }
 
 function renderQuote(parsed) {

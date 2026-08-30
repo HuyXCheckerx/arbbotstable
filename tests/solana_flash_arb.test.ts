@@ -8,6 +8,7 @@ import {
   USDC_MINT,
   USDG_MINT,
   bufferedFeeRaw,
+  buildJupiterQuoteParameters,
   buildStableSwapInstruction,
   capacityLimitedLoanAmount,
   capacityLimitedStableFirstLoanAmount,
@@ -16,6 +17,7 @@ import {
   finalComputeUnitLimit,
   formatRaw,
   intermediateTokenProgram,
+  isBlockheightExpiry,
   isTwoHopJupiterRoute,
   jupiterRouteConstraints,
   parseDecimalToRawCeil,
@@ -28,6 +30,7 @@ import {
   assertNoExistingLoanLiability,
   stableInputSymbol,
   stableOutputSymbol,
+  classifySignatureStatus,
 } from "../src/engines/solana_flash_arb.js";
 import { PublicKey } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
@@ -74,6 +77,45 @@ test("gives PYUSD/USDG enough accounts for Jupiter-managed USDC routing", () => 
     maxAccounts: 20,
     onlyDirectRoutes: true,
   });
+});
+
+test("enforces zero slippage on every Solana quote", () => {
+  const params = buildJupiterQuoteParameters(
+    USDG_MINT,
+    PYUSD_MINT,
+    10_000_000n,
+    false,
+    24,
+  );
+
+  assert.equal(params.get("slippageBps"), "0");
+  assert.equal(params.get("amount"), "10000000");
+  assert.equal(params.get("onlyDirectRoutes"), "false");
+  assert.equal(params.get("maxAccounts"), "24");
+});
+
+test("distinguishes an unrecorded blockhash expiry from an ambiguous signature", () => {
+  const expiry = Object.assign(new Error("Signature has expired: block height exceeded"), {
+    name: "TransactionExpiredBlockheightExceededError",
+  });
+
+  assert.equal(isBlockheightExpiry(expiry), true);
+  assert.equal(classifySignatureStatus(null), "missing");
+  assert.equal(
+    classifySignatureStatus({ err: null, confirmationStatus: "processed" }),
+    "ambiguous",
+  );
+  assert.equal(
+    classifySignatureStatus({ err: null, confirmationStatus: "confirmed" }),
+    "confirmed",
+  );
+  assert.equal(
+    classifySignatureStatus({
+      err: { InstructionError: [5, { Custom: 6001 }] },
+      confirmationStatus: "confirmed",
+    }),
+    "reverted",
+  );
 });
 
 test("parses and formats six-decimal stablecoin amounts exactly", () => {

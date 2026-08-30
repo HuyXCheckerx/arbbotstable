@@ -198,6 +198,19 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(environment["SOL_FLASH_ARB_SWAP_ORDER"], "stable-first")
         self.assertEqual(environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"], "false")
         self.assertEqual(environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"], "24")
+        self.assertNotIn("SOL_FLASH_ARB_SLIPPAGE_BPS", environment)
+
+    def test_solana_request_does_not_require_a_slippage_setting(self):
+        validated = web._validated_request(
+            {
+                "chain": "solana",
+                "pair": "PYUSD/USDG",
+                "mode": "quote",
+                "amount": "1000",
+            }
+        )
+
+        self.assertEqual(validated[4], "0")
 
     def test_dashboard_route_summary_is_stable_first(self):
         summary = web.parse_output_summary(
