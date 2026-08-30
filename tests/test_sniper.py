@@ -170,6 +170,9 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertEqual(
             invocation.environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"], "false"
         )
+        self.assertEqual(
+            invocation.environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"], "24"
+        )
         self.assertTrue(invocation.environment["SOL_FLASH_ARB_OUTPUT_PATH"].endswith(
             "solana-stable-first-loan-pyusd-via-usdg.json"
         ))
@@ -202,7 +205,7 @@ class CrosschainSniperTests(unittest.TestCase):
             invocation.environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"], "false"
         )
         self.assertEqual(
-            invocation.environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"], "20"
+            invocation.environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"], "24"
         )
 
     def test_solana_usdc_pairs_preserve_the_configured_direct_route_policy(self):
