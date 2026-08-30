@@ -445,14 +445,20 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         return f"{route.dex_name} has no executable {dex_leg} route right now"
     if category == "transient-stable":
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
-        suffix = f" (HTTP {status.group(1)})" if status else ""
+        suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
         return f"Stable.com is temporarily unavailable{suffix}"
     if category == "transient-jupiter":
-        return "Jupiter is temporarily unavailable"
+        status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
+        return f"Jupiter is temporarily unavailable{suffix}"
     if category == "transient-matcha":
-        return "MetaMatcha is temporarily unavailable"
+        status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
+        return f"MetaMatcha is temporarily unavailable{suffix}"
     if category == "transient-rpc":
-        return f"{route.chain.title()} RPC is temporarily unavailable"
+        status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
+        return f"{route.chain.title()} RPC is temporarily unavailable{suffix}"
     if category == "capacity":
         return "Stable.com does not currently have enough usable input capacity"
     if category == "unstable-capacity":
@@ -827,10 +833,13 @@ def worker(
                     cooldown_policy.transient_base_seconds,
                     cooldown_policy.transient_max_seconds,
                 )
+                status = re.search(r"HTTP\s+(\d{3})", outcome.detail, re.IGNORECASE)
+                suffix = f" (HTTP {status.group(1)})" if status else ""
                 logger.info(
-                    "PAUSE   | %-17s | %.0fs | temporary provider failure",
+                    "PAUSE   | %-17s | %.0fs | temporary provider failure%s",
                     dependency_label(dependency),
                     delay,
+                    suffix,
                 )
             else:
                 backoff.succeed(f"stable:{route.chain}")
