@@ -293,10 +293,10 @@ def run_arb_command(
     loan, intermediate = _route_symbols(chain, pair)
 
     if chain == "solana":
+        env.pop("SOL_FLASH_ARB_SLIPPAGE_BPS", None)
         env["SOL_FLASH_ARB_AMOUNT_USDC"] = amount
         env[f"SOL_FLASH_ARB_AMOUNT_{loan}"] = amount
         env["SOL_FLASH_ARB_LOAN_TOKEN"] = loan
-        env["SOL_FLASH_ARB_SLIPPAGE_BPS"] = slippage_bps
         env["SOL_FLASH_ARB_INTERMEDIATE_TOKEN"] = intermediate
         env["SOL_FLASH_ARB_SWAP_ORDER"] = swap_order
         if {loan, intermediate} == {"USDG", "PYUSD"}:
@@ -354,9 +354,10 @@ def run_arb_command(
     else:
         return False, f"Unsupported chain: {chain}", {}
 
+    slippage_label = "0 bps enforced" if chain == "solana" else f"{slippage_bps} bps"
     add_log(
         f"CHECK | {chain.title()} | {_route_flow(chain, pair, swap_order)} | "
-        f"maximum {amount} {loan} | {slippage_bps} bps",
+        f"maximum {amount} {loan} | {slippage_label}",
         "system",
     )
     timeout_seconds = LIVE_TIMEOUT_SECONDS if mode == "live" else QUOTE_TIMEOUT_SECONDS
@@ -441,12 +442,15 @@ def _validated_request(data: Any) -> tuple[str, str, str, str, str, str]:
         raise ValueError("amount must be greater than zero")
     if len(amount) > 40:
         raise ValueError("amount is too long")
-    try:
-        slippage = int(slippage_text)
-    except ValueError:
-        raise ValueError("slippage must be a whole number") from None
-    if not 0 <= slippage <= 100:
-        raise ValueError("slippage must be between 0 and 100 bps")
+    if chain == "solana":
+        slippage = "0"
+    else:
+        try:
+            slippage = int(slippage_text)
+        except ValueError:
+            raise ValueError("slippage must be a whole number") from None
+        if not 0 <= slippage <= 100:
+            raise ValueError("slippage must be between 0 and 100 bps")
     if mode == "live" and data.get("confirmation") != LIVE_CONFIRMATION:
         raise PermissionError(f'type "{LIVE_CONFIRMATION}" to authorize a live run')
     return chain, pair, mode, amount, str(slippage), swap_order

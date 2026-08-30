@@ -145,6 +145,7 @@ class CrosschainSniperTests(unittest.TestCase):
             invocation.environment["SOL_FLASH_ARB_MIN_NET_PROFIT_USDC"],
             "5.000001",
         )
+        self.assertNotIn("SOL_FLASH_ARB_SLIPPAGE_BPS", invocation.environment)
         self.assertIn("EXECUTE_SOLANA_FLASH_ARB", invocation.command)
 
     def test_solana_cross_token_pair_sets_both_route_tokens(self):
@@ -278,6 +279,37 @@ class CrosschainSniperTests(unittest.TestCase):
         )
         self.assertEqual(subprocess_output_text(b"submitted"), "submitted")
 
+    def test_expired_unrecorded_solana_signature_is_terminal(self):
+        signature = "5HueCGU8rMjxEXxiPuD5BDu"
+        output = (
+            f"Submitted: https://solscan.io/tx/{signature}\n"
+            f"Expired: {signature}\n"
+        )
+
+        self.assertEqual(
+            execution_reference(Route("solana", "PYUSD/USDG"), output),
+            ("expired", f"https://solscan.io/tx/{signature}"),
+        )
+        with patch(
+            "crosschain_sniper.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=("engine",),
+                returncode=0,
+                stdout=output,
+                stderr="",
+            ),
+        ):
+            outcome = run_route(
+                Route("solana", "PYUSD/USDG"),
+                live=True,
+                execution_floor=Decimal("1.000001"),
+                timeout_seconds=300,
+            )
+
+        self.assertEqual(outcome.category, "expired")
+        self.assertFalse(outcome.executed)
+        self.assertIn("continuing", outcome.detail)
+
     def test_engine_timeout_preserves_an_already_broadcast_transaction(self):
         timeout = subprocess.TimeoutExpired(
             cmd=("engine",),
@@ -312,6 +344,20 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertIsNotNone(unresolved)
         self.assertEqual(unresolved[0], route)
         self.assertEqual(unresolved[2], "0xabc123")
+
+    def test_expired_solana_plan_does_not_block_restart(self):
+        route = Route("solana", "PYUSD/USDG")
+        with tempfile.TemporaryDirectory() as temporary:
+            plan_path = Path(temporary) / f"{route.key}.json"
+            plan_path.write_text(
+                '{"transactionStatus":"expired",'
+                '"transactionSignature":"5HueCGU8rMjxEXxiPuD5BDu"}',
+                encoding="utf-8",
+            )
+            with patch("crosschain_sniper.PLAN_DIR", Path(temporary)):
+                unresolved = unresolved_submission([route])
+
+        self.assertIsNone(unresolved)
 
     def test_unresolved_legacy_plan_is_not_missed_after_route_key_changes(self):
         route = Route("ethereum", "PYUSD/USDC", "dex-first")

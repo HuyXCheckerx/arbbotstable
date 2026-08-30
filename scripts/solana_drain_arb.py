@@ -18,12 +18,12 @@ def run_loop():
     print("=" * 70, flush=True)
 
     env = dict(os.environ)
+    env.pop("SOL_FLASH_ARB_SLIPPAGE_BPS", None)
     env.update({
         "SOL_FLASH_ARB_LOAN_TOKEN": "PYUSD",
         "SOL_FLASH_ARB_INTERMEDIATE_TOKEN": "USDG",
         "SOL_FLASH_ARB_AMOUNT_PYUSD": "10000",
         "SOL_FLASH_ARB_AMOUNT_USDC": "10000",
-        "SOL_FLASH_ARB_SLIPPAGE_BPS": "0",
         "SOL_FLASH_ARB_MIN_GROSS_PROFIT_PYUSD": "0.000001",
         "SOL_FLASH_ARB_MIN_NET_PROFIT_PYUSD": "0.000001",
         "SOL_FLASH_ARB_SWAP_ORDER": "stable-first",

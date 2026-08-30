@@ -22,6 +22,7 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
+  TransactionExpiredBlockheightExceededError,
   TransactionInstruction,
   VersionedTransaction,
 } from "@solana/web3.js";
@@ -186,7 +187,6 @@ interface Config {
   maximumLoanAmountRaw: bigint;
   stableCapacityBufferRaw: bigint;
   stableCapacitySizingAttempts: number;
-  slippageBps: number;
   minimumGrossProfitRaw: bigint;
   minimumNetProfitRaw: bigint;
   maxAccounts: number;
@@ -549,7 +549,6 @@ function readConfig(cli: CliOptions): Config {
       5,
       1,
     ),
-    slippageBps: envInt("SOL_FLASH_ARB_SLIPPAGE_BPS", 0, 0),
     minimumGrossProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_GROSS_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC ||
@@ -631,6 +630,32 @@ All amounts, RPC settings, API keys, fee settings, and account addresses come fr
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function isBlockheightExpiry(error: unknown): boolean {
+  return (
+    error instanceof TransactionExpiredBlockheightExceededError ||
+    (error instanceof Error &&
+      (error.name === "TransactionExpiredBlockheightExceededError" ||
+        /block height exceeded/i.test(error.message)))
+  );
+}
+
+export function classifySignatureStatus(
+  status: {
+    err: unknown;
+    confirmationStatus?: "processed" | "confirmed" | "finalized" | null;
+  } | null,
+): "missing" | "ambiguous" | "confirmed" | "reverted" {
+  if (!status) return "missing";
+  if (status.err !== null) return "reverted";
+  if (
+    status.confirmationStatus === "confirmed" ||
+    status.confirmationStatus === "finalized"
+  ) {
+    return "confirmed";
+  }
+  return "ambiguous";
 }
 
 class HttpResponseError extends Error {
@@ -1028,6 +1053,28 @@ async function getStableLeg(
   return leg;
 }
 
+export function buildJupiterQuoteParameters(
+  inputMint: PublicKey,
+  outputMint: PublicKey,
+  amountRaw: bigint,
+  onlyDirectRoutes: boolean,
+  maxAccounts?: number,
+): URLSearchParams {
+  const params = new URLSearchParams({
+    inputMint: inputMint.toBase58(),
+    outputMint: outputMint.toBase58(),
+    amount: amountRaw.toString(),
+    swapMode: "ExactIn",
+    slippageBps: "0",
+    restrictIntermediateTokens: "true",
+    onlyDirectRoutes: String(onlyDirectRoutes),
+  });
+  if (maxAccounts !== undefined) {
+    params.set("maxAccounts", String(maxAccounts));
+  }
+  return params;
+}
+
 async function getJupiterQuote(
   config: Config,
   inputMint: PublicKey,
@@ -1036,19 +1083,13 @@ async function getJupiterQuote(
   requestNumber: number,
   overrideMaxAccounts?: number,
 ): Promise<JupiterQuote> {
-  const params = new URLSearchParams({
-    inputMint: inputMint.toBase58(),
-    outputMint: outputMint.toBase58(),
-    amount: amountRaw.toString(),
-    swapMode: "ExactIn",
-    slippageBps: String(config.slippageBps),
-    restrictIntermediateTokens: "true",
-    onlyDirectRoutes: String(config.onlyDirectRoutes),
-  });
-  const maxAccounts = overrideMaxAccounts ?? config.maxAccounts;
-  if (maxAccounts !== undefined) {
-    params.set("maxAccounts", String(maxAccounts));
-  }
+  const params = buildJupiterQuoteParameters(
+    inputMint,
+    outputMint,
+    amountRaw,
+    config.onlyDirectRoutes,
+    overrideMaxAccounts ?? config.maxAccounts,
+  );
   let quote: JupiterQuote;
   try {
     quote = await fetchJson<JupiterQuote>(
@@ -1965,6 +2006,8 @@ async function main(): Promise<void> {
     computeUnitLimit,
     unitsConsumed: finalUnits,
     transactionBytes: wireSize,
+    recentBlockhash: latest.blockhash,
+    lastValidBlockHeight: latest.lastValidBlockHeight,
     ignoredJupiterComputeBudgetInstructions: ignoredComputeBudgetCount,
     firstQuote,
     secondJupiterQuote,
@@ -1986,28 +2029,70 @@ async function main(): Promise<void> {
   await assertMainnet(connection);
   const signature = await connection.sendRawTransaction(transaction.serialize(), {
     skipPreflight: true,
-    preflightCommitment: "processed",
-    maxRetries: 3,
+    preflightCommitment: config.commitment,
   });
   plan.transactionSignature = signature;
   plan.transactionStatus = "submitted";
   writePlan(config.outputPath, plan);
   console.log(`Submitted: https://solscan.io/tx/${signature}`);
-  const confirmation = await connection.confirmTransaction(
-    {
-      signature,
-      blockhash: latest.blockhash,
-      lastValidBlockHeight: latest.lastValidBlockHeight,
-    },
-    config.commitment,
-  );
-  if (confirmation.value.err) {
-    plan.transactionStatus = "reverted";
-    plan.transactionError = confirmation.value.err;
+  try {
+    const confirmation = await connection.confirmTransaction(
+      {
+        signature,
+        blockhash: latest.blockhash,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
+      },
+      config.commitment,
+    );
+    if (confirmation.value.err) {
+      plan.transactionStatus = "reverted";
+      plan.transactionError = confirmation.value.err;
+      writePlan(config.outputPath, plan);
+      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+    }
+  } catch (error) {
+    if (!isBlockheightExpiry(error)) throw error;
+
+    for (let statusCheck = 0; statusCheck < 2; statusCheck += 1) {
+      const response = await connection.getSignatureStatuses([signature], {
+        searchTransactionHistory: true,
+      });
+      const signatureState = classifySignatureStatus(response.value[0]);
+      if (signatureState === "confirmed") {
+        plan.transactionStatus = "confirmed";
+        delete plan.transactionError;
+        writePlan(config.outputPath, plan);
+        console.log(`Confirmed: ${signature}`);
+        return;
+      }
+      if (signatureState === "reverted") {
+        plan.transactionStatus = "reverted";
+        plan.transactionError = response.value[0]?.err;
+        writePlan(config.outputPath, plan);
+        throw new Error(
+          `Transaction failed: ${JSON.stringify(response.value[0]?.err)}`,
+        );
+      }
+      if (signatureState === "ambiguous") {
+        plan.transactionError =
+          "blockhash expired, but the signature is still visible below confirmed commitment";
+        writePlan(config.outputPath, plan);
+        throw new Error(String(plan.transactionError));
+      }
+      if (statusCheck === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+
+    plan.transactionStatus = "expired";
+    plan.transactionError =
+      "blockhash expired and the signature was not recorded on chain";
     writePlan(config.outputPath, plan);
-    throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+    console.log(`Expired: ${signature}`);
+    return;
   }
   plan.transactionStatus = "confirmed";
+  delete plan.transactionError;
   writePlan(config.outputPath, plan);
   console.log(`Confirmed: ${signature}`);
 }

@@ -253,6 +253,7 @@ def build_route_invocation(
                 ["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"]
             )
     elif route.chain == "solana":
+        environment.pop("SOL_FLASH_ARB_SLIPPAGE_BPS", None)
         executable = "npx.cmd" if sys.platform == "win32" else "npx"
         command = [
             executable,
@@ -321,6 +322,9 @@ def execution_reference(route: Route, stdout: str) -> tuple[str | None, str | No
     confirmed = re.search(r"Confirmed:\s*([1-9A-HJ-NP-Za-km-z]+)", stdout)
     if confirmed:
         return "confirmed", f"https://solscan.io/tx/{confirmed.group(1)}"
+    expired = re.search(r"Expired:\s*([1-9A-HJ-NP-Za-km-z]+)", stdout)
+    if expired:
+        return "expired", f"https://solscan.io/tx/{expired.group(1)}"
     submitted = re.search(
         r"Submitted:\s*(?:https://solscan\.io/tx/)?([1-9A-HJ-NP-Za-km-z]+)",
         stdout,
@@ -534,6 +538,8 @@ def outcome_label(outcome: Outcome) -> str:
         return "STOPPED"
     if outcome.category == "reverted":
         return "REVERTED"
+    if outcome.category == "expired":
+        return "DROPPED"
     if outcome.category == "eligible":
         return "READY"
     if outcome.category == "unprofitable":
@@ -637,6 +643,13 @@ def run_route(
                 f"{transaction}",
                 "reverted",
             )
+        if transaction_status == "expired" and transaction:
+            return Outcome(
+                False,
+                f"expired without landing before the engine timed out after "
+                f"{timeout_seconds:g}s: {transaction}; continuing",
+                "expired",
+            )
         return Outcome(
             False,
             f"quote timed out after {timeout_seconds:g}s",
@@ -670,6 +683,12 @@ def run_route(
             False,
             f"reverted in {elapsed:.1f}s: {transaction}",
             "reverted",
+        )
+    if transaction_status == "expired" and transaction:
+        return Outcome(
+            False,
+            f"expired without landing in {elapsed:.1f}s: {transaction}; continuing",
+            "expired",
         )
     if result.returncode == 0:
         if live:

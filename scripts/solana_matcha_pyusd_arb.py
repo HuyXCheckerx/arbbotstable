@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Solana Triangular Flash Arbitrage Route:
-PYUSD Flash Loan -> Matcha (PYUSD -> USDC, 0 bps) -> USDC -> USDG -> USDG -> PYUSD -> Repay
+PYUSD Flash Loan -> Matcha (PYUSD -> USDC) -> USDC -> USDG -> USDG -> PYUSD -> Repay
 """
 
 import os
@@ -96,7 +96,6 @@ def query_matcha_quotes(
     sell_mint: Pubkey,
     buy_mint: Pubkey,
     sell_amount_raw: int,
-    slippage_bps: int = 0,
     timeout: int = 12
 ) -> Dict[str, Any]:
     """Query meta.matcha.xyz for all available Solana aggregators."""
@@ -107,7 +106,7 @@ def query_matcha_quotes(
         "sellAmount": str(sell_amount_raw),
         "sellTokenDecimals": DECIMALS,
         "buyTokenDecimals": DECIMALS,
-        "slippageBps": slippage_bps,
+        "slippageBps": 0,
     }
     
     session = cffi_requests.Session(impersonate="chrome124") if cffi_requests is not None else requests.Session()
@@ -224,15 +223,15 @@ def run_solana_matcha_pyusd_pipeline():
     print(f"  * Flash Fee:     0.00% (MarginFi / Zero-fee flash loan facility)")
 
     # -------------------------------------------------------------
-    # 2. SWAP PYUSD -> USDC ON MATCHA (0 BPS SLIPPAGE)
+    # 2. SWAP PYUSD -> USDC ON MATCHA
     # -------------------------------------------------------------
     print("\n" + "-" * 80)
-    print(f"[STEP 2] SWAP PYUSD -> USDC ON MATCHA (meta.matcha.xyz, 0 BPS SLIPPAGE)")
+    print(f"[STEP 2] SWAP PYUSD -> USDC ON MATCHA (meta.matcha.xyz)")
     print(f"  * Input Amount:  {loan_amount:,.6f} PYUSD")
-    print(f"  * Slippage:      0 bps (exact minimum threshold enforced)")
+    print(f"  * Slippage:      0 bps (enforced)")
     print(f"  * Querying Matcha Meta Aggregators...")
     
-    matcha_quotes_leg1 = query_matcha_quotes(PYUSD_MINT, USDC_MINT, loan_amount_raw, slippage_bps=0)
+    matcha_quotes_leg1 = query_matcha_quotes(PYUSD_MINT, USDC_MINT, loan_amount_raw)
     
     for agg, data in matcha_quotes_leg1.items():
         direct = data.get("direct", {})
@@ -253,15 +252,15 @@ def run_solana_matcha_pyusd_pipeline():
     print(f"      -> Quote Rate: 1 PYUSD = {rate_1:.6f} USDC")
 
     # -------------------------------------------------------------
-    # 3. SWAP USDC -> USDG (0 BPS SLIPPAGE)
+    # 3. SWAP USDC -> USDG
     # -------------------------------------------------------------
     print("\n" + "-" * 80)
-    print(f"[STEP 3] SWAP USDC -> USDG ON MATCHA / DEX (0 BPS SLIPPAGE)")
+    print(f"[STEP 3] SWAP USDC -> USDG ON MATCHA / DEX")
     print(f"  * Input Amount:  {out_usdc:,.6f} USDC")
-    print(f"  * Slippage:      0 bps")
+    print(f"  * Slippage:      0 bps (enforced)")
     print(f"  * Querying Matcha Meta Aggregators...")
     
-    matcha_quotes_leg2 = query_matcha_quotes(USDC_MINT, USDG_MINT, out_usdc_raw, slippage_bps=0)
+    matcha_quotes_leg2 = query_matcha_quotes(USDC_MINT, USDG_MINT, out_usdc_raw)
     
     for agg, data in matcha_quotes_leg2.items():
         direct = data.get("direct", {})
@@ -289,7 +288,7 @@ def run_solana_matcha_pyusd_pipeline():
     print(f"  * Input Amount:  {out_usdg:,.6f} USDG")
     
     # 4A. Matcha DEX Route
-    matcha_quotes_leg3 = query_matcha_quotes(USDG_MINT, PYUSD_MINT, out_usdg_raw, slippage_bps=0)
+    matcha_quotes_leg3 = query_matcha_quotes(USDG_MINT, PYUSD_MINT, out_usdg_raw)
     best_agg_3, out_pyusd_dex_raw, best_data_3 = select_best_matcha_quote(matcha_quotes_leg3)
     out_pyusd_dex = out_pyusd_dex_raw / 10**DECIMALS
     print(f"  * Matcha DEX Best ({best_agg_3}): {out_pyusd_dex:,.6f} PYUSD (Rate: {out_pyusd_dex/out_usdg:.6f})")
