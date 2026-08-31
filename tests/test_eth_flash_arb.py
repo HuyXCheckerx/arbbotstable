@@ -549,6 +549,41 @@ class EthereumFlashArbTests(unittest.TestCase):
         self.assertEqual(plan["receiptConfirmation"], "timed-out")
         self.assertEqual(persisted["transactionStatus"], "submitted")
 
+    def test_receipt_timeout_marks_an_absent_transaction_with_unused_nonce_dropped(self):
+        TimeExhausted = type("TimeExhausted", (Exception,), {})
+        TransactionNotFound = type("TransactionNotFound", (Exception,), {})
+
+        class FakeHash:
+            def hex(self):
+                return "dropped123"
+
+        class FakeEth:
+            def wait_for_transaction_receipt(self, *_args, **_kwargs):
+                raise TimeExhausted()
+
+            def get_transaction(self, _transaction_hash):
+                raise TransactionNotFound()
+
+            def get_transaction_count(self, _sender, block_identifier):
+                self.requested_block = block_identifier
+                return 7
+
+        plan = {
+            "transaction": {
+                "from": "0x1111111111111111111111111111111111111111",
+                "nonce": 7,
+            }
+        }
+        pyusd_arb.record_transaction_receipt(
+            plan,
+            type("FakeWeb3", (), {"eth": FakeEth()})(),
+            FakeHash(),
+            10,
+        )
+
+        self.assertEqual(plan["transactionStatus"], "dropped")
+        self.assertEqual(plan["receiptConfirmation"], "not-found-nonce-unused")
+
 
 if __name__ == "__main__":
     unittest.main()

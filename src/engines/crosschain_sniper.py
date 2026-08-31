@@ -540,6 +540,8 @@ def outcome_label(outcome: Outcome) -> str:
         return "REVERTED"
     if outcome.category == "expired":
         return "DROPPED"
+    if outcome.category == "dropped":
+        return "DROPPED"
     if outcome.category == "eligible":
         return "READY"
     if outcome.category == "unprofitable":
@@ -650,6 +652,13 @@ def run_route(
                 f"{timeout_seconds:g}s: {transaction}; continuing",
                 "expired",
             )
+        if transaction_status == "dropped" and transaction:
+            return Outcome(
+                False,
+                f"not found with an unused nonce before the engine timed out after "
+                f"{timeout_seconds:g}s: {transaction}; continuing",
+                "dropped",
+            )
         return Outcome(
             False,
             f"quote timed out after {timeout_seconds:g}s",
@@ -689,6 +698,13 @@ def run_route(
             False,
             f"expired without landing in {elapsed:.1f}s: {transaction}; continuing",
             "expired",
+        )
+    if transaction_status == "dropped" and transaction:
+        return Outcome(
+            False,
+            f"not found and nonce remains unused after {elapsed:.1f}s: "
+            f"{transaction}; continuing",
+            "dropped",
         )
     if result.returncode == 0:
         if live:
@@ -863,11 +879,16 @@ def worker(
             )
             if outcome.category == "submitted":
                 logger.error(
-                    "SAFETY  | STOPPED   | transaction was submitted but not confirmed; "
-                    "all routes are stopped until an operator reconciles it",
+                    "PAUSE   | %-17s | %.0fs | submission is unresolved; "
+                    "the script and other chain continue",
+                    f"{chain.title()} submissions",
+                    cooldown_policy.transient_base_seconds,
                 )
-                stop.set()
-                return
+                backoff.block(
+                    f"rpc:{route.chain}",
+                    cooldown_policy.transient_base_seconds,
+                )
+                continue
             if outcome.category.startswith("transient-"):
                 dependency = {
                     "transient-stable": f"stable:{route.chain}",
@@ -1102,6 +1123,7 @@ def main(argv: list[str] | None = None) -> int:
     routes = selected_routes(args.chains, args.pairs, args.swap_orders)
     for route in routes:
         route_execution_floor(route, args.threshold_usd)
+    logger = configure_logging()
     unresolved = unresolved_submission(routes)
     if unresolved:
         route, path, reference = unresolved
@@ -1110,12 +1132,13 @@ def main(argv: list[str] | None = None) -> int:
             if route
             else "a prior or unknown route"
         )
-        raise SniperError(
-            f"unresolved submitted transaction for {route_label}: "
-            f"{reference}; reconcile it and update or remove {path} before restarting"
+        logger.error(
+            "RECOVER | CONTINUE  | unresolved prior submission for %s: %s (%s); "
+            "the script will not stop",
+            route_label,
+            reference,
+            path,
         )
-
-    logger = configure_logging()
     logger.info(
         "BOT     | %-9s | %d atomic route checks across both venue orders",
         "LIVE" if args.live else "DRY RUN",

@@ -1207,6 +1207,41 @@ def write_plan(path: str | None, plan: dict[str, Any]) -> None:
     )
 
 
+def transaction_is_absent_and_nonce_unused(
+    plan: dict[str, Any],
+    web3: Any,
+    transaction_hash: Any,
+) -> bool:
+    """Return true only when the accepting RPC forgot the hash and its nonce is free."""
+    transaction = plan.get("transaction")
+    if not isinstance(transaction, dict):
+        return False
+    sender = transaction.get("from")
+    nonce_value = transaction.get("nonce")
+    if not sender or nonce_value is None:
+        return False
+    try:
+        nonce = int(nonce_value, 0) if isinstance(nonce_value, str) else int(nonce_value)
+    except (TypeError, ValueError):
+        return False
+
+    try:
+        observed = web3.eth.get_transaction(transaction_hash)
+    except Exception as exc:
+        if type(exc).__name__ != "TransactionNotFound":
+            return False
+    else:
+        if observed is not None:
+            return False
+
+    try:
+        latest_nonce = int(web3.eth.get_transaction_count(sender, "latest"))
+        pending_nonce = int(web3.eth.get_transaction_count(sender, "pending"))
+    except Exception:
+        return False
+    return latest_nonce <= nonce and pending_nonce <= nonce
+
+
 def record_transaction_receipt(
     plan: dict[str, Any],
     web3: Any,
@@ -1236,6 +1271,9 @@ def record_transaction_receipt(
             if type(exc).__name__ == "TimeExhausted"
             else "rpc-error"
         )
+        if transaction_is_absent_and_nonce_unused(plan, web3, transaction_hash):
+            plan["transactionStatus"] = "dropped"
+            plan["receiptConfirmation"] = "not-found-nonce-unused"
         write_plan(output_path, plan)
         return
 
