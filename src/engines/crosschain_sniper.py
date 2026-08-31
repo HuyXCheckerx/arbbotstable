@@ -69,7 +69,7 @@ class Route:
     def stable_from(self) -> str:
         return self.loan if self.swap_order == "stable-first" else self.intermediate
 
-@property
+    @property
     def stable_to(self) -> str:
         return self.intermediate if self.swap_order == "stable-first" else self.loan
 
@@ -204,7 +204,9 @@ def strict_execution_floor(threshold: Decimal, route: Route | None = None) -> De
 def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
     if route.chain == "solana":
         effective_threshold = (
-            Decimal("1") if base_threshold == Decimal("5") else base_threshold
+            Decimal("1")
+            if base_threshold in {Decimal("4"), Decimal("5")}
+            else base_threshold
         )
         return strict_execution_floor(effective_threshold, route)
     return strict_execution_floor(base_threshold, route)

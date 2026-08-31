@@ -119,17 +119,17 @@ class CrosschainSniperTests(unittest.TestCase):
             stopped = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(stopped["session"]["status"], "stopped")
 
-    def test_threshold_is_strictly_greater_than_five_dollars(self):
+    def test_threshold_is_strictly_greater_than_four_dollars(self):
         self.assertEqual(
-            strict_execution_floor(Decimal("5")),
-            Decimal("5.000001"),
+            strict_execution_floor(Decimal("4")),
+            Decimal("4.000001"),
         )
-        with self.assertRaisesRegex(SniperError, "at least 5"):
-            strict_execution_floor(Decimal("4.999999"))
+        with self.assertRaisesRegex(SniperError, "at least 4"):
+            strict_execution_floor(Decimal("3.999999"))
 
     def test_solana_routes_use_one_dollar_floor(self):
         self.assertEqual(
-            route_execution_floor(Route("solana", "USDG/PYUSD"), Decimal("5")),
+            route_execution_floor(Route("solana", "USDG/PYUSD"), Decimal("4")),
             Decimal("1.000001"),
         )
         self.assertEqual(
