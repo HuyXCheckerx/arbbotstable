@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import tempfile
 from decimal import Decimal
@@ -22,6 +23,7 @@ from crosschain_sniper import (
     CooldownPolicy,
     Outcome,
     Route,
+    SniperDashboardFeed,
     SniperError,
     build_route_invocation,
     concise_failure,
@@ -33,6 +35,7 @@ from crosschain_sniper import (
     parse_args,
     parse_gas_fee_gwei,
     process_is_running,
+    profit_metrics,
     route_execution_floor,
     run_route,
     selected_routes,
@@ -44,6 +47,78 @@ from crosschain_sniper import (
 
 
 class CrosschainSniperTests(unittest.TestCase):
+    def test_profit_metrics_support_both_engine_output_formats(self):
+        ethereum = json.dumps(
+            {"grossProfit": "6.25", "predictedNetProfit": "5.75"}
+        )
+        self.assertEqual(
+            profit_metrics(Route("ethereum", "PYUSD/USDC"), ethereum),
+            ("6.25", "5.75"),
+        )
+        solana = (
+            "Guaranteed gross result: 2.500000 USDC\n"
+            "Guaranteed net result: 1.250000 USDC\n"
+        )
+        self.assertEqual(
+            profit_metrics(Route("solana", "USDC/PYUSD"), solana),
+            ("2.5", "1.25"),
+        )
+        self.assertEqual(
+            profit_metrics(
+                Route("ethereum", "USDC/USDG"),
+                '{"grossProfit":"0","predictedNetProfit":"0.000000"}',
+            ),
+            ("0", "0"),
+        )
+        self.assertEqual(
+            profit_metrics(
+                Route("ethereum", "PYUSD/USDC"),
+                "",
+                "quoted route is below the on-chain profit floor: "
+                "-10.956067 PYUSD < 5.000001 PYUSD",
+            ),
+            ("-10.956067", None),
+        )
+
+    def test_dashboard_feed_records_check_profit_and_execution_result(self):
+        route = Route("ethereum", "PYUSD/USDC", "dex-first")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dashboard.json"
+            feed = SniperDashboardFeed(
+                path,
+                [route],
+                live=True,
+                base_threshold=Decimal("5"),
+            )
+            feed.begin_check(route, Decimal("5.000001"))
+            checking = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(checking["active"]["ethereum"]["state"], "CHECKING")
+
+            feed.record_result(
+                route,
+                Decimal("5.000001"),
+                Outcome(
+                    True,
+                    "confirmed on chain",
+                    "confirmed",
+                    gross_profit="7",
+                    net_profit="6",
+                    profit_token="PYUSD",
+                    elapsed_seconds=2.5,
+                    transaction="https://etherscan.io/tx/0xabc",
+                ),
+            )
+            recorded = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIsNone(recorded["active"]["ethereum"])
+            self.assertEqual(recorded["summary"]["checks"], 1)
+            self.assertEqual(recorded["summary"]["confirmed"], 1)
+            self.assertEqual(recorded["routes"][route.key]["net_profit"], "6")
+            self.assertEqual(recorded["last_execution"]["state"], "CONFIRMED")
+
+            feed.stop()
+            stopped = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(stopped["session"]["status"], "stopped")
+
     def test_threshold_is_strictly_greater_than_five_dollars(self):
         self.assertEqual(
             strict_execution_floor(Decimal("5")),

@@ -175,16 +175,20 @@ def default_sniper_state() -> dict[str, Any]:
 
 def read_sniper_state(path: Path = SNIPER_DASHBOARD_PATH) -> dict[str, Any]:
     fallback = default_sniper_state()
+    feed_available = True
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         loaded = fallback
+        feed_available = False
     if not isinstance(loaded, dict):
         loaded = fallback
+        feed_available = False
     session = loaded.get("session")
     if not isinstance(session, dict):
         loaded = fallback
         session = loaded["session"]
+        feed_available = False
 
     recorded_pid = session.get("pid")
     try:
@@ -192,11 +196,21 @@ def read_sniper_state(path: Path = SNIPER_DASHBOARD_PATH) -> dict[str, Any]:
     except (TypeError, ValueError):
         recorded_pid = None
     active_pid = _pid_from_file()
+    if not feed_available and active_pid:
+        recorded_pid = active_pid
+        session.update(
+            {
+                "status": "running",
+                "status_label": "Sniper starting; waiting for its status feed",
+                "pid": active_pid,
+            }
+        )
     running = bool(recorded_pid and active_pid == recorded_pid)
     session["running"] = running
     if running:
         session["status"] = "running"
-        session["status_label"] = "Sniper running"
+        if feed_available:
+            session["status_label"] = "Sniper running"
     elif session.get("status") == "running":
         session["status"] = "offline"
         session["status_label"] = "Sniper process is not running"
@@ -598,7 +612,7 @@ def _validated_request(data: Any) -> tuple[str, str, str, str, str, str]:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "ArbitrageDashboard/2"
+    server_version = "ProfitSniperDashboard/3"
 
     def setup(self) -> None:
         super().setup()
@@ -716,45 +730,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path != "/api/run":
-            self._json(404, {"error": "not found"})
-            return
-
-        try:
-            data = self._read_json_body()
-            chain, pair, mode, amount, slippage_bps, swap_order = _validated_request(data)
-        except OverflowError as exc:
-            self._json(413, {"ok": False, "error": str(exc)})
-            return
-        except PermissionError as exc:
-            self._json(403, {"ok": False, "error": str(exc)})
-            return
-        except ValueError as exc:
-            self._json(400, {"ok": False, "error": str(exc)})
-            return
-
-        if not EXECUTION_LOCK.acquire(blocking=False):
-            self._json(409, {"ok": False, "error": "another execution is already running"})
-            return
-        try:
-            success, output, parsed = run_arb_command(
-                chain,
-                pair,
-                mode,
-                amount,
-                slippage_bps,
-                swap_order,
+        if path == "/api/run":
+            self._json(
+                405,
+                {
+                    "ok": False,
+                    "error": (
+                        "the dashboard is read-only; run start_sniper.cmd to "
+                        "perform guarded route checks and executions"
+                    ),
+                },
             )
-        finally:
-            EXECUTION_LOCK.release()
-
-        response = {
-            "ok": success,
-            "parsed": parsed,
-            "output": output if success else "",
-            "error": None if success else output,
-        }
-        self._json(200 if success else 422, response)
+            return
+        self._json(404, {"error": "not found"})
 
 
 class DashboardServer(ThreadingHTTPServer):

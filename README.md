@@ -1,40 +1,47 @@
 # Stablecoin Arbitrage Bot
 
 Ethereum and Solana stablecoin arbitrage bot with a live operational dashboard.
-The profit sniper checks Stable.com first and then evaluates the atomic return
-leg through MetaMatcha on Ethereum or Jupiter on Solana.
+The profit sniper checks both venue orders between Stable.com and MetaMatcha on
+Ethereum or Jupiter on Solana.
 
-## Dashboard
+## Live sniper dashboard
 
-For the dashboard by itself, run one command from the repository root:
+The web app is a read-only live dashboard for `start_sniper.cmd`. Start the
+dashboard from the repository root:
 
 ```bash
 python webapp.py
 ```
 
-It opens the correct local address in your default browser automatically. On Windows, double-click `start_webapp.cmd` for the same behavior. Use `python webapp.py --no-open` on a headless machine, or `python webapp.py --host 0.0.0.0` when intentionally exposing it to your LAN.
-
-Run `python app.py` when you want the complete service stack: scanner, recovery worker, and dashboard. The root entrypoints resolve all canonical scripts under `src/`, so neither workflow requires navigating into implementation folders.
+It opens the correct local address in the default browser. On Windows,
+double-click `start_webapp.cmd` for the same behavior. Then start the sniper in
+a second terminal with `start_sniper.cmd`. Use `python webapp.py --no-open` on a
+headless machine, or `python webapp.py --host 0.0.0.0` when intentionally
+exposing it to a trusted LAN.
 
 The dashboard exposes:
 
-- Total and session realized net P&L.
-- Successful arbitrages and all attempted executions.
-- Full USDC, USDG, PYUSD, USDT, and SOL wallet balances.
-- Latest observed Stable.com pool balances.
-- Current wallet value and SOL/USD estimate.
-- Exact observed SOL decrease for each attempt and its execution-time USD estimate.
-- Current execution stage, route, uptime, errors, and recent accounting records.
-- A GitHub-style 52-week calendar with an exact USDC amount and attempt count when any recorded UTC day is hovered, focused, or selected.
+- Whether the recorded sniper PID is actually running, plus mode and uptime.
+- The active Ethereum and Solana route checks.
+- Gross profit, guaranteed net profit, and the strict execution floor for every
+  configured route.
+- Ready, no-trade, paused, unresolved, error, and confirmed result totals.
+- The latest confirmed, reverted, dropped, or unresolved transaction with an
+  explorer link.
+- A continuously refreshed tail of `logs/crosschain-sniper.log`.
 
 Machine-readable endpoints:
 
-- `GET /api/state` — complete dashboard state.
-- `GET /api/logs` — recent quote/execution output and runner status.
-- `POST /api/run` — validated quote or execution request; live requests require the explicit `EXECUTE LIVE ARB` confirmation.
-- `GET /healthz` — returns HTTP 200 while the scanner reports an active status, otherwise 503.
+- `GET /api/state` — the current atomic sniper status snapshot.
+- `GET /api/logs` — the structured tail of the sniper log and process status.
+- `GET /healthz` — HTTP 200 while the sniper PID is alive, otherwise 503.
+- `POST /api/run` — disabled with HTTP 405; execution belongs to the guarded
+  sniper process, not the dashboard.
 
-The browser UI remembers the selected network, pair, amount, and slippage; includes quick amount presets and log filters; and exposes a one-click copyable access URL. The implementation remains organized under `src/web/`, while `webapp.py` is the only dashboard entrypoint operators need. The server rejects overlapping runs and unsupported chain/pair combinations. Keep the dashboard behind authentication or a private network because an authorized live request can broadcast a mainnet transaction.
+The sniper writes `logs/sniper-dashboard.json` atomically after every route
+transition. The browser polls that feed every two seconds and checks the PID
+file before showing the bot as online, so an uncleanly terminated process is not
+left looking active. The dashboard never signs or broadcasts a transaction.
 
 ### Polygon PYUSD / USDC executor
 
@@ -291,15 +298,35 @@ STABLE_BACKEND_LAG_RETRY_SECONDS=5
 
 ## Local setup
 
-```bash
-cd /path/to/arbbot
-cp .env.example .env
-chmod 600 .env
-python3 -m pip install --user -r requirements.txt
-python3 app.py
+From PowerShell in this repository:
+
+```powershell
+Copy-Item .env.example .env
+python -m pip install -r requirements.txt
+npm install
+notepad .env
 ```
 
-Fill in at least `SOLANA_PRIVATE_KEY` in `.env`. Use a dedicated wallet and begin with limited funds.
+Configure the Ethereum and/or Solana RPC, dedicated operator key, executor or
+Marginfi account, and provider API settings for the chains you will enable. Use
+a dedicated wallet and begin with limited funds. Validate without broadcasting:
+
+```powershell
+python sniper.py --once
+```
+
+For normal Windows operation, use two terminals (or double-click both command
+files):
+
+```powershell
+.\start_webapp.cmd
+.\start_sniper.cmd
+```
+
+Open `http://127.0.0.1:25284`. The first command serves the dashboard; the
+second starts the guarded live sniper and supplies its live data. Stop the
+sniper cooperatively with `python sniper.py --request-stop`, and stop the web
+server with `Ctrl+C`.
 
 ## Put the project on GitHub for the first time
 

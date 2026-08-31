@@ -1,5 +1,6 @@
 import http.client
 import json
+import tempfile
 import threading
 import unittest
 import xml.etree.ElementTree as ET
@@ -84,6 +85,58 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertIn(b"temporarily unavailable", body)
 
+    def test_state_endpoint_returns_the_sniper_feed(self):
+        state = web.default_sniper_state()
+        state["session"].update(
+            {"running": True, "status": "running", "mode": "live", "pid": 1234}
+        )
+        state["summary"]["checks"] = 17
+        with patch("web.read_dashboard_state", return_value=state):
+            status, _, body = self.request("/api/state")
+
+        self.assertEqual(status, 200)
+        response = json.loads(body)
+        self.assertEqual(response["session"]["mode"], "live")
+        self.assertEqual(response["summary"]["checks"], 17)
+
+    def test_stale_recorded_pid_is_shown_as_offline(self):
+        state = web.default_sniper_state()
+        state["session"].update(
+            {"running": True, "status": "running", "pid": 987654321}
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "sniper-dashboard.json"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            with patch("web._pid_from_file", return_value=None):
+                loaded = web.read_sniper_state(path)
+
+        self.assertFalse(loaded["session"]["running"])
+        self.assertEqual(loaded["session"]["status"], "offline")
+
+    def test_live_pid_is_visible_while_status_feed_is_starting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "not-written-yet.json"
+            with patch("web._pid_from_file", return_value=4321):
+                loaded = web.read_sniper_state(missing)
+
+        self.assertTrue(loaded["session"]["running"])
+        self.assertEqual(loaded["session"]["pid"], 4321)
+        self.assertIn("starting", loaded["session"]["status_label"].lower())
+
+    def test_sniper_log_tail_is_structured_for_the_dashboard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "sniper.log"
+            path.write_text(
+                "2026-08-31 10:00:00 | INFO    | CHECK   | Ethereum | route\n"
+                "2026-08-31 10:00:01 | WARNING | RESULT  | READY | route\n"
+                "2026-08-31 10:00:02 | ERROR   | RESULT  | REVERTED | route\n",
+                encoding="utf-8",
+            )
+            logs = web.read_sniper_logs(path)
+
+        self.assertEqual([entry["type"] for entry in logs], ["quote", "success", "error"])
+        self.assertEqual(logs[1]["timestamp"], "2026-08-31 10:00:01")
+
     def test_browser_polling_is_sequential_and_time_bounded(self):
         status, headers, javascript = self.request("/static/dashboard.js")
 
@@ -118,7 +171,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("default-src 'self'", policy)
         self.assertIn("frame-ancestors 'none'", policy)
 
-    def test_live_run_requires_explicit_confirmation(self):
+    def test_dashboard_run_endpoint_is_read_only(self):
         status, _, body = self.request(
             "/api/run",
             method="POST",
@@ -131,8 +184,8 @@ class DashboardServerTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(status, 403)
-        self.assertIn(b"EXECUTE LIVE ARB", body)
+        self.assertEqual(status, 405)
+        self.assertIn(b"start_sniper.cmd", body)
 
     def test_polygon_pyusd_pair_is_supported(self):
         self.assertIn("PYUSD/USDC", web.SUPPORTED_PAIRS["polygon"])

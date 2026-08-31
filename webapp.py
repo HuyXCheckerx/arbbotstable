@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch only the local arbitrage dashboard from one root command."""
+"""Launch the local read-only profit-sniper dashboard."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def browser_url(host: str, port: int) -> str:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="Start the arbitrage web console and open it in your browser.",
+        description="Start the profit-sniper dashboard and open it in your browser.",
     )
     result.add_argument(
         "--host",
@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     from src.web.web import run
 
     url = browser_url(args.host, args.port)
-    print("\nArbitrage web console")
+    print("\nProfit sniper dashboard")
     print(f"  Open: {url}")
     print("  Stop: Ctrl+C\n")
     if not args.no_open:

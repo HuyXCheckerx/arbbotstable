@@ -211,7 +211,10 @@ def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
 
 
 def amount_text(value: Decimal) -> str:
-    return format(value, "f").rstrip("0").rstrip(".")
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def selected_routes(
@@ -677,11 +680,14 @@ def profit_metrics(route: Route, stdout: str, stderr: str = "") -> tuple[str | N
     patterns = {
         "gross": (
             r"Guaranteed gross result:\s*([-+\d.]+)",
+            r"guaranteed gross\s+([-+\d.]+)",
             r"Gross Profit:\s*([-+\d.]+)",
+            r"quoted route is below (?:the )?on-chain profit floor:\s*([-+\d.]+)",
         ),
         "net": (
             r"Guaranteed net result:\s*([-+\d.]+)",
             r"Predicted Net Profit:\s*([-+\d.]+)",
+            r"predicted net\s+([-+\d.]+)",
             r"guaranteed net\s+([-+\d.]+)",
         ),
     }
