@@ -32,7 +32,7 @@ PID_PATH = LOG_DIR / "crosschain-sniper.pid"
 STOP_PATH = LOG_DIR / ".crosschain-sniper.stop"
 DASHBOARD_PATH = LOG_DIR / "sniper-dashboard.json"
 LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
-MINIMUM_ALLOWED_THRESHOLD = Decimal("5")
+MINIMUM_ALLOWED_THRESHOLD = Decimal("4")
 SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("1")
 TOKEN_QUANTUM = Decimal("0.000001")
 ROUTE_TOKENS = ("USDC", "USDG", "PYUSD")
@@ -69,7 +69,7 @@ class Route:
     def stable_from(self) -> str:
         return self.loan if self.swap_order == "stable-first" else self.intermediate
 
-    @property
+@property
     def stable_to(self) -> str:
         return self.intermediate if self.swap_order == "stable-first" else self.loan
 
