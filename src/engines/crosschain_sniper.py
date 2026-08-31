@@ -1212,7 +1212,8 @@ def single_instance() -> Iterator[None]:
                 msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
 
 
