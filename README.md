@@ -82,12 +82,33 @@ python sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
 On Windows, `start_sniper.cmd` starts the same live command. Runtime output is
 written to rotating `logs/crosschain-sniper.log` files, with one lock preventing
 duplicate sniper processes. Confirmed execution is logged only after the chain
-returns a successful receipt; an ambiguous submission stops every worker for
-manual reconciliation. Transient provider failures use exponential backoff,
-while unavailable markets and insufficient pools receive route cooldowns.
+returns a successful receipt. An ambiguous submission pauses only the affected
+chain briefly while the other chain and the process continue; an Ethereum
+transaction absent from the node with an unused nonce is classified as dropped.
+Transient provider failures use exponential backoff, while unavailable markets
+and insufficient pools receive route cooldowns.
 Every line uses an operator-facing state such as `CHECK`, `NO TRADE`, `PAUSED`,
 `READY`, or `CONFIRMED`, followed by the complete venue-labeled route and its
 actual order.
+
+For a separate sniper version restricted to PYUSD and USDG, check its eight
+fixed routes once (two chains, two pair directions, and two venue orders):
+
+```bash
+python pyusd_usdg_sniper.py --once
+```
+
+Start that restricted version live with:
+
+```bash
+python pyusd_usdg_sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
+```
+
+The restricted launcher rejects `--chains`, `--pairs`/`--routes`, and
+`--orders`/`--swap-orders`, so USDC pairs cannot be enabled accidentally. It
+uses the same process lock and logs as the general sniper, so only one sniper
+version can run at a time. All operational controls such as thresholds,
+cooldowns, `--once`, and `--request-stop` remain available.
 Ethereum USDG requires the upgraded executor emitted by
 `deploy_eth_executor_usdc.py`. Solana direct pairs also require exactly one
 standard Marginfi bank for the selected loan mint. A route without the required

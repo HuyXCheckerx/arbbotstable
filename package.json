@@ -7,6 +7,8 @@
     "web": "python webapp.py",
     "sniper": "python sniper.py",
     "sniper:live": "python sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER",
+    "sniper:pyusd-usdg": "python pyusd_usdg_sniper.py",
+    "sniper:pyusd-usdg:live": "python pyusd_usdg_sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER",
     "eth:flash": "python src/engines/eth_flash_arb_pyusd_usdc.py",
     "eth:live": "python src/engines/eth_flash_arb_pyusd_usdc.py --send --confirm-mainnet EXECUTE_ATOMIC_ARB",
     "solana:flash": "tsx src/engines/solana_flash_arb.ts",
