@@ -283,10 +283,13 @@ export function resolveLoanMint(symbol: string): PublicKey {
 }
 
 export function isTwoHopJupiterRoute(
-  _loanMint: PublicKey,
-  _intermediateMint: PublicKey,
+  loanMint: PublicKey,
+  intermediateMint: PublicKey,
 ): boolean {
-  return false;
+  return (
+    (loanMint.equals(PYUSD_MINT) && intermediateMint.equals(USDG_MINT)) ||
+    (loanMint.equals(USDG_MINT) && intermediateMint.equals(PYUSD_MINT))
+  );
 }
 
 export function jupiterRouteConstraints(
@@ -1187,14 +1190,40 @@ async function getCapacitySizedCycle(
         );
       }
 
-      const jupiterQuote = await getJupiterQuote(
-        config,
-        config.intermediateMint,
-        config.loanMint,
-        stableQuote.outputRaw,
-        attempt,
-      );
-      const otherAmountThresholdRaw = BigInt(jupiterQuote.otherAmountThreshold);
+      let jupiterQuote: JupiterQuote;
+      let secondQuote: JupiterQuote | undefined;
+      let otherAmountThresholdRaw: bigint;
+
+      if (isTwoHop) {
+        const twoHopMaxAccounts = Math.min(13, config.maxAccounts);
+        jupiterQuote = await getJupiterQuote(
+          config,
+          config.intermediateMint,
+          USDC_MINT,
+          stableQuote.outputRaw,
+          attempt * 2,
+          twoHopMaxAccounts,
+        );
+        const usdcMinimumRaw = BigInt(jupiterQuote.otherAmountThreshold);
+        secondQuote = await getJupiterQuote(
+          config,
+          USDC_MINT,
+          config.loanMint,
+          usdcMinimumRaw,
+          attempt * 2 + 1,
+          twoHopMaxAccounts,
+        );
+        otherAmountThresholdRaw = BigInt(secondQuote.otherAmountThreshold);
+      } else {
+        jupiterQuote = await getJupiterQuote(
+          config,
+          config.intermediateMint,
+          config.loanMint,
+          stableQuote.outputRaw,
+          attempt,
+        );
+        otherAmountThresholdRaw = BigInt(jupiterQuote.otherAmountThreshold);
+      }
       const grossProfitRaw = otherAmountThresholdRaw - loanAmountRaw;
 
       const cycle: ConservativeCycle = {
@@ -1206,7 +1235,7 @@ async function getCapacitySizedCycle(
       return {
         loanAmountRaw,
         firstQuote: jupiterQuote,
-        secondJupiterQuote: undefined,
+        secondJupiterQuote: secondQuote,
         stableQuote,
         cycle,
         capacityRaw,
@@ -1576,6 +1605,31 @@ async function buildFlashTransaction(
   }
 }
 
+export async function buildWalletFundedTransaction(
+  keypair: Keypair,
+  instructions: TransactionInstruction[],
+  lookupTables: AddressLookupTableAccount[],
+  blockhash: string,
+  computeUnitLimit: number,
+  computeUnitPriceMicroLamports: number,
+): Promise<VersionedTransaction> {
+  const message = new TransactionMessage({
+    payerKey: keypair.publicKey,
+    recentBlockhash: blockhash,
+    instructions: [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: computeUnitPriceMicroLamports,
+      }),
+      ...instructions,
+    ],
+  }).compileToV0Message(lookupTables);
+
+  const transaction = new VersionedTransaction(message);
+  transaction.sign([keypair]);
+  return transaction;
+}
+
 function simulationFailure(error: unknown, logs?: string[] | null): Error {
   const relevantLogs = (logs ?? []).slice(-18).join("\n");
   return new Error(
@@ -1817,6 +1871,7 @@ async function main(): Promise<void> {
   let client: Project0Client | undefined;
   let account: MarginfiAccountWrapper | undefined;
   let loanBank: Bank | undefined;
+  let isWalletFunded = false;
 
   if (!cli.quoteOnly) {
     await assertTokenAccountsExist(
@@ -1827,34 +1882,58 @@ async function main(): Promise<void> {
       config.loanMint,
       config.loanSymbol,
     );
-    client = await Project0Client.initialize(
-      connection,
-      getConfig("production"),
-    );
-    account = await selectMarginfiAccount(
-      client,
-      walletAddress,
-      config.marginfiAccount,
-    );
-    const loanBanks = client.getBanksByMint(config.loanMint, AssetTag.DEFAULT);
-    if (loanBanks.length !== 1) {
-      throw new Error(
-        `Expected exactly one standard Marginfi ${config.loanSymbol} bank; found ${loanBanks.length}`,
-      );
-    }
-    loanBank = loanBanks[0];
-    assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
+
+    let walletBalanceRaw = 0n;
     try {
-      const vaultBalance = await connection.getTokenAccountBalance(loanBank.liquidityVault);
-      const vaultRaw = BigInt(vaultBalance.value.amount);
-      availableBankLiquidityRaw = (vaultRaw * 95n) / 100n;
+      const tokenProgram = intermediateTokenProgram(config.loanMint);
+      const tokenAta = getAssociatedTokenAddressSync(
+        config.loanMint,
+        walletAddress,
+        false,
+        tokenProgram,
+      );
+      const bal = await connection.getTokenAccountBalance(tokenAta);
+      walletBalanceRaw = BigInt(bal.value.amount);
     } catch {
-      availableBankLiquidityRaw = undefined;
+      walletBalanceRaw = 0n;
     }
-    console.log(`Marginfi account: ${account.address.toBase58()}`);
-    console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
-    if (availableBankLiquidityRaw) {
-      console.log(`Marginfi liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`);
+
+    if (walletBalanceRaw >= 1_000_000_000n) {
+      isWalletFunded = true;
+      availableBankLiquidityRaw = walletBalanceRaw;
+      console.log(
+        `Wallet capital available: ${formatRaw(walletBalanceRaw)} ${config.loanSymbol} (Executing wallet-funded 2-hop route, 0 flash loan overhead)`,
+      );
+    } else {
+      client = await Project0Client.initialize(
+        connection,
+        getConfig("production"),
+      );
+      account = await selectMarginfiAccount(
+        client,
+        walletAddress,
+        config.marginfiAccount,
+      );
+      const loanBanks = client.getBanksByMint(config.loanMint, AssetTag.DEFAULT);
+      if (loanBanks.length !== 1) {
+        throw new Error(
+          `Expected exactly one standard Marginfi ${config.loanSymbol} bank; found ${loanBanks.length}`,
+        );
+      }
+      loanBank = loanBanks[0];
+      assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
+      try {
+        const vaultBalance = await connection.getTokenAccountBalance(loanBank.liquidityVault);
+        const vaultRaw = BigInt(vaultBalance.value.amount);
+        availableBankLiquidityRaw = (vaultRaw * 95n) / 100n;
+      } catch {
+        availableBankLiquidityRaw = undefined;
+      }
+      console.log(`Marginfi account: ${account.address.toBase58()}`);
+      console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
+      if (availableBankLiquidityRaw) {
+        console.log(`Marginfi liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`);
+      }
     }
   }
 
@@ -1865,27 +1944,37 @@ async function main(): Promise<void> {
     ? `${config.loanSymbol} -> ${config.intermediateSymbol} (Stable.com) -> ${config.loanSymbol} (Jupiter)`
     : `${config.loanSymbol} -> ${config.intermediateSymbol} (Jupiter) -> ${config.loanSymbol} (Stable.com)`;
   console.log(`Route: ${routeFlow}`);
-  console.log(`Flash-loan principal: ${formatRaw(loanAmountRaw)} ${config.loanSymbol}`);
+  console.log(`Trading capital: ${formatRaw(loanAmountRaw)} ${config.loanSymbol}`);
   console.log(
     `Stable.com capacity: ${formatRaw(sized.capacityRaw)} ${stableInputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol)} (${formatRaw(sized.usableCapacityRaw)} usable)`,
   );
   if (config.swapOrder === "stable-first") {
-    console.log(
-      `Leg 1 (Stable.com): ${config.loanSymbol} -> ${config.intermediateSymbol} | executable output: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
-    );
-    console.log(
-      `Leg 2 (Jupiter): ${config.intermediateSymbol} -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
-    );
+    if (isTwoHop && secondJupiterQuote) {
+      console.log(
+        `Leg 1 (Stable.com): ${config.loanSymbol} -> ${config.intermediateSymbol} | executable output: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+      );
+      console.log(
+        `Leg 2 (Jupiter): ${config.intermediateSymbol} -> USDC -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
+      );
+    } else {
+      console.log(
+        `Leg 1 (Stable.com): ${config.loanSymbol} -> ${config.intermediateSymbol} | executable output: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+      );
+      console.log(
+        `Leg 2 (Jupiter): ${config.intermediateSymbol} -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
+      );
+    }
   } else if (isTwoHop && secondJupiterQuote) {
     console.log(
       `Leg 1 (Jupiter): ${config.loanSymbol} -> USDC -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+    );
+    console.log(
+      `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
     );
   } else {
     console.log(
       `Leg 1 (Jupiter): ${config.loanSymbol} -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
     );
-  }
-  if (config.swapOrder !== "stable-first") {
     console.log(
       `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
     );
@@ -1904,7 +1993,7 @@ async function main(): Promise<void> {
     console.log("Quote-only mode: no transaction was built, signed, or sent.");
     return;
   }
-  if (!client || !account || !loanBank) {
+  if (!isWalletFunded && (!client || !account || !loanBank)) {
     throw new Error("Marginfi client or account not initialized");
   }
 
@@ -1925,15 +2014,13 @@ async function main(): Promise<void> {
       fetchLookupTables(connection, firstSwap2.lookupTableAddresses),
     ]);
     lookupTables = mergeLookupTables(
-      client.addressLookupTables ?? [],
+      client?.addressLookupTables ?? [],
       jupiterLookupTables1,
       jupiterLookupTables2,
     );
-    swapInstructions = [
-      ...firstSwap1.instructions,
-      ...firstSwap2.instructions,
-      stableLeg.instruction,
-    ];
+    swapInstructions = config.swapOrder === "stable-first"
+      ? [stableLeg.instruction, ...firstSwap1.instructions, ...firstSwap2.instructions]
+      : [...firstSwap1.instructions, ...firstSwap2.instructions, stableLeg.instruction];
     ignoredComputeBudgetCount =
       firstSwap1.ignoredComputeBudgetInstructionCount +
       firstSwap2.ignoredComputeBudgetInstructionCount;
@@ -1948,7 +2035,7 @@ async function main(): Promise<void> {
       firstSwap.lookupTableAddresses,
     );
     lookupTables = mergeLookupTables(
-      client.addressLookupTables ?? [],
+      client?.addressLookupTables ?? [],
       jupiterLookupTables,
     );
     swapInstructions =
@@ -1959,17 +2046,27 @@ async function main(): Promise<void> {
   }
 
   const latest = await connection.getLatestBlockhash(config.commitment);
-  const probe = await buildFlashTransaction(
-    account,
-    config.keypair,
-    loanBank.address,
-    loanAmountRaw,
-    swapInstructions,
-    lookupTables,
-    latest.blockhash,
-    config.probeComputeUnitLimit,
-    0,
-  );
+  const probe = isWalletFunded
+    ? await buildWalletFundedTransaction(
+        config.keypair,
+        swapInstructions,
+        lookupTables,
+        latest.blockhash,
+        config.probeComputeUnitLimit,
+        0,
+      )
+    : await buildFlashTransaction(
+        account!,
+        config.keypair,
+        loanBank!.address,
+        loanAmountRaw,
+        swapInstructions,
+        lookupTables,
+        latest.blockhash,
+        config.probeComputeUnitLimit,
+        0,
+      );
+
   const probeWireSize = probe.serialize().length;
   if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
     throw new Error(
@@ -1982,17 +2079,26 @@ async function main(): Promise<void> {
     config.computeUnitSafetyBps,
     config.probeComputeUnitLimit,
   );
-  const transaction = await buildFlashTransaction(
-    account,
-    config.keypair,
-    loanBank.address,
-    loanAmountRaw,
-    swapInstructions,
-    lookupTables,
-    latest.blockhash,
-    computeUnitLimit,
-    config.computeUnitPriceMicroLamports,
-  );
+  const transaction = isWalletFunded
+    ? await buildWalletFundedTransaction(
+        config.keypair,
+        swapInstructions,
+        lookupTables,
+        latest.blockhash,
+        computeUnitLimit,
+        config.computeUnitPriceMicroLamports,
+      )
+    : await buildFlashTransaction(
+        account!,
+        config.keypair,
+        loanBank!.address,
+        loanAmountRaw,
+        swapInstructions,
+        lookupTables,
+        latest.blockhash,
+        computeUnitLimit,
+        config.computeUnitPriceMicroLamports,
+      );
   const wireSize = transaction.serialize().length;
   if (wireSize > MAX_WIRE_TRANSACTION_BYTES) {
     throw new Error(
@@ -2038,7 +2144,7 @@ async function main(): Promise<void> {
   const plan: JsonRecord = {
     createdAt: new Date().toISOString(),
     wallet: walletAddress.toBase58(),
-    marginfiAccount: account.address.toBase58(),
+    marginfiAccount: account?.address.toBase58() ?? null,
     pair: `${config.loanSymbol}/${config.intermediateSymbol}`,
     stablePair: `${stableFromSymbol}/${stableToSymbol}`,
     dexPair: config.swapOrder === "dex-first"
@@ -2048,7 +2154,7 @@ async function main(): Promise<void> {
     swapOrder: config.swapOrder,
     loanSymbol: config.loanSymbol,
     intermediateSymbol: config.intermediateSymbol,
-    marginfiBank: loanBank.address.toBase58(),
+    marginfiBank: loanBank?.address.toBase58() ?? null,
     configuredMaximumPrincipalRaw: config.maximumLoanAmountRaw.toString(),
     principalRaw: loanAmountRaw.toString(),
     capacityAdjusted: sized.capacityAdjusted,
