@@ -28,8 +28,10 @@ from crosschain_sniper import (
     failure_category,
     execution_detail,
     execution_reference,
+    fetch_ethereum_base_fee_gwei,
     jupiter_market_key,
     parse_args,
+    parse_gas_fee_gwei,
     process_is_running,
     route_execution_floor,
     run_route,
@@ -529,6 +531,36 @@ class CrosschainSniperTests(unittest.TestCase):
                 "USDC -> PYUSD (Stable.com) -> USDC (MetaMatcha)",
             },
         )
+
+    def test_parse_gas_fee_gwei(self):
+        self.assertIsNone(parse_gas_fee_gwei(None))
+        self.assertIsNone(parse_gas_fee_gwei(""))
+        self.assertEqual(parse_gas_fee_gwei("1.0"), Decimal("1.0"))
+        self.assertEqual(parse_gas_fee_gwei("1.5 gwei"), Decimal("1.5"))
+        self.assertEqual(parse_gas_fee_gwei("1000000000 wei"), Decimal("1.0"))
+        self.assertEqual(parse_gas_fee_gwei("1000000000"), Decimal("1.0"))
+        self.assertEqual(parse_gas_fee_gwei(1), Decimal("1"))
+        with self.assertRaises(SniperError):
+            parse_gas_fee_gwei("invalid")
+        with self.assertRaises(SniperError):
+            parse_gas_fee_gwei("-1.0")
+
+    def test_fetch_ethereum_base_fee_gwei(self):
+        mock_response = Mock()
+        mock_response.read.return_value = (
+            b'{"jsonrpc":"2.0","id":1,"result":{"baseFeePerGas":"0x4b9f8600"}}'
+        )
+        mock_response.__enter__ = Mock(return_value=mock_response)
+        mock_response.__exit__ = Mock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            fee = fetch_ethereum_base_fee_gwei("http://mock-rpc")
+            # 0x4b9f8600 in hex = 1268745728 wei = 1.268745728 Gwei
+            self.assertEqual(fee, Decimal("1.268745728"))
+
+    def test_eth_max_base_fee_gwei_flag(self):
+        args = parse_args(["--eth-max-base-fee-gwei", "1.5"])
+        self.assertEqual(args.eth_max_base_fee_gwei, Decimal("1.5"))
 
 
 if __name__ == "__main__":

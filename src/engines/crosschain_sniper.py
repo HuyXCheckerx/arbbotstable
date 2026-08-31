@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import json
 import logging
@@ -29,6 +30,7 @@ PLAN_DIR = LOG_DIR / "sniper-plans"
 LOCK_PATH = LOG_DIR / ".crosschain-sniper.lock"
 PID_PATH = LOG_DIR / "crosschain-sniper.pid"
 STOP_PATH = LOG_DIR / ".crosschain-sniper.stop"
+DASHBOARD_PATH = LOG_DIR / "sniper-dashboard.json"
 LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("5")
 SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("1")
@@ -114,6 +116,11 @@ class Outcome:
     executed: bool
     detail: str
     category: str = "normal"
+    gross_profit: str | None = None
+    net_profit: str | None = None
+    profit_token: str | None = None
+    elapsed_seconds: float | None = None
+    transaction: str | None = None
 
 
 @dataclass(frozen=True)
@@ -572,10 +579,327 @@ def dependency_label(key: str) -> str:
     return f"{label} {market}".strip()
 
 
+def parse_gas_fee_gwei(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text.endswith("gwei"):
+        text = text.removesuffix("gwei").strip()
+        factor = Decimal(1)
+    elif text.endswith("wei"):
+        text = text.removesuffix("wei").strip()
+        factor = Decimal("1e-9")
+    else:
+        factor = Decimal(1)
+    try:
+        amt = Decimal(text)
+    except InvalidOperation:
+        raise SniperError(f"invalid gas fee limit: {value!r}")
+    if not amt.is_finite() or amt <= 0:
+        raise SniperError(f"gas fee limit must be positive: {value!r}")
+    scaled = amt * factor
+    if factor == 1 and amt >= Decimal(1000):
+        scaled = amt / Decimal(10**9)
+    return scaled
+
+
+def fetch_ethereum_base_fee_gwei(
+    rpc_url: str,
+    timeout: float = 5.0,
+) -> Decimal | None:
+    if not rpc_url:
+        return None
+    try:
+        import urllib.request
+
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockByNumber",
+                "params": ["latest", False],
+                "id": 1,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            rpc_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "arbbot-sniper/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            result = body.get("result")
+            if not isinstance(result, dict):
+                return None
+            base_fee_hex = result.get("baseFeePerGas")
+            if not base_fee_hex:
+                return None
+            base_fee_wei = int(base_fee_hex, 16)
+            return Decimal(base_fee_wei) / Decimal(10**9)
+    except Exception:
+        return None
+
+
 def subprocess_output_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value or ""
+
+
+def _profit_value(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation:
+        return None
+    return amount_text(parsed) if parsed.is_finite() else None
+
+
+def profit_metrics(route: Route, stdout: str, stderr: str = "") -> tuple[str | None, str | None]:
+    """Extract guaranteed gross/net profit without depending on one engine format."""
+    try:
+        plan = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        plan = None
+    if isinstance(plan, dict):
+        gross = _profit_value(plan.get("grossProfit"))
+        net = _profit_value(plan.get("predictedNetProfit"))
+        if gross is not None or net is not None:
+            return gross, net
+
+    combined = "\n".join(part for part in (stdout, stderr) if part)
+    patterns = {
+        "gross": (
+            r"Guaranteed gross result:\s*([-+\d.]+)",
+            r"Gross Profit:\s*([-+\d.]+)",
+        ),
+        "net": (
+            r"Guaranteed net result:\s*([-+\d.]+)",
+            r"Predicted Net Profit:\s*([-+\d.]+)",
+            r"guaranteed net\s+([-+\d.]+)",
+        ),
+    }
+
+    def first_match(candidates: tuple[str, ...]) -> str | None:
+        for pattern in candidates:
+            match = re.search(pattern, combined, re.IGNORECASE)
+            if match:
+                return _profit_value(match.group(1))
+        return None
+
+    return first_match(patterns["gross"]), first_match(patterns["net"])
+
+
+class SniperDashboardFeed:
+    """Thread-safe, atomic status feed consumed by the local web dashboard."""
+
+    _PAUSED_CATEGORIES = {
+        "no-route",
+        "capacity",
+        "unstable-capacity",
+        "transient-stable",
+        "transient-jupiter",
+        "transient-matcha",
+        "transient-rpc",
+        "access-blocked-matcha",
+    }
+
+    def __init__(
+        self,
+        path: Path,
+        routes: list[Route],
+        *,
+        live: bool,
+        base_threshold: Decimal,
+    ) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        started_at = self._now()
+        route_states: dict[str, dict[str, object]] = {}
+        for route in routes:
+            route_states[route.key] = self._route_record(
+                route,
+                route_execution_floor(route, base_threshold),
+                state="WAITING",
+                detail="Waiting for the first check",
+            )
+        self._state: dict[str, object] = {
+            "schema_version": 1,
+            "session": {
+                "status": "running",
+                "status_label": "Sniper running",
+                "mode": "live" if live else "dry-run",
+                "pid": os.getpid(),
+                "started_at": started_at,
+                "updated_at": started_at,
+                "route_count": len(routes),
+                "chains": sorted({route.chain for route in routes}),
+            },
+            "summary": {
+                "checks": 0,
+                "ready": 0,
+                "confirmed": 0,
+                "submitted": 0,
+                "no_trade": 0,
+                "paused": 0,
+                "errors": 0,
+            },
+            "active": {chain: None for chain in sorted({route.chain for route in routes})},
+            "routes": route_states,
+            "recent_results": [],
+            "last_execution": None,
+        }
+        with self._lock:
+            self._write_locked()
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _route_record(
+        route: Route,
+        execution_floor: Decimal,
+        *,
+        state: str,
+        detail: str,
+    ) -> dict[str, object]:
+        return {
+            "key": route.key,
+            "chain": route.chain,
+            "pair": route.pair,
+            "swap_order": route.swap_order,
+            "loan_token": route.loan,
+            "counter_token": route.intermediate,
+            "flow": route.display,
+            "execution_floor": amount_text(execution_floor),
+            "profit_token": route.loan,
+            "state": state,
+            "detail": detail,
+            "checked_at": None,
+            "started_at": None,
+            "duration_seconds": None,
+            "gross_profit": None,
+            "net_profit": None,
+            "transaction": None,
+            "cooldown_until": None,
+            "cooldown_reason": None,
+        }
+
+    def _write_locked(self) -> None:
+        session = self._state["session"]
+        assert isinstance(session, dict)
+        session["updated_at"] = self._now()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(
+            f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(self._state, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.path)
+        except OSError:
+            # Dashboard observability must never interrupt route execution.
+            temporary.unlink(missing_ok=True)
+
+    def begin_check(self, route: Route, execution_floor: Decimal) -> None:
+        with self._lock:
+            routes = self._state["routes"]
+            active = self._state["active"]
+            summary = self._state["summary"]
+            assert isinstance(routes, dict) and isinstance(active, dict) and isinstance(summary, dict)
+            record = self._route_record(
+                route,
+                execution_floor,
+                state="CHECKING",
+                detail="Requesting and simulating both atomic swap legs",
+            )
+            record["started_at"] = self._now()
+            previous = routes.get(route.key)
+            if isinstance(previous, dict):
+                record["checked_at"] = previous.get("checked_at")
+            routes[route.key] = record
+            active[route.chain] = dict(record)
+            summary["checks"] = int(summary.get("checks", 0)) + 1
+            self._write_locked()
+
+    def record_result(self, route: Route, execution_floor: Decimal, outcome: Outcome) -> None:
+        label = outcome_label(outcome)
+        with self._lock:
+            routes = self._state["routes"]
+            active = self._state["active"]
+            summary = self._state["summary"]
+            recent = self._state["recent_results"]
+            assert isinstance(routes, dict) and isinstance(active, dict)
+            assert isinstance(summary, dict) and isinstance(recent, list)
+            record = self._route_record(
+                route,
+                execution_floor,
+                state=label,
+                detail=outcome.detail,
+            )
+            record.update(
+                {
+                    "checked_at": self._now(),
+                    "duration_seconds": outcome.elapsed_seconds,
+                    "gross_profit": outcome.gross_profit,
+                    "net_profit": outcome.net_profit,
+                    "profit_token": outcome.profit_token or route.loan,
+                    "transaction": outcome.transaction,
+                    "category": outcome.category,
+                }
+            )
+            routes[route.key] = record
+            active[route.chain] = None
+            counter = (
+                "confirmed" if outcome.category == "confirmed" else
+                "submitted" if outcome.category == "submitted" else
+                "ready" if outcome.category == "eligible" else
+                "no_trade" if outcome.category == "unprofitable" else
+                "paused" if outcome.category in self._PAUSED_CATEGORIES else
+                "errors"
+            )
+            summary[counter] = int(summary.get(counter, 0)) + 1
+            recent.insert(0, dict(record))
+            del recent[100:]
+            if outcome.category in {
+                "confirmed", "submitted", "reverted", "expired", "dropped"
+            }:
+                self._state["last_execution"] = dict(record)
+            self._write_locked()
+
+    def record_cooldown(self, route: Route, seconds: float, reason: str) -> None:
+        if seconds <= 0:
+            return
+        with self._lock:
+            routes = self._state["routes"]
+            assert isinstance(routes, dict)
+            record = routes.get(route.key)
+            if isinstance(record, dict):
+                record["cooldown_until"] = (
+                    datetime.now(timezone.utc) + timedelta(seconds=seconds)
+                ).isoformat(timespec="seconds")
+                record["cooldown_reason"] = reason
+            self._write_locked()
+
+    def stop(self, label: str = "Sniper stopped") -> None:
+        with self._lock:
+            session = self._state["session"]
+            active = self._state["active"]
+            assert isinstance(session, dict) and isinstance(active, dict)
+            session["status"] = "stopped"
+            session["status_label"] = label
+            for chain in active:
+                active[chain] = None
+            self._write_locked()
 
 
 def run_route(
@@ -611,6 +935,7 @@ def run_route(
                 subprocess_output_text(exc.stderr),
             )
         )
+        gross_profit, net_profit = profit_metrics(route, captured)
         transaction_status, transaction = execution_reference(route, captured)
         plan_path = PLAN_DIR / f"{route.key}.json"
         try:
@@ -630,6 +955,11 @@ def run_route(
                 f"confirmed before the engine timed out after {timeout_seconds:g}s: "
                 f"{transaction}",
                 "confirmed",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=timeout_seconds,
+                transaction=transaction,
             )
         if transaction_status == "submitted" and transaction:
             return Outcome(
@@ -637,6 +967,11 @@ def run_route(
                 f"submitted but the engine timed out after {timeout_seconds:g}s: "
                 f"{transaction}",
                 "submitted",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=timeout_seconds,
+                transaction=transaction,
             )
         if transaction_status == "reverted" and transaction:
             return Outcome(
@@ -644,6 +979,11 @@ def run_route(
                 f"reverted before the engine timed out after {timeout_seconds:g}s: "
                 f"{transaction}",
                 "reverted",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=timeout_seconds,
+                transaction=transaction,
             )
         if transaction_status == "expired" and transaction:
             return Outcome(
@@ -651,6 +991,11 @@ def run_route(
                 f"expired without landing before the engine timed out after "
                 f"{timeout_seconds:g}s: {transaction}; continuing",
                 "expired",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=timeout_seconds,
+                transaction=transaction,
             )
         if transaction_status == "dropped" and transaction:
             return Outcome(
@@ -658,19 +1003,51 @@ def run_route(
                 f"not found with an unused nonce before the engine timed out after "
                 f"{timeout_seconds:g}s: {transaction}; continuing",
                 "dropped",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=timeout_seconds,
+                transaction=transaction,
             )
         return Outcome(
             False,
             f"quote timed out after {timeout_seconds:g}s",
             "transient-rpc",
+            gross_profit=gross_profit,
+            net_profit=net_profit,
+            profit_token=route.loan,
+            elapsed_seconds=timeout_seconds,
         )
     except OSError as exc:
-        return Outcome(False, f"could not start engine: {exc}")
+        return Outcome(
+            False,
+            f"could not start engine: {exc}",
+            elapsed_seconds=time.monotonic() - started,
+            profit_token=route.loan,
+        )
 
     elapsed = time.monotonic() - started
+    gross_profit, net_profit = profit_metrics(
+        route,
+        result.stdout or "",
+        result.stderr or "",
+    )
     transaction_status, transaction = execution_reference(route, result.stdout or "")
-    if transaction_status == "confirmed" and transaction:
+
+    def completed_outcome(executed: bool, detail: str, category: str) -> Outcome:
         return Outcome(
+            executed,
+            detail,
+            category,
+            gross_profit=gross_profit,
+            net_profit=net_profit,
+            profit_token=route.loan,
+            elapsed_seconds=elapsed,
+            transaction=transaction,
+        )
+
+    if transaction_status == "confirmed" and transaction:
+        return completed_outcome(
             True,
             f"confirmed in {elapsed:.1f}s: {transaction}",
             "confirmed",
@@ -681,26 +1058,26 @@ def run_route(
             if result.returncode
             else "receipt confirmation was not observed"
         )
-        return Outcome(
+        return completed_outcome(
             False,
             f"submitted in {elapsed:.1f}s but confirmation is ambiguous: "
             f"{transaction} ({failure})",
             "submitted",
         )
     if transaction_status == "reverted" and transaction:
-        return Outcome(
+        return completed_outcome(
             False,
             f"reverted in {elapsed:.1f}s: {transaction}",
             "reverted",
         )
     if transaction_status == "expired" and transaction:
-        return Outcome(
+        return completed_outcome(
             False,
             f"expired without landing in {elapsed:.1f}s: {transaction}; continuing",
             "expired",
         )
     if transaction_status == "dropped" and transaction:
-        return Outcome(
+        return completed_outcome(
             False,
             f"not found and nonce remains unused after {elapsed:.1f}s: "
             f"{transaction}; continuing",
@@ -708,16 +1085,20 @@ def run_route(
         )
     if result.returncode == 0:
         if live:
-            return Outcome(
+            return completed_outcome(
                 False,
                 f"engine succeeded in {elapsed:.1f}s without a transaction reference",
                 "failure",
             )
-        return Outcome(False, dry_run_detail(route, result.stdout or "", elapsed), "eligible")
+        return completed_outcome(
+            False,
+            dry_run_detail(route, result.stdout or "", elapsed),
+            "eligible",
+        )
 
     detail = concise_failure(result.stdout or "", result.stderr or "", result.returncode)
     category = failure_category(detail)
-    return Outcome(
+    return completed_outcome(
         False,
         readable_failure(route, detail, category),
         category,
@@ -825,8 +1206,7 @@ def single_instance() -> Iterator[None]:
                 msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
-
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
 
 
@@ -844,9 +1224,27 @@ def worker(
     once: bool,
     stop: threading.Event,
     logger: logging.Logger,
+    dashboard: SniperDashboardFeed | None = None,
+    eth_max_base_fee_gwei: Decimal | None = None,
+    eth_rpc_url: str = "https://ethereum-rpc.publicnode.com",
 ) -> None:
     route_deadlines: dict[str, float] = {}
     while not stop.is_set():
+        if chain == "ethereum" and eth_max_base_fee_gwei is not None:
+            current_base_fee = fetch_ethereum_base_fee_gwei(eth_rpc_url, timeout=5.0)
+            if current_base_fee is not None and current_base_fee > eth_max_base_fee_gwei:
+                logger.info(
+                    "PAUSE   | %-17s | %.0fs | current base fee (%.3f Gwei) exceeds limit (%.3f Gwei); waiting for lower gas...",
+                    "Ethereum gas",
+                    interval_seconds,
+                    current_base_fee,
+                    eth_max_base_fee_gwei,
+                )
+                if once:
+                    return
+                if stop.wait(interval_seconds):
+                    return
+                continue
         for route in routes:
             if stop.is_set():
                 return
@@ -857,6 +1255,8 @@ def worker(
                 continue
             floor = route_execution_floor(route, base_threshold)
             logger.info("CHECK   | %-8s | %s", chain.title(), route.display)
+            if dashboard:
+                dashboard.begin_check(route, floor)
             outcome = run_route(
                 route,
                 live=live,
@@ -877,6 +1277,8 @@ def worker(
                 route.display,
                 outcome.detail,
             )
+            if dashboard:
+                dashboard.record_result(route, floor, outcome)
             if outcome.category == "submitted":
                 logger.error(
                     "PAUSE   | %-17s | %.0fs | submission is unresolved; "
@@ -888,6 +1290,12 @@ def worker(
                     f"rpc:{route.chain}",
                     cooldown_policy.transient_base_seconds,
                 )
+                if dashboard:
+                    dashboard.record_cooldown(
+                        route,
+                        cooldown_policy.transient_base_seconds,
+                        "Submission confirmation is unresolved",
+                    )
                 continue
             if outcome.category.startswith("transient-"):
                 dependency = {
@@ -909,6 +1317,12 @@ def worker(
                     delay,
                     suffix,
                 )
+                if dashboard:
+                    dashboard.record_cooldown(
+                        route,
+                        delay,
+                        f"Temporary {dependency_label(dependency)} failure{suffix}",
+                    )
             else:
                 backoff.succeed(f"stable:{route.chain}")
                 backoff.succeed(f"rpc:{route.chain}")
@@ -925,6 +1339,12 @@ def worker(
                     dependency_label(dependency),
                     cooldown_policy.no_route_seconds,
                 )
+                if dashboard:
+                    dashboard.record_cooldown(
+                        route,
+                        cooldown_policy.no_route_seconds,
+                        "Return market is unavailable",
+                    )
             elif outcome.category == "access-blocked-matcha":
                 dependency = "metamatcha:ethereum"
                 backoff.block(dependency, cooldown_policy.provider_access_seconds)
@@ -933,6 +1353,12 @@ def worker(
                     dependency_label(dependency),
                     cooldown_policy.provider_access_seconds,
                 )
+                if dashboard:
+                    dashboard.record_cooldown(
+                        route,
+                        cooldown_policy.provider_access_seconds,
+                        "MetaMatcha denied this machine's access",
+                    )
             elif outcome.category == "capacity":
                 route_deadlines[route.key] = (
                     time.monotonic() + cooldown_policy.capacity_seconds
@@ -942,6 +1368,12 @@ def worker(
                     route.display,
                     cooldown_policy.capacity_seconds,
                 )
+                if dashboard:
+                    dashboard.record_cooldown(
+                        route,
+                        cooldown_policy.capacity_seconds,
+                        "Insufficient Stable.com capacity",
+                    )
             elif outcome.category == "unstable-capacity":
                 route_deadlines[route.key] = (
                     time.monotonic() + cooldown_policy.unstable_capacity_seconds
@@ -951,6 +1383,12 @@ def worker(
                     route.display,
                     cooldown_policy.unstable_capacity_seconds,
                 )
+                if dashboard:
+                    dashboard.record_cooldown(
+                        route,
+                        cooldown_policy.unstable_capacity_seconds,
+                        "Stable.com capacity is changing",
+                    )
             elif outcome.category == "reverted":
                 route_deadlines[route.key] = (
                     time.monotonic() + cooldown_policy.reverted_seconds
@@ -959,6 +1397,18 @@ def worker(
                     "PAUSE   | %-17s | %.0fs | transaction reverted",
                     route.display,
                     cooldown_policy.reverted_seconds,
+                )
+                if dashboard:
+                    dashboard.record_cooldown(
+                        route,
+                        cooldown_policy.reverted_seconds,
+                        "Transaction reverted",
+                    )
+            if outcome.executed and dashboard:
+                dashboard.record_cooldown(
+                    route,
+                    cooldown_seconds,
+                    "Post-execution cooldown",
                 )
             if outcome.executed and stop.wait(cooldown_seconds):
                 return
@@ -1065,6 +1515,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=float(os.getenv("SNIPER_REVERTED_COOLDOWN_SECONDS", "60")),
     )
+    parser.add_argument(
+        "--eth-max-base-fee-gwei",
+        "--eth-max-gas-gwei",
+        dest="eth_max_base_fee_gwei",
+        type=parse_gas_fee_gwei,
+        default=parse_gas_fee_gwei(
+            os.getenv("ETH_MAX_BASE_FEE_GWEI")
+            or os.getenv("SNIPER_ETH_MAX_BASE_FEE_GWEI")
+            or os.getenv("ETH_ARB_MAX_BASE_FEE_GWEI")
+            or os.getenv("ETH_MAX_GAS_FEE")
+        ),
+        help=(
+            "maximum allowed Ethereum base fee in Gwei (or Wei) before pausing Ethereum trading "
+            "(e.g. 1.0, 1.5, or '1000000000 wei')"
+        ),
+    )
     parser.add_argument("--once", action="store_true", help="check each route once")
     parser.add_argument("--live", action="store_true", help="allow guarded broadcasts")
     parser.add_argument("--confirm-live")
@@ -1152,11 +1618,26 @@ def main(argv: list[str] | None = None) -> int:
         "RULE    | Solana   | guaranteed net >= %s per completed cycle (strict floor)",
         amount_text(route_execution_floor(Route("solana", "USDC/USDG"), args.threshold_usd)),
     )
+    eth_rpc_url = (
+        os.getenv("ETH_RPC_URL")
+        or "https://ethereum-rpc.publicnode.com"
+    )
+    if args.eth_max_base_fee_gwei is not None:
+        logger.info(
+            "RULE    | Ethereum | pause trading if base fee > %.3f Gwei",
+            args.eth_max_base_fee_gwei,
+        )
     for route in routes:
         logger.info("ROUTE   | %-8s | %s", route.chain.title(), route.display)
 
     with single_instance():
         stop = threading.Event()
+        dashboard = SniperDashboardFeed(
+            DASHBOARD_PATH,
+            routes,
+            live=args.live,
+            base_threshold=args.threshold_usd,
+        )
         backoff = AdaptiveBackoff()
         cooldown_policy = CooldownPolicy(
             transient_base_seconds=args.transient_backoff_seconds,
@@ -1192,6 +1673,9 @@ def main(argv: list[str] | None = None) -> int:
                     "once": args.once,
                     "stop": stop,
                     "logger": logger,
+                    "dashboard": dashboard,
+                    "eth_max_base_fee_gwei": args.eth_max_base_fee_gwei,
+                    "eth_rpc_url": eth_rpc_url,
                 },
             )
             thread.start()
@@ -1206,9 +1690,8 @@ def main(argv: list[str] | None = None) -> int:
                 thread.join()
         stop.set()
         watcher.join(timeout=1)
+        dashboard.stop()
     return 0
-
-
 if __name__ == "__main__":
     try:
         raise SystemExit(main())

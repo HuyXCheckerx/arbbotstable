@@ -20,9 +20,6 @@ for sub in ("core", "recovery", "engines", "web", "deployers"):
     if subpath not in sys.path:
         sys.path.insert(0, subpath)
 
-from state_store import DEFAULT_DB_PATH, read_dashboard_state  # noqa: E402
-
-
 WEB_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = WEB_DIR.parents[1]
 STATIC_DIR = WEB_DIR / "static"
@@ -31,7 +28,14 @@ FAVICON_PATH = WEB_DIR / "favicon.svg"
 
 PORT = int(os.environ.get("PORT", "25284"))
 HOST = os.environ.get("WEB_HOST", "0.0.0.0")
-DB_PATH = os.environ.get("BOT_STATE_DB", str(DEFAULT_DB_PATH))
+SNIPER_DASHBOARD_PATH = Path(
+    os.environ.get(
+        "SNIPER_DASHBOARD_PATH",
+        str(PROJECT_ROOT / "logs" / "sniper-dashboard.json"),
+    )
+)
+SNIPER_LOG_PATH = PROJECT_ROOT / "logs" / "crosschain-sniper.log"
+SNIPER_PID_PATH = PROJECT_ROOT / "logs" / "crosschain-sniper.pid"
 REQUEST_TIMEOUT_SECONDS = max(
     1.0,
     float(os.environ.get("WEB_REQUEST_TIMEOUT_SECONDS", "10")),
@@ -102,6 +106,143 @@ def add_log(entry: str, log_type: str = "info") -> None:
 
 
 add_log("Arbitrage console online and listening for commands.", "system")
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        open_process.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        handle = open_process(0x1000, False, pid)
+        if not handle:
+            return False
+        close_handle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _pid_from_file(path: Path = SNIPER_PID_PATH) -> int | None:
+    try:
+        pid = int(path.read_text(encoding="ascii").strip())
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return pid if process_is_running(pid) else None
+
+
+def default_sniper_state() -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return {
+        "schema_version": 1,
+        "session": {
+            "status": "offline",
+            "status_label": "Sniper is not running",
+            "mode": None,
+            "pid": None,
+            "started_at": None,
+            "updated_at": now,
+            "route_count": 0,
+            "chains": [],
+            "running": False,
+        },
+        "summary": {
+            "checks": 0,
+            "ready": 0,
+            "confirmed": 0,
+            "submitted": 0,
+            "no_trade": 0,
+            "paused": 0,
+            "errors": 0,
+        },
+        "active": {},
+        "routes": {},
+        "recent_results": [],
+        "last_execution": None,
+    }
+
+
+def read_sniper_state(path: Path = SNIPER_DASHBOARD_PATH) -> dict[str, Any]:
+    fallback = default_sniper_state()
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        loaded = fallback
+    if not isinstance(loaded, dict):
+        loaded = fallback
+    session = loaded.get("session")
+    if not isinstance(session, dict):
+        loaded = fallback
+        session = loaded["session"]
+
+    recorded_pid = session.get("pid")
+    try:
+        recorded_pid = int(recorded_pid)
+    except (TypeError, ValueError):
+        recorded_pid = None
+    active_pid = _pid_from_file()
+    running = bool(recorded_pid and active_pid == recorded_pid)
+    session["running"] = running
+    if running:
+        session["status"] = "running"
+        session["status_label"] = "Sniper running"
+    elif session.get("status") == "running":
+        session["status"] = "offline"
+        session["status_label"] = "Sniper process is not running"
+        active = loaded.get("active")
+        if isinstance(active, dict):
+            for chain in active:
+                active[chain] = None
+    return loaded
+
+
+read_dashboard_state = read_sniper_state
+
+
+def read_sniper_logs(path: Path = SNIPER_LOG_PATH, max_lines: int = 250) -> list[dict[str, str]]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 256 * 1024))
+            payload = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    if size > 256 * 1024:
+        payload = payload.split("\n", 1)[-1]
+    entries: list[dict[str, str]] = []
+    for raw_line in payload.splitlines()[-max_lines:]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split("|", 2)]
+        timestamp = parts[0] if len(parts) == 3 else ""
+        level = parts[1] if len(parts) == 3 else "INFO"
+        text = parts[2] if len(parts) == 3 else line
+        upper = text.upper()
+        if "ERROR" in level.upper() or any(
+            marker in upper for marker in ("REVERTED", "STOPPED", "DROPPED")
+        ):
+            log_type = "error"
+        elif "CONFIRMED" in upper or "READY" in upper:
+            log_type = "success"
+        elif any(marker in upper for marker in ("CHECK", "RESULT", "PAUSE")):
+            log_type = "quote"
+        else:
+            log_type = "system"
+        entries.append({"timestamp": timestamp, "text": text, "type": log_type})
+    return entries
 
 
 def _route_symbols(chain: str, pair: str) -> tuple[str, str]:
@@ -531,31 +672,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/logs":
-            with LOG_LOCK:
-                logs = list(EXECUTION_LOGS)
-            self._json(200, {"logs": logs, "running": EXECUTION_LOCK.locked()})
+            state = read_sniper_state()
+            session = state.get("session", {})
+            self._json(
+                200,
+                {
+                    "logs": read_sniper_logs(),
+                    "running": bool(session.get("running"))
+                    if isinstance(session, dict)
+                    else False,
+                },
+            )
             return
 
         if path == "/api/state":
             try:
-                state = read_dashboard_state(DB_PATH, timeout_seconds=DB_TIMEOUT_SECONDS)
+                self._json(200, read_dashboard_state())
             except Exception:
-                self._json(
+                self._send(
                     503,
-                    {"ok": False, "error": "dashboard state temporarily unavailable"},
+                    "text/plain; charset=utf-8",
+                    b"dashboard state temporarily unavailable",
                 )
-                return
-            self._json(200, state)
             return
 
         if path == "/healthz":
-            try:
-                state = read_dashboard_state(DB_PATH, timeout_seconds=DB_TIMEOUT_SECONDS)
-                bot_status = state.get("bot", {}).get("status", "offline")
-                healthy = bot_status != "offline"
-            except Exception:
-                bot_status = "unavailable"
-                healthy = False
+            state = read_sniper_state()
+            session = state.get("session", {})
+            healthy = bool(session.get("running")) if isinstance(session, dict) else False
+            bot_status = session.get("status", "offline") if isinstance(session, dict) else "offline"
             self._json(200 if healthy else 503, {"ok": healthy, "status": bot_status})
             return
 

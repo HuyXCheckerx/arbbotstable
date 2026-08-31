@@ -105,10 +105,10 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_dashboard_exposes_quick_access_and_log_controls(self):
         self.assertIn('id="copy-url-button"', web.HTML_TEMPLATE)
-        self.assertIn('data-amount="100000"', web.HTML_TEMPLATE)
         self.assertIn('data-log-filter="error"', web.HTML_TEMPLATE)
         self.assertIn('id="copy-logs-button"', web.HTML_TEMPLATE)
-        self.assertIn('id="swap-order-select"', web.HTML_TEMPLATE)
+        self.assertIn('id="session-mode"', web.HTML_TEMPLATE)
+        self.assertIn('id="route-table-body"', web.HTML_TEMPLATE)
 
     def test_homepage_sets_a_restrictive_content_security_policy(self):
         status, headers, _ = self.request("/")

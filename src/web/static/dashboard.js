@@ -1,511 +1,373 @@
-"use strict";
+(() => {
+  "use strict";
 
-const LIVE_CONFIRMATION = "EXECUTE LIVE ARB";
-const REFRESH_INTERVAL_MS = 3000;
-const REFRESH_TIMEOUT_MS = 8000;
-const TOKEN_PAIRS = [
-  "USDC/USDG",
-  "USDG/USDC",
-  "USDC/PYUSD",
-  "PYUSD/USDC",
-  "USDG/PYUSD",
-  "PYUSD/USDG",
-];
-const SUPPORTED_PAIRS = {
-  ethereum: TOKEN_PAIRS,
-  solana: TOKEN_PAIRS,
-  polygon: ["PYUSD/USDC"],
-  bsc: ["USDT/USDC"],
-};
-
-const elements = {
-  form: document.getElementById("execution-form"),
-  chainButtons: [...document.querySelectorAll("[data-chain]")],
-  amountPresets: [...document.querySelectorAll("[data-amount]")],
-  logFilters: [...document.querySelectorAll("[data-log-filter]")],
-  pair: document.getElementById("pair-select"),
-  swapOrder: document.getElementById("swap-order-select"),
-  pairNote: document.getElementById("pair-note"),
-  amount: document.getElementById("amount-input"),
-  principalToken: document.getElementById("principal-token"),
-  slippageField: document.getElementById("slippage-field"),
-  slippage: document.getElementById("slippage-select"),
-  quoteButton: document.getElementById("quote-button"),
-  liveButton: document.getElementById("live-button"),
-  formError: document.getElementById("form-error"),
-  routeChip: document.getElementById("route-chip"),
-  connection: document.getElementById("connection-badge"),
-  systemStatus: document.getElementById("system-status"),
-  quoteStatus: document.getElementById("quote-status"),
-  quoteFlow: document.getElementById("quote-flow"),
-  quoteLoan: document.getElementById("quote-loan"),
-  quoteCost: document.getElementById("quote-cost"),
-  quoteLeg1: document.getElementById("quote-leg1"),
-  quoteLeg2: document.getElementById("quote-leg2"),
-  quoteGross: document.getElementById("quote-gross"),
-  quoteNet: document.getElementById("quote-net"),
-  terminal: document.getElementById("terminal"),
-  botStatus: document.getElementById("metric-bot-status"),
-  route: document.getElementById("metric-route"),
-  pyusd: document.getElementById("metric-pyusd"),
-  usdt: document.getElementById("metric-usdt"),
-  pnl: document.getElementById("metric-pnl"),
-  attempts: document.getElementById("metric-attempts"),
-  liveDialog: document.getElementById("live-dialog"),
-  confirmationForm: document.getElementById("live-confirmation-form"),
-  confirmationInput: document.getElementById("confirmation-input"),
-  confirmationError: document.getElementById("confirmation-error"),
-  confirmationSummary: document.getElementById("confirmation-summary"),
-  copyUrlButton: document.getElementById("copy-url-button"),
-  copyUrlFeedback: document.getElementById("copy-url-feedback"),
-  webappAddress: document.getElementById("webapp-address"),
-  copyLogsButton: document.getElementById("copy-logs-button"),
-};
-
-let selectedChain = "ethereum";
-let requestRunning = false;
-let lastLogFingerprint = "";
-let lastLogs = [];
-let activeLogFilter = "all";
-
-function routeSymbols() {
-  const [first, second] = elements.pair.value.split("/");
-  const flexible = selectedChain === "ethereum" || selectedChain === "solana";
-  const [loan, intermediate] = flexible ? [first, second] : [second, first];
-  return { intermediate, loan };
-}
-
-function dexName() {
-  return selectedChain === "solana" ? "Jupiter" : "MetaMatcha";
-}
-
-function routeFlow() {
-  const { intermediate, loan } = routeSymbols();
-  const stableFirst = elements.swapOrder.value === "stable-first";
-  return stableFirst
-    ? `${loan} → ${intermediate} (Stable.com) → ${loan} (${dexName()})`
-    : `${loan} → ${intermediate} (${dexName()}) → ${loan} (Stable.com)`;
-}
-
-function updateRoutePreview() {
-  const { intermediate, loan } = routeSymbols();
-  elements.quoteFlow.textContent = routeFlow();
-  elements.quoteLoan.textContent = `${elements.amount.value || "—"} ${loan}`;
-  elements.principalToken.textContent = loan;
-  const stableFirst = elements.swapOrder.value === "stable-first";
-  elements.routeChip.textContent = stableFirst ? "Stable-first cycle" : "DEX-first cycle";
-  elements.pairNote.textContent = stableFirst
-    ? `Flash-loan ${loan}; Stable.com converts it to ${intermediate}; ${dexName()} returns it to ${loan}.`
-    : `Flash-loan ${loan}; ${dexName()} converts it to ${intermediate}; Stable.com returns it to ${loan}.`;
-  for (const button of elements.amountPresets) {
-    button.classList.toggle("is-active", button.dataset.amount === elements.amount.value);
-  }
-  saveSettings();
-}
-
-function selectChain(chain) {
-  selectedChain = chain;
-  for (const button of elements.chainButtons) {
-    const active = button.dataset.chain === chain;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", String(active));
-  }
-
-  const supported = SUPPORTED_PAIRS[chain];
-  const flexible = chain === "ethereum" || chain === "solana";
-  elements.swapOrder.disabled = !flexible;
-  elements.slippageField.hidden = chain === "solana";
-  elements.slippage.disabled = requestRunning || chain === "solana";
-  if (!flexible) elements.swapOrder.value = "dex-first";
-  for (const option of elements.pair.options) {
-    option.disabled = !supported.includes(option.value);
-    if (supported.includes(option.value) && flexible) {
-      const [loan, counter] = option.value.split("/");
-      option.textContent = `${loan} / ${counter} · flash-loan ${loan}`;
-    } else if (supported.includes(option.value)) {
-      const [intermediate, loan] = option.value.split("/");
-      option.textContent = `${loan} → ${intermediate} (${dexName()}) → ${loan} (Stable.com)`;
-    }
-  }
-  if (!supported.includes(elements.pair.value)) {
-    elements.pair.value = supported[0];
-  }
-  updateRoutePreview();
-}
-
-function setConnection(state, label) {
-  elements.connection.dataset.state = state;
-  elements.systemStatus.textContent = label;
-}
-
-function setQuoteStatus(state, label) {
-  elements.quoteStatus.dataset.state = state;
-  elements.quoteStatus.textContent = label;
-}
-
-function setBusy(busy) {
-  requestRunning = busy;
-  elements.quoteButton.disabled = busy;
-  elements.liveButton.disabled = busy;
-  for (const button of elements.chainButtons) {
-    button.disabled = busy;
-  }
-  elements.pair.disabled = busy;
-  elements.swapOrder.disabled = busy || !(selectedChain === "ethereum" || selectedChain === "solana");
-  elements.amount.disabled = busy;
-  elements.slippage.disabled = busy || selectedChain === "solana";
-  for (const button of elements.amountPresets) {
-    button.disabled = busy;
-  }
-  if (busy) {
-    setConnection("busy", "Execution running");
-  }
-}
-
-function validateForm() {
-  const amount = elements.amount.value.trim();
-  if (!/^\d+(?:\.\d+)?$/.test(amount) || Number(amount) <= 0) {
-    elements.formError.textContent = "Enter a positive decimal principal.";
-    elements.amount.focus();
-    return false;
-  }
-  elements.formError.textContent = "";
-  return true;
-}
-
-function requestPayload(mode, confirmation = "") {
-  const payload = {
-    chain: selectedChain,
-    pair: elements.pair.value,
-    swapOrder: elements.swapOrder.value,
-    mode,
-    amount: elements.amount.value.trim(),
-    confirmation,
+  const $ = (id) => document.getElementById(id);
+  const elements = {
+    connection: $("connection-badge"),
+    systemStatus: $("system-status"),
+    metricStatus: $("metric-status"),
+    metricMode: $("metric-mode"),
+    metricChecks: $("metric-checks"),
+    metricRouteCount: $("metric-route-count"),
+    metricBestProfit: $("metric-best-profit"),
+    metricBestRoute: $("metric-best-route"),
+    metricConfirmed: $("metric-confirmed"),
+    metricOutcomes: $("metric-outcomes"),
+    sessionMode: $("session-mode"),
+    sessionCallout: $("session-callout"),
+    sessionLabel: $("session-label"),
+    sessionGuidance: $("session-guidance"),
+    sessionPid: $("session-pid"),
+    sessionUptime: $("session-uptime"),
+    sessionUpdated: $("session-updated"),
+    sessionChains: $("session-chains"),
+    activeChainGrid: $("active-chain-grid"),
+    feedStatus: $("feed-status"),
+    summaryReady: $("summary-ready"),
+    summaryNoTrade: $("summary-no-trade"),
+    summaryPaused: $("summary-paused"),
+    summarySubmitted: $("summary-submitted"),
+    lastExecutionCard: $("last-execution-card"),
+    lastExecutionTitle: $("last-execution-title"),
+    lastExecutionDetail: $("last-execution-detail"),
+    lastExecutionLink: $("last-execution-link"),
+    routeTableBody: $("route-table-body"),
+    routeTableNote: $("route-table-note"),
+    terminal: $("terminal"),
+    copyLogsButton: $("copy-logs-button"),
+    copyUrlButton: $("copy-url-button"),
+    copyUrlFeedback: $("copy-url-feedback"),
+    webappAddress: $("webapp-address"),
   };
-  if (selectedChain !== "solana") {
-    payload.slippageBps = elements.slippage.value;
+
+  let currentLogs = [];
+  let logFilter = "all";
+  let pollTimer = null;
+
+  function setText(element, value) {
+    if (element) element.textContent = value;
   }
-  return payload;
-}
 
-function renderQuote(parsed) {
-  if (!parsed || typeof parsed !== "object") return;
-  const assignments = [
-    [elements.quoteFlow, parsed.flow],
-    [elements.quoteLoan, parsed.loan],
-    [elements.quoteCost, parsed.cost],
-    [elements.quoteLeg1, parsed.leg1],
-    [elements.quoteLeg2, parsed.leg2],
-    [elements.quoteGross, parsed.gross],
-    [elements.quoteNet, parsed.net],
-  ];
-  for (const [element, value] of assignments) {
-    if (value) element.textContent = value;
+  function parseDate(value) {
+    const date = value ? new Date(value) : null;
+    return date && Number.isFinite(date.getTime()) ? date : null;
   }
-}
 
-async function runArbitrage(mode, confirmation = "") {
-  setBusy(true);
-  setQuoteStatus("loading", mode === "live" ? "Executing live" : "Requesting quote");
-  elements.formError.textContent = "";
-
-  try {
-    const response = await fetch("/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestPayload(mode, confirmation)),
-    });
-    const data = await response.json();
-    renderQuote(data.parsed);
-    if (!data.ok) {
-      throw new Error(data.error || `Request failed with HTTP ${response.status}`);
-    }
-    setQuoteStatus("success", mode === "live" ? "Transaction confirmed" : "Quote ready");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Request failed";
-    elements.formError.textContent = message;
-    setQuoteStatus("error", "Request failed");
-  } finally {
-    setBusy(false);
-    await refreshOnce();
+  function formatDuration(totalSeconds) {
+    if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "—";
+    const seconds = Math.floor(totalSeconds);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainder = seconds % 60;
+    if (hours) return `${hours}h ${minutes}m ${remainder}s`;
+    if (minutes) return `${minutes}m ${remainder}s`;
+    return `${remainder}s`;
   }
-}
 
-function openLiveConfirmation() {
-  const { loan } = routeSymbols();
-  elements.confirmationInput.value = "";
-  elements.confirmationError.textContent = "";
-  elements.confirmationSummary.textContent = `${selectedChain.toUpperCase()} · ${elements.amount.value} ${loan} · ${routeFlow()}`;
-  elements.liveDialog.showModal();
-  elements.confirmationInput.focus();
-}
-
-elements.form.addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (requestRunning || !validateForm()) return;
-  const mode = event.submitter?.dataset.mode || "quote";
-  if (mode === "live") {
-    openLiveConfirmation();
-  } else {
-    void runArbitrage("quote");
+  function relativeTime(value) {
+    const date = parseDate(value);
+    if (!date) return "—";
+    const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+    if (seconds < 5) return "just now";
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    return `${Math.floor(seconds / 3600)}h ago`;
   }
-});
 
-elements.confirmationForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const action = event.submitter?.value;
-  if (action === "cancel") {
-    elements.liveDialog.close();
-    return;
+  function compactNumber(value) {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number.toLocaleString() : "0";
   }
-  if (elements.confirmationInput.value !== LIVE_CONFIRMATION) {
-    elements.confirmationError.textContent = `Type ${LIVE_CONFIRMATION} exactly.`;
-    elements.confirmationInput.focus();
-    return;
+
+  function profitText(value, token) {
+    if (value === null || value === undefined || value === "") return "—";
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    const decimals = Math.abs(number) >= 100 ? 2 : 6;
+    return `${number.toLocaleString(undefined, { maximumFractionDigits: decimals })} ${token || ""}`.trim();
   }
-  elements.liveDialog.close();
-  void runArbitrage("live", LIVE_CONFIRMATION);
-});
 
-for (const button of elements.chainButtons) {
-  button.addEventListener("click", () => selectChain(button.dataset.chain));
-}
-elements.pair.addEventListener("change", updateRoutePreview);
-elements.swapOrder.addEventListener("change", updateRoutePreview);
-elements.amount.addEventListener("input", updateRoutePreview);
-elements.slippage.addEventListener("change", saveSettings);
-for (const button of elements.amountPresets) {
-  button.addEventListener("click", () => {
-    elements.amount.value = button.dataset.amount;
-    updateRoutePreview();
-  });
-}
+  function routeValues(routes) {
+    if (!routes || typeof routes !== "object") return [];
+    return Array.isArray(routes) ? routes : Object.values(routes);
+  }
 
-function saveSettings() {
-  try {
-    localStorage.setItem(
-      "arb-dashboard-settings",
-      JSON.stringify({
-        chain: selectedChain,
-        pair: elements.pair.value,
-        swapOrder: elements.swapOrder.value,
-        amount: elements.amount.value,
-        slippage: elements.slippage.value,
-      }),
+  function bestRoute(routes) {
+    return routes.reduce((best, route) => {
+      const net = Number(route.net_profit);
+      if (!Number.isFinite(net)) return best;
+      if (!best || net > Number(best.net_profit)) return route;
+      return best;
+    }, null);
+  }
+
+  function renderSession(session, summary, routes) {
+    const running = Boolean(session.running);
+    const mode = session.mode === "live" ? "LIVE" : session.mode === "dry-run" ? "DRY RUN" : "OFFLINE";
+    const statusLabel = session.status_label || (running ? "Sniper running" : "Sniper is not running");
+    const started = parseDate(session.started_at);
+
+    elements.connection.dataset.state = running ? "online" : "offline";
+    setText(elements.systemStatus, running ? "Sniper online" : "Sniper offline");
+    setText(elements.metricStatus, running ? "Running" : "Offline");
+    setText(elements.metricMode, running ? `${mode} · PID ${session.pid}` : "Run start_sniper.cmd to begin");
+    setText(elements.sessionMode, mode);
+    elements.sessionMode.dataset.state = running ? (session.mode === "live" ? "live" : "ready") : "offline";
+    elements.sessionCallout.dataset.state = running ? "online" : "offline";
+    setText(elements.sessionLabel, statusLabel);
+    setText(
+      elements.sessionGuidance,
+      running
+        ? "Live status is read directly from the active sniper process."
+        : "Start it from a separate terminal to populate this dashboard.",
     );
-  } catch (_error) {
-    // The dashboard remains fully usable when storage is unavailable.
-  }
-}
+    setText(elements.sessionPid, running ? String(session.pid) : "—");
+    setText(elements.sessionUptime, running && started ? formatDuration((Date.now() - started.getTime()) / 1000) : "—");
+    setText(elements.sessionUpdated, relativeTime(session.updated_at));
+    setText(elements.sessionChains, Array.isArray(session.chains) && session.chains.length ? session.chains.map((chain) => chain[0].toUpperCase() + chain.slice(1)).join(" + ") : "—");
 
-function restoreSettings() {
-  try {
-    const saved = JSON.parse(localStorage.getItem("arb-dashboard-settings") || "null");
-    if (!saved || typeof saved !== "object") return;
-    if (SUPPORTED_PAIRS[saved.chain]) selectedChain = saved.chain;
-    if (typeof saved.amount === "string" && /^\d+(?:\.\d+)?$/.test(saved.amount)) {
-      elements.amount.value = saved.amount;
+    setText(elements.metricChecks, compactNumber(summary.checks));
+    setText(elements.metricRouteCount, `${session.route_count || routes.length} configured routes`);
+    setText(elements.metricConfirmed, `${summary.confirmed || 0} confirmed`);
+    setText(elements.metricOutcomes, `${summary.ready || 0} ready · ${summary.errors || 0} errors`);
+    setText(elements.summaryReady, compactNumber(summary.ready));
+    setText(elements.summaryNoTrade, compactNumber(summary.no_trade));
+    setText(elements.summaryPaused, compactNumber(summary.paused));
+    setText(elements.summarySubmitted, compactNumber(summary.submitted));
+    elements.feedStatus.dataset.state = running ? "success" : "idle";
+    setText(elements.feedStatus, running ? "Live feed" : "Offline");
+
+    const best = bestRoute(routes);
+    setText(elements.metricBestProfit, best ? profitText(best.net_profit, best.profit_token) : "—");
+    setText(elements.metricBestRoute, best ? `${best.chain} · ${best.pair} · ${best.swap_order}` : "No completed checks");
+  }
+
+  function renderActive(active) {
+    elements.activeChainGrid.replaceChildren();
+    const checks = Object.entries(active || {}).filter(([, route]) => route);
+    if (!checks.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-inline";
+      empty.textContent = "No route checks are active.";
+      elements.activeChainGrid.append(empty);
+      return;
     }
-    if ([...elements.slippage.options].some((option) => option.value === saved.slippage)) {
-      elements.slippage.value = saved.slippage;
+    checks.forEach(([chain, route]) => {
+      const card = document.createElement("article");
+      card.className = "active-check";
+      const header = document.createElement("div");
+      const name = document.createElement("strong");
+      name.textContent = chain[0].toUpperCase() + chain.slice(1);
+      const badge = document.createElement("span");
+      badge.textContent = "Checking";
+      header.append(name, badge);
+      const flow = document.createElement("p");
+      flow.textContent = route.flow || route.pair;
+      const elapsed = document.createElement("small");
+      const start = parseDate(route.started_at);
+      elapsed.textContent = `Running ${start ? formatDuration((Date.now() - start.getTime()) / 1000) : "now"} · required ${profitText(route.execution_floor, route.profit_token)}`;
+      card.append(header, flow, elapsed);
+      elements.activeChainGrid.append(card);
+    });
+  }
+
+  function statusRank(state) {
+    return { CHECKING: 0, CONFIRMED: 1, STOPPED: 2, READY: 3, ERROR: 4, REVERTED: 5, PAUSED: 6, "NO TRADE": 7, DROPPED: 8, WAITING: 9 }[state] ?? 10;
+  }
+
+  function appendCell(row, text, className = "") {
+    const cell = document.createElement("td");
+    if (className) cell.className = className;
+    cell.textContent = text;
+    row.append(cell);
+    return cell;
+  }
+
+  function renderRoutes(routes) {
+    elements.routeTableBody.replaceChildren();
+    if (!routes.length) {
+      const row = document.createElement("tr");
+      const cell = appendCell(row, "No sniper session has been recorded yet.", "empty-table");
+      cell.colSpan = 6;
+      elements.routeTableBody.append(row);
+      setText(elements.routeTableNote, "Waiting for start_sniper.cmd");
+      return;
     }
-    if (["dex-first", "stable-first"].includes(saved.swapOrder)) {
-      elements.swapOrder.value = saved.swapOrder;
+    const sorted = [...routes].sort((left, right) => {
+      const rank = statusRank(left.state) - statusRank(right.state);
+      if (rank) return rank;
+      return String(right.checked_at || "").localeCompare(String(left.checked_at || ""));
+    });
+    sorted.forEach((route) => {
+      const row = document.createElement("tr");
+      row.dataset.state = String(route.state || "waiting").toLowerCase().replace(" ", "-");
+      row.title = route.cooldown_reason || route.detail || "";
+
+      const stateCell = document.createElement("td");
+      const status = document.createElement("span");
+      status.className = "route-status";
+      status.textContent = route.state || "WAITING";
+      stateCell.append(status);
+      row.append(stateCell);
+
+      const routeCell = document.createElement("td");
+      routeCell.className = "route-name";
+      const chain = document.createElement("span");
+      chain.textContent = `${route.chain || "—"} · ${route.swap_order || "—"}`;
+      const flow = document.createElement("strong");
+      flow.textContent = route.flow || route.pair || "—";
+      const detail = document.createElement("small");
+      detail.textContent = route.cooldown_reason || route.detail || "Waiting for check";
+      routeCell.append(chain, flow, detail);
+      row.append(routeCell);
+
+      appendCell(row, profitText(route.gross_profit, route.profit_token), "profit-cell");
+      const netCell = appendCell(row, profitText(route.net_profit, route.profit_token), "profit-cell net-cell");
+      const net = Number(route.net_profit);
+      const floor = Number(route.execution_floor);
+      if (Number.isFinite(net) && Number.isFinite(floor)) netCell.dataset.result = net >= floor ? "positive" : "negative";
+      appendCell(row, profitText(route.execution_floor, route.profit_token), "profit-cell");
+      appendCell(row, relativeTime(route.checked_at), "time-cell");
+      elements.routeTableBody.append(row);
+    });
+    setText(elements.routeTableNote, `${routes.length} route variants · newest actionable results first`);
+  }
+
+  function safeExplorerUrl(value) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:") return null;
+      if (!["etherscan.io", "solscan.io"].includes(url.hostname)) return null;
+      return url.href;
+    } catch (_error) {
+      return null;
     }
-    selectChain(selectedChain);
-    if (SUPPORTED_PAIRS[selectedChain].includes(saved.pair)) {
-      elements.pair.value = saved.pair;
+  }
+
+  function renderExecution(execution) {
+    if (!execution) {
+      elements.lastExecutionCard.dataset.state = "empty";
+      setText(elements.lastExecutionTitle, "No transaction submitted this session");
+      setText(elements.lastExecutionDetail, "Confirmed, reverted, dropped, and unresolved transactions will appear here.");
+      elements.lastExecutionLink.hidden = true;
+      return;
     }
-  } catch (_error) {
-    // Ignore corrupt or blocked local storage.
-  }
-}
-
-function filteredLogs() {
-  if (activeLogFilter === "error") {
-    return lastLogs.filter((item) => item?.type === "error");
-  }
-  if (activeLogFilter === "quote") {
-    return lastLogs.filter((item) => item?.type === "quote" || item?.type === "success");
-  }
-  return lastLogs;
-}
-
-function renderLogs(logs) {
-  if (!Array.isArray(logs)) return;
-  lastLogs = logs;
-  const visibleLogs = filteredLogs();
-  const fingerprint = `${activeLogFilter}:${JSON.stringify(visibleLogs)}`;
-  if (fingerprint === lastLogFingerprint) return;
-  lastLogFingerprint = fingerprint;
-
-  const shouldStick =
-    elements.terminal.scrollHeight - elements.terminal.scrollTop - elements.terminal.clientHeight < 45;
-  const fragment = document.createDocumentFragment();
-  for (const item of visibleLogs) {
-    if (!item || typeof item !== "object") continue;
-    const line = document.createElement("div");
-    const type = ["info", "success", "error", "quote", "system"].includes(item.type)
-      ? item.type
-      : "info";
-    line.className = `log-line log-${type}`;
-
-    const timestamp = document.createElement("span");
-    timestamp.className = "log-timestamp";
-    timestamp.textContent = `[${String(item.timestamp || "--:--:--")}]`;
-
-    const text = document.createElement("span");
-    text.className = "log-text";
-    text.textContent = String(item.text || "");
-
-    line.append(timestamp, text);
-    fragment.appendChild(line);
-  }
-  if (!fragment.childNodes.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-log";
-    empty.textContent = `No ${activeLogFilter === "all" ? "" : `${activeLogFilter} `}entries to show.`;
-    fragment.appendChild(empty);
-  }
-  elements.terminal.replaceChildren(fragment);
-  if (shouldStick || !elements.terminal.dataset.rendered) {
-    elements.terminal.scrollTop = elements.terminal.scrollHeight;
-  }
-  elements.terminal.dataset.rendered = "true";
-}
-
-for (const button of elements.logFilters) {
-  button.addEventListener("click", () => {
-    activeLogFilter = button.dataset.logFilter;
-    for (const candidate of elements.logFilters) {
-      const active = candidate === button;
-      candidate.classList.toggle("is-active", active);
-      candidate.setAttribute("aria-pressed", String(active));
+    elements.lastExecutionCard.dataset.state = String(execution.state || "result").toLowerCase();
+    setText(elements.lastExecutionTitle, `${execution.state || "RESULT"} · ${execution.chain} · ${execution.pair}`);
+    setText(elements.lastExecutionDetail, execution.detail || execution.flow || "Transaction result recorded.");
+    const url = safeExplorerUrl(execution.transaction);
+    if (url) {
+      elements.lastExecutionLink.href = url;
+      elements.lastExecutionLink.hidden = false;
+    } else {
+      elements.lastExecutionLink.hidden = true;
     }
-    lastLogFingerprint = "";
-    renderLogs(lastLogs);
+  }
+
+  function renderState(state) {
+    const session = state.session || {};
+    const summary = state.summary || {};
+    const routes = routeValues(state.routes);
+    renderSession(session, summary, routes);
+    renderActive(state.active || {});
+    renderRoutes(routes);
+    renderExecution(state.last_execution);
+  }
+
+  function filteredLogs() {
+    return logFilter === "all" ? currentLogs : currentLogs.filter((entry) => entry.type === logFilter);
+  }
+
+  function renderLogs() {
+    const entries = filteredLogs();
+    const nearBottom = elements.terminal.scrollHeight - elements.terminal.scrollTop - elements.terminal.clientHeight < 60;
+    elements.terminal.replaceChildren();
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-log";
+      empty.textContent = currentLogs.length ? "No log lines match this filter." : "No sniper log has been written yet.";
+      elements.terminal.append(empty);
+      return;
+    }
+    entries.forEach((entry) => {
+      const line = document.createElement("div");
+      line.className = `log-line log-${entry.type || "info"}`;
+      const timestamp = document.createElement("span");
+      timestamp.className = "log-timestamp";
+      timestamp.textContent = String(entry.timestamp || "").replace(/^\d{4}-\d{2}-\d{2}\s*/, "");
+      const text = document.createElement("span");
+      text.className = "log-text";
+      text.textContent = entry.text || "";
+      line.append(timestamp, text);
+      elements.terminal.append(line);
+    });
+    if (nearBottom) elements.terminal.scrollTop = elements.terminal.scrollHeight;
+  }
+
+  async function fetchJson(path) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(path, { cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+      return await response.json();
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async function refresh() {
+    try {
+      const [state, logState] = await Promise.all([fetchJson("/api/state"), fetchJson("/api/logs")]);
+      renderState(state);
+      currentLogs = Array.isArray(logState.logs) ? logState.logs : [];
+      renderLogs();
+    } catch (_error) {
+      elements.connection.dataset.state = "error";
+      setText(elements.systemStatus, "Dashboard unavailable");
+      setText(elements.feedStatus, "Feed error");
+      elements.feedStatus.dataset.state = "error";
+    } finally {
+      pollTimer = window.setTimeout(refresh, 2000);
+    }
+  }
+
+  document.querySelectorAll("[data-log-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      logFilter = button.dataset.logFilter || "all";
+      document.querySelectorAll("[data-log-filter]").forEach((candidate) => {
+        const active = candidate === button;
+        candidate.classList.toggle("is-active", active);
+        candidate.setAttribute("aria-pressed", String(active));
+      });
+      renderLogs();
+    });
   });
-}
 
-async function copyText(value, feedback, successLabel) {
-  const original = feedback.textContent;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value);
-    } else {
-      throw new Error("Clipboard API unavailable");
+  elements.copyLogsButton.addEventListener("click", async () => {
+    const text = filteredLogs().map((entry) => `${entry.timestamp || ""} ${entry.text || ""}`.trim()).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setText(elements.copyLogsButton, "Copied");
+    } catch (_error) {
+      setText(elements.copyLogsButton, "Copy failed");
     }
-    feedback.textContent = successLabel;
-  } catch (_error) {
-    const fallback = document.createElement("textarea");
-    fallback.value = value;
-    fallback.setAttribute("readonly", "");
-    fallback.style.position = "fixed";
-    fallback.style.opacity = "0";
-    document.body.appendChild(fallback);
-    fallback.select();
-    const copied = document.execCommand("copy");
-    fallback.remove();
-    feedback.textContent = copied ? successLabel : "Copy failed";
-  }
-  window.setTimeout(() => {
-    feedback.textContent = original;
-  }, 1400);
-}
+    window.setTimeout(() => setText(elements.copyLogsButton, "Copy log"), 1200);
+  });
 
-elements.webappAddress.textContent = window.location.host;
-elements.copyUrlButton.addEventListener("click", () => {
-  void copyText(window.location.href, elements.copyUrlFeedback, "URL copied");
-});
-elements.copyLogsButton.addEventListener("click", () => {
-  const text = filteredLogs()
-    .map((item) => `[${item.timestamp || "--:--:--"}] ${item.text || ""}`)
-    .join("\n");
-  void copyText(text || "No log entries.", elements.copyLogsButton, "Copied");
-});
-
-const numberFormatter = new Intl.NumberFormat(undefined, {
-  maximumFractionDigits: 2,
-});
-const pnlFormatter = new Intl.NumberFormat(undefined, {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-  signDisplay: "exceptZero",
-});
-
-function poolAmount(state, symbol) {
-  const value = state?.balances?.pools?.[symbol]?.amount;
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function renderState(state) {
-  const bot = state?.bot || {};
-  const performance = state?.performance || {};
-  const offline = bot.status === "offline";
-  elements.botStatus.textContent = bot.status_label || bot.status || "Unknown";
-  elements.route.textContent = bot.current_route || "No active route";
-
-  const pyusd = poolAmount(state, "PYUSD");
-  const usdt = poolAmount(state, "USDT");
-  elements.pyusd.textContent = offline || pyusd === null ? "—" : `${numberFormatter.format(pyusd)} PYUSD`;
-  elements.usdt.textContent = offline || usdt === null ? "—" : `${numberFormatter.format(usdt)} USDT`;
-
-  const pnl = Number(performance.session_realized_pnl_usd || 0);
-  elements.pnl.textContent = pnlFormatter.format(pnl);
-  elements.pnl.style.color = pnl > 0 ? "var(--green)" : pnl < 0 ? "var(--red)" : "var(--text)";
-  const attempts = Number(performance.session_attempts || 0);
-  elements.attempts.textContent = `${attempts} ${attempts === 1 ? "attempt" : "attempts"}`;
-}
-
-async function fetchJson(url, signal) {
-  const response = await fetch(url, { cache: "no-store", signal });
-  if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
-  return response.json();
-}
-
-async function refreshOnce() {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
-  try {
-    const [logsResult, stateResult] = await Promise.allSettled([
-      fetchJson("/api/logs", controller.signal),
-      fetchJson("/api/state", controller.signal),
-    ]);
-
-    let consoleReachable = false;
-    let executionRunning = requestRunning;
-    if (logsResult.status === "fulfilled") {
-      consoleReachable = true;
-      executionRunning ||= Boolean(logsResult.value.running);
-      renderLogs(logsResult.value.logs);
+  elements.webappAddress.textContent = window.location.host;
+  elements.copyUrlButton.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setText(elements.copyUrlFeedback, "Copied");
+    } catch (_error) {
+      setText(elements.copyUrlFeedback, "Failed");
     }
-    if (stateResult.status === "fulfilled") {
-      consoleReachable = true;
-      renderState(stateResult.value);
-    }
+    window.setTimeout(() => setText(elements.copyUrlFeedback, "Copy"), 1200);
+  });
 
-    if (executionRunning) {
-      setConnection("busy", "Execution running");
-    } else if (consoleReachable) {
-      setConnection("online", "Console online");
-    } else {
-      setConnection("error", "Disconnected");
-    }
-  } catch (_error) {
-    setConnection("error", "Disconnected");
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
-async function refreshLoop() {
-  await refreshOnce();
-  window.setTimeout(refreshLoop, REFRESH_INTERVAL_MS);
-}
-
-restoreSettings();
-selectChain(selectedChain);
-updateRoutePreview();
-void refreshLoop();
+  window.addEventListener("beforeunload", () => {
+    if (pollTimer) window.clearTimeout(pollTimer);
+  });
+  refresh();
+})();

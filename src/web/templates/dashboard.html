@@ -5,236 +5,128 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#070a10">
-  <meta name="description" content="Stablecoin arbitrage quote and execution console">
+  <meta name="description" content="Live monitoring dashboard for the cross-chain stablecoin profit sniper">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/static/dashboard.css">
   <script src="/static/dashboard.js" defer></script>
-  <title>Arbitrage Operations</title>
+  <title>Profit Sniper Dashboard</title>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="Arbitrage Operations home">
+    <a class="brand" href="/" aria-label="Profit Sniper dashboard home">
       <span class="brand-mark" aria-hidden="true">A/</span>
-      <span>
-        <strong>Arbitrage Operations</strong>
-        <small>Stable execution console</small>
-      </span>
+      <span><strong>Profit Sniper</strong><small>Live cross-chain operations</small></span>
     </a>
     <nav class="topnav" aria-label="Dashboard sections">
-      <a href="#route-builder">Route builder</a>
-      <a href="#quote-output">Quote</a>
+      <a href="#overview">Overview</a>
+      <a href="#routes">Routes</a>
       <a href="#activity">Activity</a>
     </nav>
     <div class="topbar-actions">
       <button class="access-pill" id="copy-url-button" type="button" title="Copy dashboard address">
-        <span class="access-label">Web app</span>
-        <span id="webapp-address">localhost</span>
+        <span class="access-label">Dashboard</span><span id="webapp-address">localhost</span>
         <span id="copy-url-feedback" aria-hidden="true">Copy</span>
       </button>
       <div class="connection" id="connection-badge" data-state="offline" aria-live="polite">
-        <span class="connection-dot" aria-hidden="true"></span>
-        <span id="system-status">Connecting</span>
+        <span class="connection-dot" aria-hidden="true"></span><span id="system-status">Connecting</span>
       </div>
     </div>
   </header>
 
-  <main class="shell">
-    <section class="metrics" aria-label="Operational metrics">
+  <main class="shell" id="overview">
+    <section class="metrics" aria-label="Sniper metrics">
       <article class="metric">
-        <span>Scanner status</span>
-        <strong id="metric-bot-status">—</strong>
-        <small id="metric-route">No active route</small>
+        <span>Sniper status</span><strong id="metric-status">Connecting</strong>
+        <small id="metric-mode">Waiting for status feed</small>
       </article>
       <article class="metric">
-        <span>Tracked PYUSD pool</span>
-        <strong id="metric-pyusd">—</strong>
-        <small>Latest scanner snapshot</small>
+        <span>Route checks</span><strong id="metric-checks">0</strong>
+        <small id="metric-route-count">0 configured routes</small>
       </article>
       <article class="metric">
-        <span>Tracked USDT pool</span>
-        <strong id="metric-usdt">—</strong>
-        <small>Latest scanner snapshot</small>
+        <span>Best guaranteed net</span><strong id="metric-best-profit">—</strong>
+        <small id="metric-best-route">No completed checks</small>
       </article>
       <article class="metric">
-        <span>Session realized P&amp;L</span>
-        <strong id="metric-pnl">—</strong>
-        <small id="metric-attempts">0 attempts</small>
+        <span>Execution results</span><strong id="metric-confirmed">0 confirmed</strong>
+        <small id="metric-outcomes">0 ready · 0 errors</small>
       </article>
     </section>
 
-    <div class="workspace">
-      <aside class="panel controls-panel" id="route-builder">
+    <div class="workspace monitor-workspace">
+      <aside class="panel controls-panel session-panel">
         <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Execution setup</p>
-            <h1>Build a route</h1>
-          </div>
-          <span class="mode-chip" id="route-chip">DEX-first cycle</span>
+          <div><p class="eyebrow">start_sniper.cmd</p><h1>Current session</h1></div>
+          <span class="mode-chip" id="session-mode">Offline</span>
         </div>
-
-        <form id="execution-form" novalidate>
-          <fieldset class="field-group">
-            <legend>Network</legend>
-            <div class="chain-grid" id="chain-grid">
-              <button class="chain-button is-active" type="button" data-chain="ethereum" aria-pressed="true">
-                <span class="chain-symbol ethereum" aria-hidden="true">E</span>
-                <span>Ethereum<small>Ethereum mainnet</small></span>
-              </button>
-              <button class="chain-button" type="button" data-chain="solana" aria-pressed="false">
-                <span class="chain-symbol solana" aria-hidden="true">S</span>
-                <span>Solana<small>Marginfi flash loan</small></span>
-              </button>
-              <button class="chain-button" type="button" data-chain="polygon" aria-pressed="false">
-                <span class="chain-symbol polygon" aria-hidden="true">P</span>
-                <span>Polygon<small>Aave V3</small></span>
-              </button>
-              <button class="chain-button" type="button" data-chain="bsc" aria-pressed="false">
-                <span class="chain-symbol bsc" aria-hidden="true">B</span>
-                <span>BNB Chain<small>Venus</small></span>
-              </button>
-            </div>
-          </fieldset>
-
-          <div class="field-group">
-            <label for="pair-select">Route direction</label>
-            <select id="pair-select" name="pair">
-              <option value="USDC/USDG">USDC / USDG · flash-loan USDC</option>
-              <option value="USDG/USDC">USDG / USDC · flash-loan USDG</option>
-              <option value="USDC/PYUSD">USDC / PYUSD · flash-loan USDC</option>
-              <option value="PYUSD/USDC">PYUSD / USDC · flash-loan PYUSD</option>
-              <option value="USDG/PYUSD">USDG / PYUSD · flash-loan USDG</option>
-              <option value="PYUSD/USDG">PYUSD / USDG · flash-loan PYUSD</option>
-              <option value="USDT/USDC">USDT / USDC · legacy route</option>
-            </select>
-            <p class="field-note" id="pair-note">Flash-loan USDC; MetaMatcha converts it to USDG; Stable.com returns it to USDC.</p>
-          </div>
-
-          <div class="field-group">
-            <label for="swap-order-select">Venue order</label>
-            <select id="swap-order-select" name="swapOrder">
-              <option value="dex-first">MetaMatcha/Jupiter first, then Stable.com</option>
-              <option value="stable-first">Stable.com first, then MetaMatcha/Jupiter</option>
-            </select>
-          </div>
-
-          <div class="field-row">
-            <div class="field-group">
-              <label for="amount-input">Maximum principal</label>
-              <div class="input-suffix">
-                <input id="amount-input" name="amount" inputmode="decimal" autocomplete="off" value="100000" required>
-                <span id="principal-token">USDC</span>
-              </div>
-              <div class="amount-presets" aria-label="Principal presets">
-                <button type="button" data-amount="25000">25K</button>
-                <button type="button" data-amount="100000" class="is-active">100K</button>
-                <button type="button" data-amount="250000">250K</button>
-              </div>
-            </div>
-            <div class="field-group compact-field" id="slippage-field">
-              <label for="slippage-select">Slippage</label>
-              <select id="slippage-select" name="slippage">
-                <option value="0">0 bps</option>
-                <option value="1">1 bp</option>
-                <option value="5">5 bps</option>
-                <option value="10">10 bps</option>
-              </select>
-            </div>
-          </div>
-
-          <p class="form-error" id="form-error" role="alert"></p>
-
-          <div class="actions">
-            <button class="primary-button" id="quote-button" type="submit" data-mode="quote">
-              <span>Request executable quote</span>
-              <span aria-hidden="true">→</span>
-            </button>
-            <button class="danger-button" id="live-button" type="submit" data-mode="live">
-              Execute on mainnet
-            </button>
-          </div>
-          <p class="risk-note">Quote mode still requests short-lived executable orders for simulation. It never signs or broadcasts a transaction.</p>
-        </form>
+        <div class="session-callout" id="session-callout" data-state="offline">
+          <span class="status-orb" aria-hidden="true"></span>
+          <div><strong id="session-label">Sniper is not running</strong>
+            <small id="session-guidance">Start it from a separate terminal to populate this dashboard.</small></div>
+        </div>
+        <dl class="session-facts">
+          <div><dt>PID</dt><dd id="session-pid">—</dd></div>
+          <div><dt>Uptime</dt><dd id="session-uptime">—</dd></div>
+          <div><dt>Last update</dt><dd id="session-updated">—</dd></div>
+          <div><dt>Chains</dt><dd id="session-chains">—</dd></div>
+        </dl>
+        <div class="launch-card">
+          <p class="eyebrow">Launch command</p><code>start_sniper.cmd</code>
+          <p>The dashboard only observes the process. It never signs or broadcasts transactions.</p>
+        </div>
+        <div class="section-heading compact-heading">
+          <div><p class="eyebrow">In progress</p><h2>Active chain checks</h2></div>
+        </div>
+        <div class="active-chain-grid" id="active-chain-grid">
+          <p class="empty-inline">No route checks are active.</p>
+        </div>
       </aside>
 
-      <section class="panel operations-panel" id="quote-output">
+      <section class="panel operations-panel">
         <div class="panel-heading operations-heading">
-          <div>
-            <p class="eyebrow">Latest route</p>
-            <h2>Quote breakdown</h2>
-          </div>
-          <span class="quote-status" id="quote-status" data-state="idle">Awaiting request</span>
+          <div><p class="eyebrow">Guaranteed result</p><h2>Profitability monitor</h2></div>
+          <span class="quote-status" id="feed-status" data-state="idle">Waiting</span>
         </div>
-
-        <dl class="quote-grid">
-          <div class="quote-row wide-row">
-            <dt>Route</dt>
-            <dd id="quote-flow">USDC → USDG (MetaMatcha) → USDC (Stable.com)</dd>
-          </div>
-          <div class="quote-row">
-            <dt>Loan principal</dt>
-            <dd id="quote-loan">100000 USDC</dd>
-          </div>
-          <div class="quote-row">
-            <dt>Maximum execution cost</dt>
-            <dd id="quote-cost">—</dd>
-          </div>
-          <div class="quote-row wide-row">
-            <dt>Leg 1 result</dt>
-            <dd id="quote-leg1">—</dd>
-          </div>
-          <div class="quote-row wide-row">
-            <dt>Leg 2 guaranteed result</dt>
-            <dd id="quote-leg2">—</dd>
-          </div>
-          <div class="quote-row result-row">
-            <dt>Gross profit</dt>
-            <dd id="quote-gross">—</dd>
-          </div>
-          <div class="quote-row result-row accent-row">
-            <dt>Predicted net profit</dt>
-            <dd id="quote-net">—</dd>
-          </div>
-        </dl>
-
+        <div class="profit-strip">
+          <div><span>Ready now</span><strong id="summary-ready">0</strong></div>
+          <div><span>No trade</span><strong id="summary-no-trade">0</strong></div>
+          <div><span>Provider pauses</span><strong id="summary-paused">0</strong></div>
+          <div><span>Unresolved</span><strong id="summary-submitted">0</strong></div>
+        </div>
+        <section class="execution-card" id="last-execution-card" data-state="empty" aria-live="polite">
+          <div><p class="eyebrow">Last broadcast result</p>
+            <strong id="last-execution-title">No transaction submitted this session</strong>
+            <p id="last-execution-detail">Confirmed, reverted, dropped, and unresolved transactions will appear here.</p></div>
+          <a id="last-execution-link" href="#" target="_blank" rel="noreferrer" hidden>Open explorer ↗</a>
+        </section>
+        <div class="section-heading" id="routes">
+          <div><p class="eyebrow">All configured cycles</p><h2>Latest result by route</h2></div>
+          <span class="table-note" id="route-table-note">Waiting for start_sniper.cmd</span>
+        </div>
+        <div class="route-table-wrap">
+          <table class="route-table">
+            <thead><tr><th>Status</th><th>Chain &amp; route</th><th>Gross</th><th>Guaranteed net</th><th>Required</th><th>Checked</th></tr></thead>
+            <tbody id="route-table-body"><tr><td colspan="6" class="empty-table">No sniper session has been recorded yet.</td></tr></tbody>
+          </table>
+        </div>
         <div class="console-heading" id="activity">
-          <div>
-            <p class="eyebrow">Runtime output</p>
-            <h2>Execution log</h2>
-          </div>
+          <div><p class="eyebrow">crosschain-sniper.log</p><h2>Live activity</h2></div>
           <div class="console-tools">
-            <div class="log-filters" role="group" aria-label="Filter execution logs">
+            <div class="log-filters" role="group" aria-label="Filter sniper logs">
               <button class="is-active" type="button" data-log-filter="all" aria-pressed="true">All</button>
-              <button type="button" data-log-filter="quote" aria-pressed="false">Quotes</button>
+              <button type="button" data-log-filter="quote" aria-pressed="false">Checks</button>
+              <button type="button" data-log-filter="success" aria-pressed="false">Ready</button>
               <button type="button" data-log-filter="error" aria-pressed="false">Errors</button>
             </div>
             <button class="copy-log-button" id="copy-logs-button" type="button">Copy log</button>
           </div>
         </div>
-        <div class="terminal" id="terminal" role="log" aria-live="polite" aria-label="Arbitrage execution log"></div>
+        <div class="terminal" id="terminal" role="log" aria-live="polite" aria-label="Profit sniper activity log"></div>
       </section>
     </div>
     <footer class="dashboard-footer">
-      <span>Quick launch</span>
-      <code>python webapp.py</code>
-      <span>or double-click</span>
-      <code>start_webapp.cmd</code>
+      <span>Dashboard</span><code>start_webapp.cmd</code><span>Sniper</span><code>start_sniper.cmd</code>
     </footer>
   </main>
-
-  <dialog class="confirmation-dialog" id="live-dialog" aria-labelledby="live-dialog-title">
-    <form method="dialog" id="live-confirmation-form">
-      <p class="eyebrow danger-text">Irreversible action</p>
-      <h2 id="live-dialog-title">Authorize mainnet execution</h2>
-      <p>The runner will build, sign, and broadcast the selected route if its profitability checks pass.</p>
-      <div class="confirmation-summary" id="confirmation-summary"></div>
-      <label for="confirmation-input">Type <code>EXECUTE LIVE ARB</code> to continue</label>
-      <input id="confirmation-input" autocomplete="off" spellcheck="false">
-      <p class="form-error" id="confirmation-error" role="alert"></p>
-      <div class="dialog-actions">
-        <button class="secondary-button" value="cancel" type="submit">Cancel</button>
-        <button class="danger-button" id="confirm-live-button" value="confirm" type="submit">Confirm execution</button>
-      </div>
-    </form>
-  </dialog>
 </body>
 </html>

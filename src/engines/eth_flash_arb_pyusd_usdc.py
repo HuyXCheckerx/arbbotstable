@@ -1519,6 +1519,7 @@ def prepare_transaction(
     gas_limit_multiplier: Decimal,
     max_fee_gwei_override: Decimal | None,
     swap_order: str = "dex-first",
+    max_base_fee_gwei: Decimal | None = None,
 ) -> tuple[Any, dict[str, Any], int, int]:
     Web3 = require_web3()
     web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
@@ -1564,6 +1565,14 @@ def prepare_transaction(
     base_fee = latest_block.get("baseFeePerGas")
     if base_fee is None:
         raise ArbError("RPC block header did not include baseFeePerGas")
+
+    if max_base_fee_gwei is not None:
+        base_fee_gwei = Decimal(base_fee) / Decimal(10**9)
+        if base_fee_gwei > max_base_fee_gwei:
+            raise ArbError(
+                f"current base fee {base_fee_gwei:.3f} Gwei exceeds "
+                f"--max-base-fee-gwei limit {max_base_fee_gwei:.3f} Gwei"
+            )
 
     priority_fee = web3.eth.max_priority_fee
     computed_max_fee = (base_fee * 2) + priority_fee
@@ -1720,6 +1729,12 @@ def parser() -> argparse.ArgumentParser:
         default=setting("ETH_ARB_MAX_FEE_GWEI"),
     )
     result.add_argument(
+        "--max-base-fee-gwei",
+        type=Decimal,
+        default=setting("ETH_MAX_BASE_FEE_GWEI") or setting("ETH_ARB_MAX_BASE_FEE_GWEI"),
+        help="maximum base fee in Gwei allowed for execution",
+    )
+    result.add_argument(
         "--matcha-base-url",
         default=setting("ETH_ARB_MATCHA_BASE_URL", MATCHA_BASE_URL),
     )
@@ -1761,6 +1776,11 @@ def parser() -> argparse.ArgumentParser:
         choices=("dex-first", "stable-first"),
         default=setting("ETH_ARB_SWAP_ORDER", "stable-first"),
         help="execution order: dex-first (MetaMatcha -> Stable) or stable-first (Stable -> MetaMatcha)",
+    )
+    result.add_argument(
+        "--ignore-gas",
+        action="store_true",
+        help="bypass net profit gas floor check and evaluate on gross profit alone",
     )
     result.add_argument("--send", action="store_true", help="sign and broadcast after all checks")
     result.add_argument(
@@ -2153,6 +2173,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.gas_limit_multiplier,
         args.max_fee_gwei,
         args.swap_order,
+        args.max_base_fee_gwei,
     )
     gas_limit = int(transaction["gas"])
     max_gas_cost = gas_cost_usdc_raw(
@@ -2275,7 +2296,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "transaction": json_safe(transaction),
     }
 
-    if predicted_net < min_net_profit:
+    if not args.ignore_gas and predicted_net < min_net_profit:
         raise ArbError(
             "route is below the maximum-gas net-profit floor: "
             f"{raw_to_signed_amount(predicted_net or 0)} {loan_symbol} < "
