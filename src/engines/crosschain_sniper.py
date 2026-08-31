@@ -1440,10 +1440,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--threshold-usd",
         type=Decimal,
-        default=decimal_setting("SNIPER_PROFIT_THRESHOLD_USD", "5"),
+        default=decimal_setting("SNIPER_PROFIT_THRESHOLD_USD", "4"),
         help=(
             "execute only above this net starting-token profit "
-            "(default 5 for Ethereum; 1 for Solana)"
+            "(default 4 for Ethereum; 1 for Solana)"
         ),
     )
     parser.add_argument(
