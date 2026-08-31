@@ -24,8 +24,11 @@ import {
   Transaction,
   TransactionExpiredBlockheightExceededError,
   TransactionInstruction,
+  TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
+// @ts-ignore
+import BN from "bn.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -1486,22 +1489,80 @@ async function buildFlashTransaction(
       group: account.group,
     },
   });
-  try {
-    const transaction = await account.makeFlashLoanTx({
-      bankMap: account.getClient().bankMap,
-      ixs: [
-        ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
-        ComputeBudgetProgram.setComputeUnitPrice({
-          microLamports: computeUnitPriceMicroLamports,
-        }),
-        ...borrow.instructions,
-        ...swapInstructions,
-        ...repay.instructions,
-      ],
-      signers: [],
-      blockhash,
-      addressLookupTableAccounts: lookupTables,
+
+  const client = account.getClient();
+  const program = client.program;
+  const bank = client.bankMap.get(bankAddress.toBase58());
+
+  const innerIxs: TransactionInstruction[] = [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
+    ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: computeUnitPriceMicroLamports,
+    }),
+    ...borrow.instructions,
+    ...swapInstructions,
+    ...repay.instructions,
+  ];
+
+  const endIndex = innerIxs.length + 1;
+
+  const beginFlashLoanIx = await (program.methods as any)
+    .lendingAccountStartFlashloan(new BN(endIndex))
+    .accounts({
+      marginfiAccount: account.address,
+    })
+    .accountsPartial({
+      authority: keypair.publicKey,
+      group: account.group,
+      ixsSysvar: new PublicKey("Sysvar1nstructions1111111111111111111111111"),
+    })
+    .instruction();
+
+  const healthAccounts: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[] = [];
+  if (bank) {
+    healthAccounts.push({
+      pubkey: bank.address,
+      isSigner: false,
+      isWritable: false,
     });
+    healthAccounts.push({
+      pubkey: bank.oracleKey,
+      isSigner: false,
+      isWritable: false,
+    });
+  }
+
+  const endFlashLoanIx = new TransactionInstruction({
+    programId: program.programId,
+    data: Buffer.from([105, 124, 201, 106, 153, 2, 8, 156]), // lending_account_end_flashloan
+    keys: [
+      {
+        pubkey: account.address,
+        isSigner: false,
+        isWritable: true,
+      },
+      {
+        pubkey: account.group,
+        isSigner: false,
+        isWritable: false,
+      },
+      {
+        pubkey: keypair.publicKey,
+        isSigner: true,
+        isWritable: false,
+      },
+      ...healthAccounts,
+    ],
+  });
+
+  try {
+    const message = new TransactionMessage({
+      payerKey: keypair.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [beginFlashLoanIx, ...innerIxs, endFlashLoanIx],
+    }).compileToV0Message(lookupTables);
+
+    const transaction = new VersionedTransaction(message);
     transaction.sign([keypair]);
     return transaction;
   } catch (err: unknown) {
