@@ -1,0 +1,3 @@
+cd ~/arbbotstable
+source venv/bin/activate
+tmux new -s sniper 'python sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER'
