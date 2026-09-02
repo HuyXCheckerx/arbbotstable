@@ -2,7 +2,38 @@
 
 Ethereum and Solana stablecoin arbitrage bot with a live operational dashboard.
 The profit sniper checks both venue orders between Stable.com and MetaMatcha on
-Ethereum or Jupiter on Solana.
+Ethereum and Solana. Jupiter is an explicit Solana fallback, not the default.
+
+## Cross-chain PYUSD / USDG quote monitor
+
+`scripts/crosschain_pyusd_usdg_monitor.py` watches the Stable.com Solana USDG
+pool and quotes this non-atomic route without signing or broadcasting:
+
+```text
+PYUSD (Ethereum) -> USDG (Solana, Stable.com)
+                 -> USDG (Ethereum, canonical LayerZero OFT)
+                 -> PYUSD (Ethereum, MetaMatcha)
+```
+
+Set the two public wallet addresses in `.env`, then run one pass:
+
+```dotenv
+CROSSCHAIN_ETH_ADDRESS=0x...
+CROSSCHAIN_SOLANA_ADDRESS=...
+```
+
+```bash
+python scripts/crosschain_pyusd_usdg_monitor.py --once
+```
+
+Omit `--once` to poll every ten seconds. The monitor verifies the official USDG
+OFT deployments through LayerZero metadata, but it does not request transfer
+calldata. Since the LayerZero messaging fee is paid separately in native gas,
+the default state is `REVIEW_BRIDGE_FEE` whenever the gross edge is positive.
+Set a conservative observed value with `--bridge-fee-usd` (or
+`CROSSCHAIN_BRIDGE_FEE_USD`) to see a complete estimated net. Even then,
+`MANUAL_REVIEW` is only a signal: the bridge makes the cycle non-atomic, and the
+MetaMatcha quote must be refreshed after USDG actually arrives on Ethereum.
 
 ## Live sniper dashboard
 
@@ -65,8 +96,8 @@ USDT/USDC command-line runs.
 The cross-chain sniper checks all six ordered combinations of USDC, USDG, and
 PYUSD on both chains while Ethereum and Solana monitor in parallel. `A/B` means
 “flash-loan A and use B as the counter-token.” Each pair is checked in both
-venue orders: `A -> B` on MetaMatcha/Jupiter followed by `B -> A` on Stable.com,
-and `A -> B` on Stable.com followed by `B -> A` on MetaMatcha/Jupiter. For
+venue orders: `A -> B` on MetaMatcha followed by `B -> A` on Stable.com,
+and `A -> B` on Stable.com followed by `B -> A` on MetaMatcha. For
 example, `PYUSD/USDC` always borrows and repays PYUSD, while `USDC/PYUSD` is the
 separate USDC-loan route. A `$5` threshold is converted to a
 `5.000001`-unit gross and guaranteed-net floor in the route's starting
@@ -120,10 +151,12 @@ Ethereum USDG requires the upgraded executor emitted by
 `deploy_eth_executor_usdc.py`. Solana direct pairs also require exactly one
 standard Marginfi bank for the selected loan mint. A route without the required
 bank or sufficient Stable.com capacity remains in monitoring mode and cannot
-broadcast. The two PYUSD/USDG return markets may need a constrained multi-hop
-Jupiter route; a route that cannot fit the complete 1,232-byte transaction is
-treated as unavailable and retried after its own directional cooldown. Routes
-containing USDC retain the direct-route preference.
+broadcast. On Solana, the default engine asks `meta.matcha.xyz` for 0x and OKX
+transactions, accepts only successful wallet-specific simulations, and embeds
+the best result in the atomic transaction. A route that cannot fit the complete
+1,232-byte transaction is treated as unavailable and retried after its own
+directional cooldown. Set `SOL_FLASH_ARB_DEX_PROVIDER=jupiter` only to restore
+the legacy Jupiter path.
 
 On Ethereum, `ETH_ARB_FLASH_PROVIDER=auto` checks funding liquidity before
 requesting venue quotes. It prefers zero-fee Morpho and falls back to Aave v3,

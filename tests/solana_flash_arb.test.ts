@@ -243,11 +243,15 @@ test("validates CLI route and provider choices", () => {
     "stable-first",
     "--provider",
     "marginfi",
+    "--dex-provider",
+    "metamatcha",
   ]);
   assert.equal(options.swapOrder, "stable-first");
   assert.equal(options.provider, "marginfi");
+  assert.equal(options.dexProvider, "metamatcha");
   assert.throws(() => parseCli(["--swap-order", "sideways"]), /must be/);
   assert.throws(() => parseCli(["--provider", "solana"]), /must be/);
+  assert.throws(() => parseCli(["--dex-provider", "raydium"]), /must be/);
 });
 
 test("rejects a Marginfi account with an existing loan liability", () => {

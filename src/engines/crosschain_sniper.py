@@ -83,7 +83,10 @@ class Route:
 
     @property
     def dex_name(self) -> str:
-        return "Jupiter" if self.chain == "solana" else "MetaMatcha"
+        if self.chain == "solana":
+            provider = os.environ.get("SOL_FLASH_ARB_DEX_PROVIDER", "metamatcha")
+            return "Jupiter" if provider.strip().lower() == "jupiter" else "MetaMatcha"
+        return "MetaMatcha"
 
     @property
     def display(self) -> str:
@@ -286,9 +289,11 @@ def build_route_invocation(
                 "SOL_FLASH_ARB_OUTPUT_PATH": output_path,
             }
         )
-        if {route.stable_from, route.stable_to} == {"USDG", "PYUSD"}:
-            # The PYUSD/USDG return market may need a Jupiter-managed hop
-            # through USDC. The engine still enforces Solana's wire-size cap.
+        if (
+            route.dex_name == "Jupiter"
+            and {route.stable_from, route.stable_to} == {"USDG", "PYUSD"}
+        ):
+            # Explicit Jupiter fallback may need a USDC-managed hop.
             environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
             environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "24"
         else:
@@ -419,16 +424,18 @@ def jupiter_market_key(route: Route) -> str:
 
 
 def dex_market_key(route: Route) -> str:
-    venue = "jupiter" if route.chain == "solana" else "metamatcha"
+    venue = "jupiter" if route.dex_name == "Jupiter" else "metamatcha"
     return f"{venue}:{route.dex_from}/{route.dex_to}"
+
+
+def dex_provider_key(route: Route) -> str:
+    venue = "jupiter" if route.dex_name == "Jupiter" else "metamatcha"
+    return f"{venue}:{route.chain}"
 
 
 def dependency_keys(route: Route) -> tuple[str, ...]:
     keys = [f"stable:{route.chain}", f"rpc:{route.chain}"]
-    if route.chain == "solana":
-        keys.extend(("jupiter:solana", jupiter_market_key(route)))
-    else:
-        keys.extend(("metamatcha:ethereum", dex_market_key(route)))
+    keys.extend((dex_provider_key(route), dex_market_key(route)))
     return tuple(keys)
 
 
@@ -1309,8 +1316,8 @@ def worker(
             if outcome.category.startswith("transient-"):
                 dependency = {
                     "transient-stable": f"stable:{route.chain}",
-                    "transient-jupiter": "jupiter:solana",
-                    "transient-matcha": "metamatcha:ethereum",
+                    "transient-jupiter": f"jupiter:{route.chain}",
+                    "transient-matcha": f"metamatcha:{route.chain}",
                     "transient-rpc": f"rpc:{route.chain}",
                 }[outcome.category]
                 delay = backoff.fail(
@@ -1335,10 +1342,7 @@ def worker(
             else:
                 backoff.succeed(f"stable:{route.chain}")
                 backoff.succeed(f"rpc:{route.chain}")
-                if route.chain == "solana":
-                    backoff.succeed("jupiter:solana")
-                else:
-                    backoff.succeed("metamatcha:ethereum")
+                backoff.succeed(dex_provider_key(route))
 
             if outcome.category == "no-route":
                 dependency = dex_market_key(route)
@@ -1355,7 +1359,7 @@ def worker(
                         "Return market is unavailable",
                     )
             elif outcome.category == "access-blocked-matcha":
-                dependency = "metamatcha:ethereum"
+                dependency = f"metamatcha:{route.chain}"
                 backoff.block(dependency, cooldown_policy.provider_access_seconds)
                 logger.info(
                     "PAUSE   | %-17s | %.0fs | provider denied this machine's access",

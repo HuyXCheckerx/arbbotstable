@@ -1,9 +1,10 @@
 import "dotenv/config";
 
 import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   AssetTag,
@@ -78,6 +79,9 @@ export interface JupiterQuote {
   routePlan: unknown[];
   contextSlot?: number;
   timeTaken?: number;
+  provider?: "MetaMatcha" | "Jupiter";
+  aggregator?: string;
+  serializedTransaction?: string;
   [key: string]: unknown;
 }
 
@@ -178,6 +182,11 @@ export interface ConservativeCycle {
 interface Config {
   rpcUrl: string;
   keypair: Keypair;
+  dexProvider: "metamatcha" | "jupiter";
+  matchaApiBase: string;
+  matchaAggregators: string[];
+  matchaPython: string;
+  matchaHelperPath: string;
   jupiterApiBase: string;
   jupiterApiKeys: string[];
   stableApiBase: string;
@@ -213,6 +222,7 @@ export interface CliOptions {
   send: boolean;
   createMarginfiAccount: boolean;
   provider?: "marginfi" | "solend" | "auto";
+  dexProvider?: "metamatcha" | "jupiter";
   swapOrder?: "dex-first" | "stable-first";
   confirmation?: string;
 }
@@ -224,7 +234,7 @@ export interface HttpRetryConfig {
 
 interface SwapLeg {
   instructions: TransactionInstruction[];
-  lookupTableAddresses: PublicKey[];
+  lookupTables: AddressLookupTableAccount[];
   ignoredComputeBudgetInstructionCount: number;
 }
 
@@ -283,13 +293,13 @@ export function resolveLoanMint(symbol: string): PublicKey {
 }
 
 export function isTwoHopJupiterRoute(
-  loanMint: PublicKey,
-  intermediateMint: PublicKey,
+  _loanMint: PublicKey,
+  _intermediateMint: PublicKey,
 ): boolean {
-  return (
-    (loanMint.equals(PYUSD_MINT) && intermediateMint.equals(USDG_MINT)) ||
-    (loanMint.equals(USDG_MINT) && intermediateMint.equals(PYUSD_MINT))
-  );
+  // Both MetaMatcha and current Jupiter quote responses can encode their own
+  // internal USDC hop in one swap transaction. Splitting it into two external
+  // legs is larger and makes the atomic bundle less likely to fit in 1,232 B.
+  return false;
 }
 
 export function jupiterRouteConstraints(
@@ -508,6 +518,13 @@ function readConfig(cli: CliOptions): Config {
       "stable-first",
       ["dex-first", "stable-first"] as const,
     );
+  const dexProvider =
+    cli.dexProvider ??
+    configuredChoice(
+      "SOL_FLASH_ARB_DEX_PROVIDER",
+      "metamatcha",
+      ["metamatcha", "jupiter"] as const,
+    );
   const capacitySymbol = stableInputSymbol(
     swapOrder,
     loanSymbol,
@@ -516,15 +533,32 @@ function readConfig(cli: CliOptions): Config {
   const capacityBuffer =
     process.env[`SOL_FLASH_ARB_STABLE_CAPACITY_BUFFER_${capacitySymbol}`] ||
     "1";
-  const routeConstraints = jupiterRouteConstraints(
-    loanMint,
-    intermediateMint,
-    envInt("SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS", 20, 1),
-    envBool("SOL_FLASH_ARB_ONLY_DIRECT_ROUTES", true),
-  );
+  const configuredMaxAccounts = envInt("SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS", 20, 1);
+  const configuredDirectRoutes = envBool("SOL_FLASH_ARB_ONLY_DIRECT_ROUTES", true);
+  const routeConstraints = dexProvider === "jupiter"
+    ? jupiterRouteConstraints(
+        loanMint,
+        intermediateMint,
+        configuredMaxAccounts,
+        configuredDirectRoutes,
+      )
+    : { maxAccounts: configuredMaxAccounts, onlyDirectRoutes: configuredDirectRoutes };
   return {
     rpcUrl: requiredEnv("SOLANA_RPC_URL"),
     keypair: loadKeypair(requiredEnv("SOLANA_PRIVATE_KEY")),
+    dexProvider,
+    matchaApiBase: (
+      process.env.SOL_FLASH_ARB_MATCHA_BASE_URL || "https://meta.matcha.xyz"
+    ).replace(/\/$/, ""),
+    matchaAggregators: (
+      process.env.SOL_FLASH_ARB_MATCHA_AGGREGATORS || "0x,OKX"
+    ).split(",").map((value) => value.trim()).filter(Boolean),
+    matchaPython:
+      process.env.SOL_FLASH_ARB_MATCHA_PYTHON ||
+      (process.platform === "win32" ? "python" : "python3"),
+    matchaHelperPath:
+      process.env.SOL_FLASH_ARB_MATCHA_HELPER ||
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "metamatcha_solana.py"),
     jupiterApiBase: (
       process.env.SOL_FLASH_ARB_JUPITER_API_BASE ||
       (apiKeys.length ? JUPITER_API_BASE : JUPITER_LITE_API_BASE)
@@ -606,6 +640,13 @@ export function parseCli(argv: string[]): CliOptions {
       }
       options.provider = p;
     }
+    else if (arg === "--dex-provider") {
+      const p = argv[++index]?.toLowerCase();
+      if (p !== "metamatcha" && p !== "jupiter") {
+        throw new Error("--dex-provider must be metamatcha or jupiter");
+      }
+      options.dexProvider = p;
+    }
     else if (arg === "--swap-order") {
       const order = argv[++index]?.toLowerCase();
       if (order !== "dex-first" && order !== "stable-first") {
@@ -628,6 +669,7 @@ function printHelp(): void {
   console.log(`Usage:
   npm run solana:quote
   npm run solana:flash
+  npm run solana:flash -- --dex-provider jupiter
   npm run solana:flash -- --send --confirm-mainnet EXECUTE_SOLANA_FLASH_ARB
   npm run solana:flash -- --create-marginfi-account --send --confirm-mainnet CREATE_MARGINFI_ACCOUNT
 
@@ -1081,6 +1123,108 @@ export function buildJupiterQuoteParameters(
   return params;
 }
 
+export function dexProviderName(
+  provider: "metamatcha" | "jupiter",
+): "MetaMatcha" | "Jupiter" {
+  return provider === "metamatcha" ? "MetaMatcha" : "Jupiter";
+}
+
+function runJsonHelper<T>(
+  executable: string,
+  helperPath: string,
+  payload: JsonRecord,
+  timeoutMs: number,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, [helperPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`MetaMatcha helper timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(new Error(`Could not start MetaMatcha helper: ${error.message}`));
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `MetaMatcha helper exited with code ${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as T);
+      } catch (error) {
+        reject(new Error(`MetaMatcha helper returned invalid JSON: ${errorMessage(error)}`));
+      }
+    });
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+async function getMetaMatchaQuote(
+  config: Config,
+  inputMint: PublicKey,
+  outputMint: PublicKey,
+  amountRaw: bigint,
+  wallet: PublicKey,
+): Promise<JupiterQuote> {
+  if (!config.matchaAggregators.length) {
+    throw new Error("SOL_FLASH_ARB_MATCHA_AGGREGATORS must not be empty");
+  }
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= config.httpAttempts; attempt += 1) {
+    try {
+      const quote = await runJsonHelper<JupiterQuote>(
+        config.matchaPython,
+        config.matchaHelperPath,
+        {
+          baseUrl: config.matchaApiBase,
+          aggregators: config.matchaAggregators,
+          inputMint: inputMint.toBase58(),
+          outputMint: outputMint.toBase58(),
+          amount: amountRaw.toString(),
+          taker: wallet.toBase58(),
+          slippageBps: 0,
+          timeoutMs: config.httpTimeoutMs,
+        },
+        config.httpTimeoutMs + 5_000,
+      );
+      if (quote.provider !== "MetaMatcha") {
+        throw new Error("MetaMatcha helper returned an unexpected provider");
+      }
+      if (quote.inputMint !== inputMint.toBase58() || quote.outputMint !== outputMint.toBase58()) {
+        throw new Error("MetaMatcha changed the requested token pair");
+      }
+      if (BigInt(quote.inAmount) !== amountRaw) {
+        throw new Error(`MetaMatcha changed the requested input amount to ${quote.inAmount}`);
+      }
+      if (!quote.routePlan?.length || !quote.serializedTransaction) {
+        throw new Error("MetaMatcha returned no executable swap route");
+      }
+      return quote;
+    } catch (error) {
+      lastError = error;
+      if (attempt < config.httpAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+      }
+    }
+  }
+  throw new Error(`MetaMatcha quote failed: ${errorMessage(lastError)}`);
+}
+
 async function getJupiterQuote(
   config: Config,
   inputMint: PublicKey,
@@ -1125,6 +1269,27 @@ async function getJupiterQuote(
   return quote;
 }
 
+async function getDexQuote(
+  config: Config,
+  inputMint: PublicKey,
+  outputMint: PublicKey,
+  amountRaw: bigint,
+  wallet: PublicKey,
+  requestNumber: number,
+  overrideMaxAccounts?: number,
+): Promise<JupiterQuote> {
+  return config.dexProvider === "metamatcha"
+    ? getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, wallet)
+    : getJupiterQuote(
+        config,
+        inputMint,
+        outputMint,
+        amountRaw,
+        requestNumber,
+        overrideMaxAccounts,
+      );
+}
+
 async function getCapacitySizedCycle(
   config: Config,
   wallet: PublicKey,
@@ -1138,7 +1303,7 @@ async function getCapacitySizedCycle(
     loanAmountRaw = maxBankBorrowRaw;
   }
   let capacityAdjusted = false;
-  const isTwoHop = isTwoHopJupiterRoute(
+  const isTwoHop = config.dexProvider === "jupiter" && isTwoHopJupiterRoute(
     config.loanMint,
     config.intermediateMint,
   );
@@ -1196,30 +1361,33 @@ async function getCapacitySizedCycle(
 
       if (isTwoHop) {
         const twoHopMaxAccounts = Math.min(13, config.maxAccounts);
-        jupiterQuote = await getJupiterQuote(
+        jupiterQuote = await getDexQuote(
           config,
           config.intermediateMint,
           USDC_MINT,
           stableQuote.outputRaw,
+          wallet,
           attempt * 2,
           twoHopMaxAccounts,
         );
         const usdcMinimumRaw = BigInt(jupiterQuote.otherAmountThreshold);
-        secondQuote = await getJupiterQuote(
+        secondQuote = await getDexQuote(
           config,
           USDC_MINT,
           config.loanMint,
           usdcMinimumRaw,
+          wallet,
           attempt * 2 + 1,
           twoHopMaxAccounts,
         );
         otherAmountThresholdRaw = BigInt(secondQuote.otherAmountThreshold);
       } else {
-        jupiterQuote = await getJupiterQuote(
+        jupiterQuote = await getDexQuote(
           config,
           config.intermediateMint,
           config.loanMint,
           stableQuote.outputRaw,
+          wallet,
           attempt,
         );
         otherAmountThresholdRaw = BigInt(jupiterQuote.otherAmountThreshold);
@@ -1250,30 +1418,33 @@ async function getCapacitySizedCycle(
 
     if (isTwoHop) {
       const twoHopMaxAccounts = Math.min(13, config.maxAccounts);
-      firstQuote = await getJupiterQuote(
+      firstQuote = await getDexQuote(
         config,
         config.loanMint,
         USDC_MINT,
         loanAmountRaw,
+        wallet,
         attempt * 2,
         twoHopMaxAccounts,
       );
       const usdcMinimumRaw = BigInt(firstQuote.otherAmountThreshold);
-      secondJupiterQuote = await getJupiterQuote(
+      secondJupiterQuote = await getDexQuote(
         config,
         USDC_MINT,
         config.intermediateMint,
         usdcMinimumRaw,
+        wallet,
         attempt * 2 + 1,
         twoHopMaxAccounts,
       );
       firstMinimumRaw = BigInt(secondJupiterQuote.otherAmountThreshold);
     } else {
-      firstQuote = await getJupiterQuote(
+      firstQuote = await getDexQuote(
         config,
         config.loanMint,
         config.intermediateMint,
         loanAmountRaw,
+        wallet,
         attempt,
       );
       firstMinimumRaw = BigInt(firstQuote.otherAmountThreshold);
@@ -1369,7 +1540,76 @@ async function getSwapLeg(
   quote: JupiterQuote,
   wallet: PublicKey,
   requestNumber: number,
+  connection: Connection,
 ): Promise<SwapLeg> {
+  if (config.dexProvider === "metamatcha") {
+    if (!quote.serializedTransaction) {
+      throw new Error("MetaMatcha quote omitted its serialized transaction");
+    }
+    let transaction: VersionedTransaction;
+    try {
+      transaction = VersionedTransaction.deserialize(
+        Buffer.from(quote.serializedTransaction, "base64"),
+      );
+    } catch (error) {
+      throw new Error(`MetaMatcha returned an invalid Solana transaction: ${errorMessage(error)}`);
+    }
+    const lookupTableAddresses = transaction.message.addressTableLookups.map(
+      (lookup) => lookup.accountKey,
+    );
+    const lookupTables = await fetchLookupTables(connection, lookupTableAddresses);
+    const decompiled = TransactionMessage.decompile(transaction.message, {
+      addressLookupTableAccounts: lookupTables,
+    });
+    if (!decompiled.payerKey.equals(wallet)) {
+      throw new Error(
+        `MetaMatcha transaction payer ${decompiled.payerKey.toBase58()} does not match wallet ${wallet.toBase58()}`,
+      );
+    }
+    const unexpectedSigner = decompiled.instructions
+      .flatMap((instruction) => instruction.keys)
+      .find((account) => account.isSigner && !account.pubkey.equals(wallet));
+    if (unexpectedSigner) {
+      throw new Error(
+        `MetaMatcha transaction requires unexpected signer ${unexpectedSigner.pubkey.toBase58()}`,
+      );
+    }
+    const computeBudgetInstructions = decompiled.instructions.filter(
+      (instruction) => instruction.programId.equals(ComputeBudgetProgram.programId),
+    );
+    const withoutComputeBudget = decompiled.instructions.filter(
+      (instruction) => !instruction.programId.equals(ComputeBudgetProgram.programId),
+    );
+    const existingAtaSetup = await Promise.all(
+      withoutComputeBudget.map(async (instruction) => {
+        const isIdempotentAtaCreate =
+          instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) &&
+          instruction.data.length === 1 &&
+          instruction.data[0] === 1 &&
+          instruction.keys.length >= 2;
+        if (!isIdempotentAtaCreate) return false;
+        return (await connection.getAccountInfo(instruction.keys[1].pubkey)) !== null;
+      }),
+    );
+    const instructions = withoutComputeBudget.filter(
+      (_instruction, index) => !existingAtaSetup[index],
+    );
+    if (!instructions.length) {
+      throw new Error("MetaMatcha transaction contained no swap instructions");
+    }
+    console.log(
+      `MetaMatcha selected ${quote.aggregator ?? "unknown aggregator"}: ` +
+      `${Buffer.from(quote.serializedTransaction, "base64").length} quote bytes, ` +
+      `${instructions.length} swap instructions, ${lookupTables.length} lookup tables` +
+      `${existingAtaSetup.some(Boolean) ? `, stripped ${existingAtaSetup.filter(Boolean).length} existing ATA setup instructions` : ""}`,
+    );
+    return {
+      instructions,
+      lookupTables,
+      ignoredComputeBudgetInstructionCount: computeBudgetInstructions.length,
+    };
+  }
+
   const result = await fetchJson<JupiterSwapInstructions>(
     `${config.jupiterApiBase}/swap-instructions`,
     {
@@ -1405,8 +1645,11 @@ async function getSwapLeg(
   ];
   return {
     instructions: instructionJson.map(decodeJupiterInstruction),
-    lookupTableAddresses: (result.addressLookupTableAddresses ?? []).map(
-      (address) => new PublicKey(address),
+    lookupTables: await fetchLookupTables(
+      connection,
+      (result.addressLookupTableAddresses ?? []).map(
+        (address) => new PublicKey(address),
+      ),
     ),
     ignoredComputeBudgetInstructionCount:
       result.computeBudgetInstructions?.length ?? 0,
@@ -1598,7 +1841,7 @@ async function buildFlashTransaction(
     const msg = errorMessage(err);
     if (msg.includes("encoding overruns")) {
       throw new Error(
-        "Atomic transaction exceeds Solana 1232-byte size limit (encoding overruns Uint8Array). Lower SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS.",
+        "Atomic transaction exceeds Solana 1232-byte size limit (encoding overruns Uint8Array)",
       );
     }
     throw err;
@@ -1613,21 +1856,30 @@ export async function buildWalletFundedTransaction(
   computeUnitLimit: number,
   computeUnitPriceMicroLamports: number,
 ): Promise<VersionedTransaction> {
-  const message = new TransactionMessage({
-    payerKey: keypair.publicKey,
-    recentBlockhash: blockhash,
-    instructions: [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
-      ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: computeUnitPriceMicroLamports,
-      }),
-      ...instructions,
-    ],
-  }).compileToV0Message(lookupTables);
+  try {
+    const message = new TransactionMessage({
+      payerKey: keypair.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
+        ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: computeUnitPriceMicroLamports,
+        }),
+        ...instructions,
+      ],
+    }).compileToV0Message(lookupTables);
 
-  const transaction = new VersionedTransaction(message);
-  transaction.sign([keypair]);
-  return transaction;
+    const transaction = new VersionedTransaction(message);
+    transaction.sign([keypair]);
+    return transaction;
+  } catch (error) {
+    if (errorMessage(error).includes("encoding overruns")) {
+      throw new Error(
+        "Atomic transaction exceeds Solana 1232-byte size limit (encoding overruns Uint8Array)",
+      );
+    }
+    throw error;
+  }
 }
 
 function simulationFailure(error: unknown, logs?: string[] | null): Error {
@@ -1939,10 +2191,12 @@ async function main(): Promise<void> {
 
   const sized = await getCapacitySizedCycle(config, walletAddress, availableBankLiquidityRaw);
   const { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
-  const isTwoHop = isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);
+  const isTwoHop = config.dexProvider === "jupiter" &&
+    isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);
+  const dexName = dexProviderName(config.dexProvider);
   const routeFlow = config.swapOrder === "stable-first"
-    ? `${config.loanSymbol} -> ${config.intermediateSymbol} (Stable.com) -> ${config.loanSymbol} (Jupiter)`
-    : `${config.loanSymbol} -> ${config.intermediateSymbol} (Jupiter) -> ${config.loanSymbol} (Stable.com)`;
+    ? `${config.loanSymbol} -> ${config.intermediateSymbol} (Stable.com) -> ${config.loanSymbol} (${dexName})`
+    : `${config.loanSymbol} -> ${config.intermediateSymbol} (${dexName}) -> ${config.loanSymbol} (Stable.com)`;
   console.log(`Route: ${routeFlow}`);
   console.log(`Trading capital: ${formatRaw(loanAmountRaw)} ${config.loanSymbol}`);
   console.log(
@@ -1954,26 +2208,26 @@ async function main(): Promise<void> {
         `Leg 1 (Stable.com): ${config.loanSymbol} -> ${config.intermediateSymbol} | executable output: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
       );
       console.log(
-        `Leg 2 (Jupiter): ${config.intermediateSymbol} -> USDC -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
+        `Leg 2 (${dexName}): ${config.intermediateSymbol} -> USDC -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
       );
     } else {
       console.log(
         `Leg 1 (Stable.com): ${config.loanSymbol} -> ${config.intermediateSymbol} | executable output: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
       );
       console.log(
-        `Leg 2 (Jupiter): ${config.intermediateSymbol} -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
+        `Leg 2 (${dexName}): ${config.intermediateSymbol} -> ${config.loanSymbol} | guaranteed minimum: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
       );
     }
   } else if (isTwoHop && secondJupiterQuote) {
     console.log(
-      `Leg 1 (Jupiter): ${config.loanSymbol} -> USDC -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+      `Leg 1 (${dexName}): ${config.loanSymbol} -> USDC -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
     );
     console.log(
       `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
     );
   } else {
     console.log(
-      `Leg 1 (Jupiter): ${config.loanSymbol} -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
+      `Leg 1 (${dexName}): ${config.loanSymbol} -> ${config.intermediateSymbol} | guaranteed minimum: ${formatRaw(cycle.firstLegMinimumRaw)} ${config.intermediateSymbol}`,
     );
     console.log(
       `Leg 2 (Stable.com): ${config.intermediateSymbol} -> ${config.loanSymbol} | executable output: ${formatRaw(cycle.secondLegMinimumRaw)} ${config.loanSymbol}`,
@@ -2004,19 +2258,15 @@ async function main(): Promise<void> {
 
   if (isTwoHop && secondJupiterQuote) {
     const [firstSwap1, firstSwap2, stableLegResult] = await Promise.all([
-      getSwapLeg(config, firstQuote, walletAddress, 1),
-      getSwapLeg(config, secondJupiterQuote, walletAddress, 2),
+      getSwapLeg(config, firstQuote, walletAddress, 1, connection),
+      getSwapLeg(config, secondJupiterQuote, walletAddress, 2, connection),
       getStableLeg(config, walletAddress, stableQuote),
     ]);
     stableLeg = stableLegResult;
-    const [jupiterLookupTables1, jupiterLookupTables2] = await Promise.all([
-      fetchLookupTables(connection, firstSwap1.lookupTableAddresses),
-      fetchLookupTables(connection, firstSwap2.lookupTableAddresses),
-    ]);
     lookupTables = mergeLookupTables(
       client?.addressLookupTables ?? [],
-      jupiterLookupTables1,
-      jupiterLookupTables2,
+      firstSwap1.lookupTables,
+      firstSwap2.lookupTables,
     );
     swapInstructions = config.swapOrder === "stable-first"
       ? [stableLeg.instruction, ...firstSwap1.instructions, ...firstSwap2.instructions]
@@ -2026,17 +2276,13 @@ async function main(): Promise<void> {
       firstSwap2.ignoredComputeBudgetInstructionCount;
   } else {
     const [firstSwap, stableLegResult] = await Promise.all([
-      getSwapLeg(config, firstQuote, walletAddress, 1),
+      getSwapLeg(config, firstQuote, walletAddress, 1, connection),
       getStableLeg(config, walletAddress, stableQuote),
     ]);
     stableLeg = stableLegResult;
-    const jupiterLookupTables = await fetchLookupTables(
-      connection,
-      firstSwap.lookupTableAddresses,
-    );
     lookupTables = mergeLookupTables(
       client?.addressLookupTables ?? [],
-      jupiterLookupTables,
+      firstSwap.lookupTables,
     );
     swapInstructions =
       config.swapOrder === "stable-first"
@@ -2069,8 +2315,11 @@ async function main(): Promise<void> {
 
   const probeWireSize = probe.serialize().length;
   if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
+    const hint = config.dexProvider === "jupiter"
+      ? " Lower SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS."
+      : " Try a different SOL_FLASH_ARB_MATCHA_AGGREGATORS selection.";
     throw new Error(
-      `Atomic transaction is ${probeWireSize} bytes before simulation; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}. Lower SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS.`,
+      `Atomic transaction is ${probeWireSize} bytes before simulation; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}.${hint}`,
     );
   }
   const probeUnits = await simulate(connection, probe);
@@ -2101,8 +2350,11 @@ async function main(): Promise<void> {
       );
   const wireSize = transaction.serialize().length;
   if (wireSize > MAX_WIRE_TRANSACTION_BYTES) {
+    const hint = config.dexProvider === "jupiter"
+      ? " Reduce SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS or keep direct routes enabled."
+      : " Try a different SOL_FLASH_ARB_MATCHA_AGGREGATORS selection.";
     throw new Error(
-      `Atomic transaction is ${wireSize} bytes; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}. Reduce SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS or keep direct routes enabled.`,
+      `Atomic transaction is ${wireSize} bytes; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}.${hint}`,
     );
   }
   const finalUnits = await simulate(connection, transaction);
@@ -2151,6 +2403,7 @@ async function main(): Promise<void> {
       ? `${config.loanSymbol}/${config.intermediateSymbol}`
       : `${config.intermediateSymbol}/${config.loanSymbol}`,
     route: routeFlow,
+    dexProvider: dexName,
     swapOrder: config.swapOrder,
     loanSymbol: config.loanSymbol,
     intermediateSymbol: config.intermediateSymbol,
@@ -2175,7 +2428,7 @@ async function main(): Promise<void> {
     transactionBytes: wireSize,
     recentBlockhash: latest.blockhash,
     lastValidBlockHeight: latest.lastValidBlockHeight,
-    ignoredJupiterComputeBudgetInstructions: ignoredComputeBudgetCount,
+    ignoredDexComputeBudgetInstructions: ignoredComputeBudgetCount,
     firstQuote,
     secondJupiterQuote,
     stableStatus: stableQuote.status,

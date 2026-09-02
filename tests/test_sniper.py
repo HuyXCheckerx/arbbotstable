@@ -251,16 +251,14 @@ class CrosschainSniperTests(unittest.TestCase):
             "5.000001",
         )
         self.assertEqual(
-            invocation.environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"], "false"
+            invocation.environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"], "true"
         )
-        self.assertEqual(
-            invocation.environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"], "24"
-        )
+        self.assertNotIn("SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS", invocation.environment)
         self.assertTrue(invocation.environment["SOL_FLASH_ARB_OUTPUT_PATH"].endswith(
             "solana-stable-first-loan-pyusd-via-usdg.json"
         ))
 
-    def test_solana_dex_first_route_reaches_jupiter_before_stable(self):
+    def test_solana_dex_first_route_reaches_metamatcha_before_stable(self):
         with patch.dict(os.environ, {}, clear=True):
             invocation = build_route_invocation(
                 Route("solana", "USDC/PYUSD", "dex-first"),
@@ -276,8 +274,12 @@ class CrosschainSniperTests(unittest.TestCase):
         command = list(invocation.command)
         self.assertEqual(command[command.index("--swap-order") + 1], "dex-first")
 
-    def test_solana_stable_first_cross_pair_allows_constrained_multihop(self):
-        with patch.dict(os.environ, {}, clear=True):
+    def test_explicit_jupiter_cross_pair_allows_constrained_multihop(self):
+        with patch.dict(
+            os.environ,
+            {"SOL_FLASH_ARB_DEX_PROVIDER": "jupiter"},
+            clear=True,
+        ):
             invocation = build_route_invocation(
                 Route("solana", "USDG/PYUSD"),
                 live=False,
@@ -579,6 +581,12 @@ class CrosschainSniperTests(unittest.TestCase):
             route.display,
             "PYUSD -> USDC (Stable.com) -> PYUSD (MetaMatcha)",
         )
+        with patch.dict(os.environ, {}, clear=True):
+            solana = Route("solana", "PYUSD/USDC")
+            self.assertEqual(
+                solana.display,
+                "PYUSD -> USDC (Stable.com) -> PYUSD (MetaMatcha)",
+            )
 
     def test_market_key_tracks_the_actual_dex_leg_for_each_order(self):
         self.assertEqual(
