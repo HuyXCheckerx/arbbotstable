@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Matcha Meta | Meta DEX Aggregator</title>
+  <meta name="description" content="Matcha Meta finds the best trades from top aggregators and simulates them to reduce reverts and improve execution quality on every DeFi swap." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 23' fill='%23000'><path d='M16.211 3.053a.173.173 0 0 1-.226.08c-1.263-.575-2.8-.77-3.808-.77-3.629 0-7.258 1.773-7.258 4.688 0 1.563 1.17 2.886 2.88 2.886 1.888 0 3.298-1.382 4.437-2.645 1.02-1.142 2.22-2.404 3.93-2.404 1.859 0 3.208 1.382 3.208 3.246 0 2.945-3.54 6.252-8.428 6.252S2.52 11.77 2.52 8.134c0-3.396 4.018-6.462 8.427-6.462 2.25 0 3.944.473 5.191 1.15a.175.175 0 0 1 .073.232zM10.947.5C4.92.5 0 5.43 0 11.47 0 17.513 4.919 22.5 10.947 22.5c6.029 0 11.007-4.928 11.007-11.03 0-6.1-4.92-10.97-11.007-10.97'/></svg>" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Top Announcement Banner -->
+  <div class="announcement-banner" id="banner">
+    <div class="banner-content">
+      <span class="badge-beta">Beta</span>
+      <div class="avatar-stack">
+        <span class="avatar-icon icon-1">⚡</span>
+        <span class="avatar-icon icon-2">🛡️</span>
+        <span class="avatar-icon icon-3">🎯</span>
+      </div>
+      <span class="banner-text"><strong>Intents Mode:</strong> gasless and MEV-protected trades. <a href="#" id="try-intents-link">Try it now</a></span>
+    </div>
+    <button class="banner-close-btn" id="banner-close" aria-label="Close announcement">✕</button>
+  </div>
+
+  <div class="app-wrapper">
+    <!-- Navbar Header -->
+    <header class="main-header">
+      <div class="header-left">
+        <a href="/" class="brand-logo" aria-label="Matcha Meta">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 22 23" class="logo-svg">
+            <path fill="currentColor" d="M16.211 3.053a.173.173 0 0 1-.226.08c-1.263-.575-2.8-.77-3.808-.77-3.629 0-7.258 1.773-7.258 4.688 0 1.563 1.17 2.886 2.88 2.886 1.888 0 3.298-1.382 4.437-2.645 1.02-1.142 2.22-2.404 3.93-2.404 1.859 0 3.208 1.382 3.208 3.246 0 2.945-3.54 6.252-8.428 6.252S2.52 11.77 2.52 8.134c0-3.396 4.018-6.462 8.427-6.462 2.25 0 3.944.473 5.191 1.15a.175.175 0 0 1 .073.232zM10.947.5C4.92.5 0 5.43 0 11.47 0 17.513 4.919 22.5 10.947 22.5c6.029 0 11.007-4.928 11.007-11.03 0-6.1-4.92-10.97-11.007-10.97"></path>
+          </svg>
+        </a>
+        <nav class="nav-links">
+          <a href="#" class="nav-item active">Trade</a>
+          <a href="#" class="nav-item">Bridge</a>
+        </nav>
+      </div>
+
+      <div class="header-right">
+        <!-- Theme Toggle -->
+        <button class="icon-circle-btn" id="theme-toggle" title="Toggle dark/light mode">
+          <svg id="theme-icon-sun" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg id="theme-icon-moon" class="h-5 w-5 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+
+        <!-- Resources Menu -->
+        <div class="dropdown-wrapper">
+          <button class="icon-circle-btn" id="resources-btn" title="Resources">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5">
+              <circle cx="12" cy="12" r="1"></circle>
+              <circle cx="19" cy="12" r="1"></circle>
+              <circle cx="5" cy="12" r="1"></circle>
+            </svg>
+          </button>
+          <div class="dropdown-menu hidden" id="resources-menu">
+            <a href="https://docs.matcha.xyz" target="_blank" class="menu-item">Documentation</a>
+            <a href="#" class="menu-item" id="menu-gas-tracker">Gas Tracker</a>
+            <a href="#" class="menu-item" id="menu-about">About Matcha Meta</a>
+            <div class="menu-divider"></div>
+            <a href="#" class="menu-item text-muted">v2.4.0 • Mainnet</a>
+          </div>
+        </div>
+
+        <!-- Connect Wallet Button -->
+        <button class="wallet-btn" id="connect-wallet-btn">
+          <span id="wallet-btn-label">Connect Wallet</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="main-content-grid">
+      <!-- Left Column: The Swap Card -->
+      <section class="swap-column">
+        <div class="swap-card">
+          <!-- Chain Selector Header -->
+          <div class="swap-card-header">
+            <button class="chain-selector-btn" id="chain-select-btn">
+              <img src="https://token-registry.s3.amazonaws.com/icons/tokens/ethereum/64/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2.png" id="active-chain-icon" class="chain-icon" alt="Chain Icon" />
+              <span id="active-chain-name">Ethereum</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="chevron-icon">
+                <path d="m6 9 6 6 6-6"></path>
+              </svg>
+            </button>
+            <div class="header-divider"></div>
+            <button class="settings-btn" id="trade-settings-btn" title="Trade Settings">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="gear-icon">
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+          </div>
+
+          <div class="card-inner-divider"></div>
+
+          <!-- Sell Section -->
+          <div class="section-box sell-box">
+            <div class="section-header">
+              <span class="section-title">Sell</span>
+              <div class="percentage-buttons">
+                <button type="button" class="pct-btn" data-pct="25">25%</button>
+                <button type="button" class="pct-btn" data-pct="50">50%</button>
+                <button type="button" class="pct-btn" data-pct="100">Max</button>
+              </div>
+            </div>
+
+            <div class="token-input-row">
+              <div class="token-pill-wrap">
+                <button type="button" class="token-select-pill" id="sell-token-btn">
+                  <img src="https://token-registry.s3.amazonaws.com/icons/tokens/ethereum/64/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2.png" id="sell-token-icon" class="token-icon" alt="Token" />
+                  <span id="sell-token-symbol" class="token-symbol">ETH</span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="chevron-sm">
+                    <path d="m6 9 6 6 6-6"></path>
+                  </svg>
+                </button>
+                <button type="button" class="info-circle-btn" id="sell-token-info" title="Token Information">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-4 w-4">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 16v-4"></path>
+                    <path d="M12 8h.01"></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="amount-input-wrap">
+              <input type="text" id="sell-amount-input" class="amount-input" placeholder="0.0" inputmode="decimal" autocomplete="off" value="1" />
+            </div>
+
+            <div class="fiat-value-row">
+              <span id="sell-fiat-value" class="fiat-text">$2,403.45</span>
+              <span class="balance-text" id="sell-balance-text">Balance: 12.45 ETH</span>
+            </div>
+
+            <!-- Percentage Slider -->
+            <div class="slider-container">
+              <input type="range" min="0" max="100" value="0" id="sell-range-slider" class="range-slider" />
+              <div class="slider-marks">
+                <span>0%</span>
+                <span>25%</span>
+                <span>50%</span>
+                <span>75%</span>
+                <span>100%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Flip Direction Button -->
+          <div class="reverse-container">
+            <button type="button" class="reverse-btn" id="reverse-tokens-btn" title="Switch token direction">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5">
+                <path d="m21 16-4 4-4-4"></path>
+                <path d="M17 20V4"></path>
+                <path d="m3 8 4-4 4 4"></path>
+                <path d="M7 4v16"></path>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Buy Section -->
+          <div class="section-box buy-box">
+            <div class="section-header">
+              <span class="section-title">Buy</span>
+              <span class="exchange-rate-badge" id="rate-badge">1 ETH ≈ 2,403.456561 USDC</span>
+            </div>
+
+            <div class="token-input-row">
+              <div class="token-pill-wrap">
+                <button type="button" class="token-select-pill" id="buy-token-btn">
+                  <img src="https://token-registry.s3.amazonaws.com/icons/tokens/ethereum/64/0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.png" id="buy-token-icon" class="token-icon" alt="Token" />
+                  <span id="buy-token-symbol" class="token-symbol">USDC</span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="chevron-sm">
+                    <path d="m6 9 6 6 6-6"></path>
+                  </svg>
+                </button>
+                <button type="button" class="info-circle-btn" id="buy-token-info" title="Token Information">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-4 w-4">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 16v-4"></path>
+                    <path d="M12 8h.01"></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="amount-input-wrap">
+              <input type="text" id="buy-amount-input" class="amount-input" placeholder="0.0" readonly value="2,403.456561" />
+            </div>
+
+            <div class="fiat-value-row">
+              <span id="buy-fiat-value" class="fiat-text">$2,402.81 <span class="price-impact-tag">(+0.008%)</span></span>
+              <span class="balance-text" id="buy-balance-text">Balance: 4,500.00 USDC</span>
+            </div>
+          </div>
+
+          <div class="card-inner-divider"></div>
+
+          <!-- Slippage Section -->
+          <div class="slippage-box">
+            <div class="slippage-label">Slippage</div>
+            <div class="slippage-options">
+              <button type="button" class="slip-btn" data-slip="0.01">0.01%</button>
+              <button type="button" class="slip-btn" data-slip="0.05">0.05%</button>
+              <button type="button" class="slip-btn active" data-slip="0.3">0.3%</button>
+              <input type="text" id="custom-slip-input" class="slip-custom-input" placeholder="Custom" />
+            </div>
+          </div>
+
+          <!-- Intents Mode Toggle -->
+          <div class="intents-box">
+            <div class="intents-toggle-wrap">
+              <label class="switch">
+                <input type="checkbox" id="intents-toggle" />
+                <span class="slider round"></span>
+              </label>
+              <span class="intents-label">Intents Mode</span>
+              <button type="button" class="info-circle-btn" id="intents-info-btn" title="Learn more about Intents Mode">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-4 w-4">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <path d="M12 16v-4"></path>
+                  <path d="M12 8h.01"></path>
+                </svg>
+              </button>
+            </div>
+            <span class="gasless-pill">Gasless & MEV Protected</span>
+          </div>
+
+          <!-- CTA Action Button -->
+          <div class="cta-container">
+            <button type="button" class="main-cta-btn" id="main-action-btn">
+              <span id="action-btn-text">Connect EVM Wallet</span>
+            </button>
+          </div>
+
+          <!-- Bottom Simulated Results Alert -->
+          <div class="simulation-alert-card" id="sim-alert-box">
+            <div class="sim-alert-header">
+              <span class="trophy-icon">🏆</span>
+              <span class="sim-alert-title">Simulated Results</span>
+            </div>
+            <p class="sim-alert-desc" id="sim-alert-desc">
+              <strong id="winning-agg-name">0x</strong> ranked #1 for <strong>best execution</strong> and matches the simulated amount.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column: Meta-Aggregator Leaderboard Panel -->
+      <section class="quotes-column">
+        <div class="quotes-panel">
+          <div class="quotes-panel-header">
+            <div class="quotes-status-pill">
+              <span class="status-shield">🛡️</span>
+              <span>Simulate Quotes</span>
+              <button class="info-circle-btn sm" title="Quotes are on-chain simulated in real-time">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <path d="M12 16v-4"></path>
+                  <path d="M12 8h.01"></path>
+                </svg>
+              </button>
+            </div>
+
+            <div class="quotes-header-right">
+              <span class="agg-count-badge" id="agg-count-badge">11 Aggregators</span>
+              <button type="button" class="refresh-btn" id="refresh-quotes-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="refresh-icon" id="refresh-spin-icon">
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                </svg>
+                <span id="refresh-timer-label">Refresh (5)</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Aggregators List Container -->
+          <div class="aggregators-list" id="aggregators-list">
+            <!-- Dynamically populated by app.js -->
+            <div class="loading-shimmer">
+              <div class="shimmer-card"></div>
+              <div class="shimmer-card"></div>
+              <div class="shimmer-card"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Token Selector Modal -->
+  <div class="modal-overlay hidden" id="token-modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title">Select a token</h3>
+        <button class="modal-close-btn" id="token-modal-close">✕</button>
+      </div>
+      <div class="token-search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon">
+          <circle cx="11" cy="11" r="8"></circle>
+          <path d="m21 21-4.3-4.3"></path>
+        </svg>
+        <input type="text" id="token-search-input" class="token-search-input" placeholder="Search by name or address..." />
+      </div>
+
+      <div class="popular-tokens-row" id="popular-tokens-chips">
+        <!-- Injected dynamically -->
+      </div>
+
+      <div class="token-list-container" id="token-list">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Chain Selector Modal -->
+  <div class="modal-overlay hidden" id="chain-modal-overlay">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3 class="modal-title">Select Network</h3>
+        <button class="modal-close-btn" id="chain-modal-close">✕</button>
+      </div>
+      <div class="chain-list" id="chain-list-items">
+        <!-- Supported chains -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Trade Settings Modal -->
+  <div class="modal-overlay hidden" id="settings-modal-overlay">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3 class="modal-title">Trade Settings</h3>
+        <button class="modal-close-btn" id="settings-modal-close">✕</button>
+      </div>
+      <div class="settings-body">
+        <div class="setting-item">
+          <div>
+            <div class="setting-title">Fast Routing</div>
+            <div class="setting-desc">Prioritize execution latency over depth</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked />
+            <span class="slider round"></span>
+          </label>
+        </div>
+        <div class="setting-item">
+          <div>
+            <div class="setting-title">MEV Frontrunning Protection</div>
+            <div class="setting-desc">Simulate bundle routing via Flashbots / private builders</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked />
+            <span class="slider round"></span>
+          </label>
+        </div>
+        <div class="setting-item">
+          <div>
+            <div class="setting-title">Permit2 Gasless Approvals</div>
+            <div class="setting-desc">Single-signature approval for multi-dex routing</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked />
+            <span class="slider round"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Wallet Connection Modal -->
+  <div class="modal-overlay hidden" id="wallet-modal-overlay">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3 class="modal-title">Connect Wallet</h3>
+        <button class="modal-close-btn" id="wallet-modal-close">✕</button>
+      </div>
+      <div class="wallet-options-list">
+        <button class="wallet-option-item" id="connect-injected">
+          <img src="https://token-registry.s3.amazonaws.com/icons/tokens/ethereum/64/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2.png" class="wallet-icon" alt="Browser Wallet" />
+          <div class="wallet-info">
+            <div class="wallet-name">Browser Wallet / MetaMask</div>
+            <div class="wallet-sub">Injected EVM provider</div>
+          </div>
+        </button>
+        <button class="wallet-option-item" id="connect-coinbase">
+          <div class="wallet-fake-icon">🪙</div>
+          <div class="wallet-info">
+            <div class="wallet-name">Coinbase Wallet</div>
+            <div class="wallet-sub">Direct connection</div>
+          </div>
+        </button>
+        <button class="wallet-option-item" id="connect-simulated">
+          <div class="wallet-fake-icon">🔑</div>
+          <div class="wallet-info">
+            <div class="wallet-name">Simulated Dev Wallet</div>
+            <div class="wallet-sub">0xd8dA...6045 (vitalik.eth test profile)</div>
+          </div>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
