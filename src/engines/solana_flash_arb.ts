@@ -9,11 +9,38 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   AssetTag,
   Bank,
+  MARGINFI_IDL,
   MarginfiAccountWrapper,
   Project0Client,
   deriveMarginfiAccount,
   getConfig,
 } from "@0dotxyz/p0-ts-sdk";
+// @ts-ignore
+import * as bufferLayout from "buffer-layout";
+
+// Defensively patch buffer-layout Union.decode to avoid crashes on unknown enum discriminators
+if ((bufferLayout as any)?.Union?.prototype?.decode) {
+  const origUnionDecode = (bufferLayout as any).Union.prototype.decode;
+  (bufferLayout as any).Union.prototype.decode = function (b: any, offset: any) {
+    const dlo = this.discriminator;
+    const discr = dlo.decode(b, offset ?? 0);
+    if (this.registry[discr] === undefined && !this.defaultLayout) {
+      const dest = this.makeDestinationObject();
+      dest[dlo.property] = discr;
+      return dest;
+    }
+    return origUnionDecode.call(this, b, offset);
+  };
+}
+
+// Patch Marginfi IDL enums with placeholder variants for recently added on-chain types
+for (const t of (MARGINFI_IDL as any)?.types ?? []) {
+  if (t.type && t.type.kind === "enum") {
+    while (t.type.variants.length < 64) {
+      t.type.variants.push({ name: `Unknown${t.name}${t.type.variants.length}` });
+    }
+  }
+}
 import {
   AddressLookupTableAccount,
   Commitment,
