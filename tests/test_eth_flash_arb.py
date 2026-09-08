@@ -6,6 +6,7 @@ from unittest.mock import patch
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -65,6 +66,55 @@ def matcha_response(buy_amount, simulation_result="success", include_data=True):
 
 
 class EthereumFlashArbTests(unittest.TestCase):
+    def test_json_access_denials_are_distinct_from_transient_errors(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                response = SimpleNamespace(
+                    status_code=status,
+                    text=json.dumps({"error": {"code": str(status), "message": "Forbidden"}}),
+                    headers={},
+                )
+                with self.assertRaisesRegex(
+                    pyusd_arb.ProviderAccessBlockedError,
+                    rf"access denied \(HTTP {status}\)",
+                ) as caught:
+                    pyusd_arb.HttpJsonClient._decode(
+                        response, "https://meta.matcha.xyz/api/gas?chainId=1"
+                    )
+                self.assertNotIn("Cloudflare", str(caught.exception))
+
+    def test_service_failures_remain_retryable(self):
+        for status in (502, 503, 504):
+            with self.subTest(status=status):
+                response = SimpleNamespace(status_code=status, text="Unavailable", headers={})
+                with self.assertRaises(pyusd_arb.RetryableArbError):
+                    pyusd_arb.HttpJsonClient._decode(
+                        response, "https://meta.matcha.xyz/api/gas?chainId=1"
+                    )
+
+    def test_rate_limit_defers_instead_of_retrying_the_whole_route(self):
+        response = SimpleNamespace(
+            status_code=429, text="Too many requests", headers={"Retry-After": "600"}
+        )
+        with self.assertRaises(pyusd_arb.ProviderRateLimitedError) as caught:
+            pyusd_arb.HttpJsonClient._decode(response, "https://meta.matcha.xyz/api/competitions")
+        self.assertNotIsInstance(caught.exception, pyusd_arb.RetryableArbError)
+        self.assertEqual(caught.exception.retry_after_seconds, 600)
+        self.assertIn("retry-after=600s", str(caught.exception))
+
+    def test_vercel_429_is_access_denial_not_immediate_route_retry(self):
+        response = SimpleNamespace(
+            status_code=429,
+            text="<html><title>Vercel Security Checkpoint</title></html>",
+            headers={"x-vercel-mitigated": "challenge", "x-vercel-id": "hkg1::test"},
+        )
+        with self.assertRaises(pyusd_arb.ProviderAccessBlockedError) as caught:
+            pyusd_arb.HttpJsonClient._decode(response, "https://meta.matcha.xyz/api/competitions")
+        self.assertNotIsInstance(caught.exception, pyusd_arb.RetryableArbError)
+        self.assertIn("Vercel Security Checkpoint (HTTP 429", str(caught.exception))
+        self.assertIn("request-id=hkg1::test", str(caught.exception))
+        self.assertNotIn("<html>", str(caught.exception))
+
     def test_cloudflare_block_is_concise_and_distinct_from_a_transient_error(self):
         class Response:
             status_code = 403
@@ -89,7 +139,14 @@ class EthereumFlashArbTests(unittest.TestCase):
 
             def get(self, url, *, headers=None):
                 if url.startswith("https://meta.matcha.xyz"):
-                    raise pyusd_arb.ProviderAccessBlockedError("Cloudflare HTTP 403")
+                    return pyusd_arb.HttpJsonClient._decode(
+                        SimpleNamespace(
+                            status_code=403,
+                            text='{"error":{"code":"403","message":"Forbidden"}}',
+                            headers={},
+                        ),
+                        url,
+                    )
                 self.official_headers = headers
                 return {
                     "liquidityAvailable": True,
@@ -125,6 +182,91 @@ class EthereumFlashArbTests(unittest.TestCase):
         self.assertEqual(quote.allowance_target, ALLOWANCE_TARGET)
         self.assertEqual(quote.buy_amount, 50_011_000_000)
         self.assertEqual(http.official_headers["0x-api-key"], "test-key")
+
+    def test_matcha_denial_without_enabled_fallback_remains_access_blocked(self):
+        class DeniedHttp:
+            def get(self, url, *, headers=None):
+                if not url.startswith("https://meta.matcha.xyz/"):
+                    raise AssertionError("Unexpected official 0x request")
+                return pyusd_arb.HttpJsonClient._decode(
+                    SimpleNamespace(status_code=403, text="Forbidden", headers={}), url
+                )
+
+        for provider, key in (("auto", None), ("matcha", "test-key")):
+            with self.subTest(provider=provider):
+                client = pyusd_arb.MatchaClient(
+                    DeniedHttp(), quote_provider=provider, zero_ex_api_key=key
+                )
+                with self.assertRaises(pyusd_arb.ProviderAccessBlockedError):
+                    client.quotes(TARGET, 50_000_000_000, 1, ("0x",))
+
+    @staticmethod
+    def mixed_denial_http(competing_response):
+        class MixedHttp:
+            def get(self, url, *, headers=None):
+                if "/api/gas?" not in url:
+                    raise AssertionError("Unexpected gas request")
+                return {"price": "3000000000"}
+
+            def post(self, url, payload, *, headers=None):
+                if url.endswith("/api/competitions"):
+                    return {"id": "test-competition"}
+                if payload["aggregator"] == "0x":
+                    return pyusd_arb.HttpJsonClient._decode(
+                        SimpleNamespace(
+                            status_code=403,
+                            text='{"error":{"code":"403","message":"Forbidden"}}',
+                            headers={},
+                        ),
+                        url,
+                    )
+                return competing_response
+
+        return MixedHttp()
+
+    def test_mixed_denial_without_executable_quote_uses_only_enabled_fallback(self):
+        for provider, key, fallback_enabled in (
+            ("auto", "test-key", True),
+            ("auto", None, False),
+            ("matcha", "test-key", False),
+        ):
+            with self.subTest(provider=provider, fallback_enabled=fallback_enabled):
+                client = pyusd_arb.MatchaClient(
+                    self.mixed_denial_http(
+                        matcha_response(50_011_000_000, simulation_result="failed")
+                    ),
+                    quote_provider=provider,
+                    zero_ex_api_key=key,
+                )
+                with patch.object(
+                    client, "_zero_ex_quotes",
+                    return_value=[("0x-official", matcha_response(50_011_000_000))],
+                ) as fallback:
+                    if fallback_enabled:
+                        responses = client.quotes(
+                            TARGET, 50_000_000_000, 1, ("0x", "OKX")
+                        )
+                        quote = pyusd_arb.select_best_matcha_quote(
+                            responses, 50_000_000_000
+                        )
+                        self.assertEqual(quote.aggregator, "0x-official")
+                        fallback.assert_called_once()
+                    else:
+                        with self.assertRaises(pyusd_arb.ProviderAccessBlockedError):
+                            client.quotes(TARGET, 50_000_000_000, 1, ("0x", "OKX"))
+                        fallback.assert_not_called()
+
+    def test_denied_competitor_does_not_discard_an_executable_quote(self):
+        client = pyusd_arb.MatchaClient(
+            self.mixed_denial_http(matcha_response(50_011_000_000)),
+            zero_ex_api_key="test-key",
+        )
+        with patch.object(client, "_zero_ex_quotes") as fallback:
+            responses = client.quotes(TARGET, 50_000_000_000, 1, ("0x", "OKX"))
+            quote = pyusd_arb.select_best_matcha_quote(responses, 50_000_000_000)
+        self.assertEqual(quote.aggregator, "OKX")
+        self.assertEqual(quote.buy_amount, 50_011_000_000)
+        fallback.assert_not_called()
 
     def test_pyusd_route_checksums_lowercase_matcha_addresses_for_web3(self):
         quote = pyusd_arb.MatchaQuote(

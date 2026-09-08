@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from typing import Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -124,6 +125,7 @@ class Outcome:
     profit_token: str | None = None
     elapsed_seconds: float | None = None
     transaction: str | None = None
+    retry_after_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -159,7 +161,15 @@ class AdaptiveBackoff:
             self._deadlines[key] = max(self._deadlines.get(key, 0.0), deadline)
         return seconds
 
-    def fail(self, key: str, base_seconds: float, max_seconds: float) -> float:
+    def fail(
+        self,
+        key: str,
+        base_seconds: float,
+        max_seconds: float,
+        minimum_seconds: float = 0.0,
+    ) -> float:
+        if not math.isfinite(minimum_seconds) or minimum_seconds < 0:
+            minimum_seconds = 0.0
         with self._lock:
             failures = self._failures.get(key, 0) + 1
             self._failures[key] = failures
@@ -167,8 +177,12 @@ class AdaptiveBackoff:
                 max_seconds,
                 base_seconds * (2 ** min(failures - 1, 20)),
             )
-            self._deadlines[key] = time.monotonic() + delay
-        return delay
+            now = time.monotonic()
+            self._deadlines[key] = max(
+                self._deadlines.get(key, 0.0),
+                now + max(delay, minimum_seconds),
+            )
+            return self._deadlines[key] - now
 
     def succeed(self, key: str) -> None:
         with self._lock:
@@ -356,18 +370,44 @@ def execution_detail(route: Route, stdout: str) -> str | None:
     return link if status == "confirmed" else None
 
 
+def is_vercel_challenge(detail: str) -> bool:
+    lowered = detail.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "vercel security checkpoint",
+            "access blocked by vercel",
+            "x-vercel-mitigated=challenge",
+        )
+    )
+
+
+def retry_after_seconds(detail: str) -> float | None:
+    """Read normalized provider wait hints before shortening the engine error."""
+    waits: list[float] = []
+    for match in re.finditer(r"\bretry-after=([^\s;]+)s\b", detail, re.IGNORECASE):
+        try:
+            seconds = float(match.group(1))
+        except ValueError:
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            waits.append(seconds)
+    return max(waits) if waits else None
+
+
 def failure_category(detail: str) -> str:
     lowered = detail.lower()
+    access_denied = re.search(r"\bHTTP\s+(?:401|403)\b", detail, re.IGNORECASE)
     matcha_access_block = (
-        "http 403" in lowered
-        and ("cloudflare" in lowered or "access blocked" in lowered)
+        access_denied
         and ("matcha" in lowered or "metamatcha" in lowered)
     )
     zero_ex_auth_block = (
-        ("http 401" in lowered or "http 403" in lowered)
+        access_denied
         and ("api.0x.org" in lowered or "official 0x" in lowered)
     )
-    if matcha_access_block or zero_ex_auth_block:
+    matcha_vercel_block = "matcha" in lowered and is_vercel_challenge(detail)
+    if matcha_access_block or zero_ex_auth_block or matcha_vercel_block:
         return "access-blocked-matcha"
     if (
         "no_routes_found" in lowered
@@ -496,14 +536,43 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
         return f"MetaMatcha is temporarily unavailable{suffix}"
     if category == "access-blocked-matcha":
+        status = re.search(r"\bHTTP\s+(\d{3})\b", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else ""
         if "api.0x.org" in lowered or "official 0x" in lowered:
             return (
-                "the official 0x API rejected this request (HTTP 401/403); "
-                "check ETH_ARB_ZERO_EX_API_KEY and this machine's egress"
+                f"the official 0x API rejected this request{suffix}; "
+                "check ETH_ARB_ZERO_EX_API_KEY and provider access"
+            )
+        alternative = (
+            "explicitly configure Jupiter (SOL_FLASH_ARB_DEX_PROVIDER=jupiter)"
+            if route.chain == "solana"
+            else "configure the official 0x quote provider"
+        )
+        if is_vercel_challenge(detail):
+            endpoint = ""
+            found_url = re.search(r"https?://[^\s;]+", detail)
+            if found_url:
+                try:
+                    parsed = urlsplit(found_url.group(0).rstrip(").,"))
+                    safe_url = urlunsplit(
+                        (parsed.scheme, parsed.hostname or "", parsed.path, "", "")
+                    )
+                    endpoint = f" at {safe_url}"
+                except ValueError:
+                    pass
+            request_id = re.search(r"\brequest-id=([A-Za-z0-9:._-]{1,200})", detail)
+            request_reference = f"; request-id={request_id.group(1)}" if request_id else ""
+            denied = "x-vercel-mitigated=deny" in lowered or "x-vercel-mitigated=denied" in lowered
+            block_name = "Vercel firewall" if denied else "Vercel Security Checkpoint"
+            explanation = "provider denied API access" if denied else "browser verification is required"
+            return (
+                f"MetaMatcha request blocked by {block_name}{suffix}"
+                f"{endpoint}; {explanation}{request_reference}; "
+                f"check provider access or {alternative}"
             )
         return (
-            "MetaMatcha denied this machine's network access (Cloudflare HTTP 403); "
-            "configure the official 0x quote provider or use an allowed egress"
+            f"MetaMatcha rejected this request{suffix}; "
+            f"check provider access or {alternative}"
         )
     if category == "transient-rpc":
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
@@ -1049,7 +1118,12 @@ def run_route(
     )
     transaction_status, transaction = execution_reference(route, result.stdout or "")
 
-    def completed_outcome(executed: bool, detail: str, category: str) -> Outcome:
+    def completed_outcome(
+        executed: bool,
+        detail: str,
+        category: str,
+        provider_retry_after: float | None = None,
+    ) -> Outcome:
         return Outcome(
             executed,
             detail,
@@ -1059,6 +1133,7 @@ def run_route(
             profit_token=route.loan,
             elapsed_seconds=elapsed,
             transaction=transaction,
+            retry_after_seconds=provider_retry_after,
         )
 
     if transaction_status == "confirmed" and transaction:
@@ -1117,6 +1192,7 @@ def run_route(
         False,
         readable_failure(route, detail, category),
         category,
+        retry_after_seconds(detail),
     )
 
 
@@ -1324,6 +1400,7 @@ def worker(
                     dependency,
                     cooldown_policy.transient_base_seconds,
                     cooldown_policy.transient_max_seconds,
+                    minimum_seconds=outcome.retry_after_seconds or 0.0,
                 )
                 status = re.search(r"HTTP\s+(\d{3})", outcome.detail, re.IGNORECASE)
                 suffix = f" (HTTP {status.group(1)})" if status else ""
@@ -1362,7 +1439,7 @@ def worker(
                 dependency = f"metamatcha:{route.chain}"
                 backoff.block(dependency, cooldown_policy.provider_access_seconds)
                 logger.info(
-                    "PAUSE   | %-17s | %.0fs | provider denied this machine's access",
+                    "PAUSE   | %-17s | %.0fs | provider rejected the request",
                     dependency_label(dependency),
                     cooldown_policy.provider_access_seconds,
                 )
@@ -1370,7 +1447,7 @@ def worker(
                     dashboard.record_cooldown(
                         route,
                         cooldown_policy.provider_access_seconds,
-                        "MetaMatcha denied this machine's access",
+                        "Quote provider rejected the request",
                     )
             elif outcome.category == "capacity":
                 route_deadlines[route.key] = (

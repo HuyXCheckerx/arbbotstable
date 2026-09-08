@@ -23,6 +23,11 @@ from urllib.parse import urlencode
 import uuid
 
 try:
+    from .provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+except ImportError:  # Direct script execution.
+    from provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+
+try:
     from curl_cffi import requests as cffi_requests
 except ImportError:
     cffi_requests = None
@@ -366,6 +371,14 @@ class RetryableArbError(ArbError):
 
 class ProviderAccessBlockedError(ArbError):
     pass
+
+
+class ProviderRateLimitedError(ArbError):
+    """Defer to the scanner's cooldown instead of rebuilding the route immediately."""
+
+    def __init__(self, response: Any, url: str):
+        super().__init__(rate_limit_detail(response, url))
+        self.retry_after_seconds = retry_after_seconds(response)
 
 
 class QuoteStaleError(RetryableArbError):
@@ -874,20 +887,14 @@ class HttpJsonClient:
     def _decode(response: Any, url: str) -> Any:
         excerpt = " ".join(response.text.split())[:400]
         if response.status_code >= 400:
-            response_headers = getattr(response, "headers", {}) or {}
-            cloudflare_block = response.status_code in (403, 503) and (
-                "cloudflare" in response.text.lower()
-                or "cf-ray" in {str(key).lower() for key in response_headers}
-            )
-            if cloudflare_block:
-                raise ProviderAccessBlockedError(
-                    f"{url} access blocked by Cloudflare "
-                    f"(HTTP {response.status_code}); the provider may reject "
-                    "data-center egress IPs"
-                )
+            access_detail = access_block_detail(response, url)
+            if access_detail:
+                raise ProviderAccessBlockedError(access_detail)
+            if response.status_code == 429:
+                raise ProviderRateLimitedError(response, url)
             detail = f": {excerpt}" if excerpt else ""
             message = f"{url} returned HTTP {response.status_code}{detail}"
-            if response.status_code in (429, 502, 503, 504):
+            if response.status_code in (502, 503, 504):
                 raise RetryableArbError(message)
             raise ArbError(message)
         try:
@@ -970,6 +977,7 @@ class MatchaClient:
         responses: list[tuple[str, Any]] = []
         errors: list[str] = []
         access_blocks: list[ProviderAccessBlockedError] = []
+        rate_limits: list[ProviderRateLimitedError] = []
         selected = tuple(aggregators)
         with ThreadPoolExecutor(max_workers=min(4, len(selected))) as pool:
             futures = {pool.submit(fetch, name): name for name in selected}
@@ -978,12 +986,23 @@ class MatchaClient:
                     responses.append(future.result())
                 except ProviderAccessBlockedError as exc:
                     access_blocks.append(exc)
+                except ProviderRateLimitedError as exc:
+                    rate_limits.append(exc)
                 except ArbError as exc:
                     errors.append(f"{futures[future]}: {exc}")
         if not responses:
             if access_blocks:
                 raise access_blocks[0]
+            if rate_limits:
+                raise max(rate_limits, key=lambda error: error.retry_after_seconds or 0)
             raise ArbError("all Matcha quote requests failed: " + "; ".join(errors))
+        if access_blocks or rate_limits:
+            try:
+                select_best_matcha_quote(responses, sell_amount)
+            except ArbError as exc:
+                if access_blocks:
+                    raise access_blocks[0] from exc
+                raise max(rate_limits, key=lambda error: error.retry_after_seconds or 0) from exc
         return responses
 
     def _zero_ex_quotes(

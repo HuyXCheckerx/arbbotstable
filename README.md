@@ -129,6 +129,49 @@ Every line uses an operator-facing state such as `CHECK`, `NO TRADE`, `PAUSED`,
 `READY`, or `CONFIRMED`, followed by the complete venue-labeled route and its
 actual order.
 
+MetaMatcha HTTP 401/403 responses, including plain JSON `Forbidden` errors,
+and Vercel Security Checkpoint challenges (including HTTP 429)
+pause all routes using that provider on the affected chain for
+`SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS` (default: 3600). The Solana helper
+does not immediately retry an access denial. Checks resume after the cooldown;
+the cooldown itself does not restore provider access. Ordinary HTTP 429 rate
+limits use transient backoff and honor `Retry-After` as a minimum wait. Neither
+engine immediately repeats a rate-limited competition request.
+
+The PC failure investigated on September 8 was a Vercel browser challenge at
+`POST /api/competitions`, while `GET /api/gas` still succeeded. A successful gas
+probe alone does not establish quote access. The endpoint, checkpoint name and
+request ID now appear in challenge diagnostics. See
+[the diagnosis and recovery options](docs/METAMATCHA_DIAGNOSTICS.md).
+To collect a small shareable reachability report without wallet keys or trades:
+
+```bash
+python scripts/diagnose_metamatcha.py --chain ethereum
+```
+
+If MetaMatcha keeps returning 403 from a hosted server, check access from that
+server. A successful request from your development machine does not establish
+that the server is allowed, and a generic JSON 403 does not identify its cause.
+The existing alternative provider settings in the server's `.env` are:
+
+```dotenv
+# Ethereum: call the official 0x API directly with your own valid API key.
+ETH_ARB_QUOTE_PROVIDER=zero-ex
+ETH_ARB_ZERO_EX_API_KEY=your_0x_api_key
+# Solana: explicitly select the Jupiter integration with your own API key.
+SOL_FLASH_ARB_DEX_PROVIDER=jupiter
+JUP_API_KEY=your_jupiter_api_key
+```
+
+0x key setup is documented in the
+[official 0x guide](https://docs.0x.org/docs/introduction/quickstart/getting-started),
+and Jupiter's quote API is documented in its
+[Metis Swap guide](https://developers.jup.ag/docs/swap/v1/get-quote).
+Ethereum's default `auto` mode also falls back to 0x when a key is configured;
+`zero-ex` skips the denied MetaMatcha endpoint entirely. Solana provider changes
+are explicit. Stop the existing sniper, update the server code/configuration,
+and validate with `python pyusd_usdg_sniper.py --once` before restarting live.
+
 For a separate sniper version restricted to PYUSD and USDG, check its eight
 fixed routes once (two chains, two pair directions, and two venue orders):
 

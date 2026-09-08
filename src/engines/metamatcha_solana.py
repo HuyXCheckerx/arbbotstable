@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Fetch an executable Solana quote from meta.matcha.xyz.
 
-The TypeScript flash-arbitrage engine invokes this helper because Matcha's
-Cloudflare edge rejects Node's native HTTP fingerprint.  The helper accepts one
+The TypeScript flash-arbitrage engine invokes this HTTP helper. It accepts one
 JSON request on stdin and writes exactly one JSON response on stdout.  It never
 loads or handles wallet private keys.
 """
@@ -15,6 +14,11 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+
+try:
+    from .provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+except ImportError:  # Direct script execution.
+    from provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
 
 try:
     from curl_cffi import requests
@@ -44,6 +48,18 @@ HEADERS = {
 }
 
 
+class ProviderAccessBlockedError(RuntimeError):
+    """The quote service denied access; immediate retries will not help."""
+
+
+class ProviderRateLimitedError(RuntimeError):
+    """The scanner must wait before requesting another competition."""
+
+    def __init__(self, response: Any, url: str):
+        super().__init__(f"MetaMatcha {rate_limit_detail(response, url)}")
+        self.retry_after_seconds = retry_after_seconds(response)
+
+
 def _session() -> requests.Session:
     session = requests.Session(impersonate="chrome124")
     session.headers.update(HEADERS)
@@ -57,9 +73,14 @@ def _session() -> requests.Session:
 
 def _post_json(url: str, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
     response = _session().post(url, json=payload, timeout=timeout_seconds)
+    access_detail = access_block_detail(response, url)
+    if access_detail:
+        raise ProviderAccessBlockedError(f"MetaMatcha {access_detail}")
+    if response.status_code == 429:
+        raise ProviderRateLimitedError(response, url)
     if response.status_code != 200:
         body = response.text[:500].replace("\n", " ")
-        raise RuntimeError(f"HTTP {response.status_code}: {body}")
+        raise RuntimeError(f"{url} returned HTTP {response.status_code}: {body}")
     value = response.json()
     if not isinstance(value, dict):
         raise RuntimeError("MetaMatcha returned a non-object response")
@@ -163,6 +184,8 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
 
     responses: dict[str, dict[str, Any]] = {}
     failures: list[str] = []
+    access_blocks: list[ProviderAccessBlockedError] = []
+    rate_limits: list[ProviderRateLimitedError] = []
     with ThreadPoolExecutor(max_workers=min(4, len(clean_aggregators))) as pool:
         futures = {pool.submit(query, name): name for name in clean_aggregators}
         for future in as_completed(futures):
@@ -170,6 +193,10 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
             try:
                 aggregator, response = future.result()
                 responses[aggregator] = response
+            except ProviderAccessBlockedError as exc:
+                access_blocks.append(exc)
+            except ProviderRateLimitedError as exc:
+                rate_limits.append(exc)
             except Exception as exc:  # each competitor may fail independently
                 failures.append(f"{name}: {exc}")
 
@@ -178,6 +205,10 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
             responses, sell_amount=sell_amount, taker=taker
         )
     except RuntimeError as exc:
+        if access_blocks:
+            raise access_blocks[0] from exc
+        if rate_limits:
+            raise max(rate_limits, key=lambda error: error.retry_after_seconds or 0) from exc
         if failures:
             raise RuntimeError(f"{exc}; request failures: {'; '.join(failures)}") from exc
         raise

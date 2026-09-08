@@ -36,6 +36,8 @@ from crosschain_sniper import (
     parse_gas_fee_gwei,
     process_is_running,
     profit_metrics,
+    readable_failure,
+    retry_after_seconds,
     route_execution_floor,
     run_route,
     selected_routes,
@@ -44,6 +46,20 @@ from crosschain_sniper import (
     unresolved_submission,
     worker,
 )
+
+
+METAMATCHA_FORBIDDEN_ERRORS = {
+    "ethereum": (
+        'https://meta.matcha.xyz/api/gas?chainId=1 returned HTTP 403: '
+        '{"error":{"code":"403","message":"Forbidden",'
+        '"id":"arn1::4wwp8-1788836640966-b9cf7ffd52c6"}}'
+    ),
+    "solana": (
+        'MetaMatcha quote failed: MetaMatcha quote failed: HTTP 403: '
+        '{"error":{"code":"403","message":"Forbidden",'
+        '"id":"arn1::ngxw9-1788836646033-ffb2c3857a0d"}}'
+    ),
+}
 
 
 class CrosschainSniperTests(unittest.TestCase):
@@ -553,6 +569,203 @@ class CrosschainSniperTests(unittest.TestCase):
 
     def test_provider_access_block_uses_a_long_default_cooldown(self):
         self.assertEqual(parse_args([]).provider_access_cooldown_seconds, 3600)
+
+    def test_plain_metamatcha_denials_pause_with_chain_specific_guidance(self):
+        for chain, detail in METAMATCHA_FORBIDDEN_ERRORS.items():
+            with self.subTest(chain=chain):
+                category = failure_category(detail)
+                self.assertEqual(category, "access-blocked-matcha")
+                message = readable_failure(Route(chain, "PYUSD/USDG"), detail, category)
+                self.assertIn("HTTP 403", message)
+                self.assertIn("check provider access", message)
+                self.assertNotIn("Cloudflare", message)
+                self.assertNotIn("network", message)
+                if chain == "solana":
+                    self.assertIn("SOL_FLASH_ARB_DEX_PROVIDER=jupiter", message)
+                    self.assertNotIn("0x", message)
+                else:
+                    self.assertIn("official 0x quote provider", message)
+                    self.assertNotIn("Jupiter", message)
+
+    def test_access_denials_require_a_matcha_or_zero_ex_provider_marker(self):
+        for detail in (
+            'Stable.com quote failed: HTTP 403: {"message":"Forbidden"}',
+            'Jupiter quote failed: HTTP 401: {"message":"Unauthorized"}',
+            'RPC returned HTTP 403: {"message":"Forbidden"}',
+            'MetaMatcha quote failed: HTTP 400: {"message":"Invalid amount"}',
+        ):
+            with self.subTest(detail=detail):
+                self.assertEqual(failure_category(detail), "failure")
+        self.assertEqual(
+            failure_category('MetaMatcha quote failed: HTTP 401: Unauthorized'),
+            "access-blocked-matcha",
+        )
+
+    def test_vercel_checkpoint_is_an_access_block_instead_of_a_rate_limit(self):
+        detail = (
+            "https://meta.matcha.xyz/api/competitions?token=secret "
+            "access blocked by Vercel Security Checkpoint "
+            "(HTTP 429; x-vercel-mitigated=challenge); request-id=test::123"
+        )
+        for chain in ("ethereum", "solana"):
+            with self.subTest(chain=chain):
+                category = failure_category(detail)
+                self.assertEqual(category, "access-blocked-matcha")
+                readable = readable_failure(Route(chain, "USDC/USDG"), detail, category)
+                self.assertIn("Vercel Security Checkpoint (HTTP 429)", readable)
+                self.assertIn("https://meta.matcha.xyz/api/competitions;", readable)
+                self.assertIn("browser verification is required", readable)
+                self.assertIn("request-id=test::123", readable)
+                self.assertNotIn("token=secret", readable)
+                self.assertNotIn("temporarily unavailable", readable)
+        self.assertEqual(
+            failure_category("MetaMatcha quote failed: HTTP 429: Too Many Requests"),
+            "transient-matcha",
+        )
+        self.assertEqual(
+            failure_category("Stable.com HTTP 429: Vercel Security Checkpoint"),
+            "transient-stable",
+        )
+        self.assertEqual(
+            failure_category("MetaMatcha HTTP 429; x-vercel-mitigated=challenge"),
+            "access-blocked-matcha",
+        )
+
+    def test_retry_after_accepts_only_finite_nonnegative_normalized_waits(self):
+        self.assertEqual(retry_after_seconds("MetaMatcha HTTP 429; retry-after=120.5s"), 120.5)
+        self.assertEqual(retry_after_seconds("retry-after=0s"), 0)
+        self.assertEqual(retry_after_seconds("retry-after=20s; retry-after=45s"), 45)
+        for value in ("NaN", "inf", "-1", "1e999", "invalid"):
+            with self.subTest(value=value):
+                self.assertIsNone(retry_after_seconds(f"retry-after={value}s"))
+
+    def test_rate_limit_wait_survives_readable_error_and_defers_next_route(self):
+        route = Route("ethereum", "USDC/USDG", "dex-first")
+        detail = "https://meta.matcha.xyz/api/competitions returned HTTP 429: Too Many Requests; retry-after=900s"
+        policy = CooldownPolicy(30, 300, 3600, 300, 300, 30, 60)
+        backoff = AdaptiveBackoff()
+        dashboard = Mock()
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "crosschain_sniper.time.monotonic", return_value=100,
+        ), patch(
+            "crosschain_sniper.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=("engine",), returncode=1, stdout="", stderr=f"ERROR: {detail}\n",
+            ),
+        ) as engine:
+            worker(
+                "ethereum", [route, Route("ethereum", "USDG/USDC", "dex-first")],
+                live=False, base_threshold=Decimal("5"), interval_seconds=1,
+                cooldown_seconds=15, timeout_seconds=300, cooldown_policy=policy,
+                backoff=backoff, once=True, stop=threading.Event(), logger=Mock(),
+                dashboard=dashboard,
+            )
+            self.assertEqual(engine.call_count, 1)
+            outcome = dashboard.record_result.call_args.args[2]
+            self.assertEqual(outcome.category, "transient-matcha")
+            self.assertEqual(outcome.retry_after_seconds, 900)
+            self.assertNotIn("retry-after", outcome.detail)
+            self.assertEqual(backoff.remaining(("metamatcha:ethereum",)), 900)
+            self.assertEqual(dashboard.record_cooldown.call_args.args[1], 900)
+
+    def test_retry_after_does_not_shorten_existing_or_exponential_backoff(self):
+        backoff = AdaptiveBackoff()
+        with patch("crosschain_sniper.time.monotonic", return_value=100):
+            backoff.block("provider", 900)
+            self.assertEqual(backoff.fail("provider", 30, 300, minimum_seconds=10), 900)
+            self.assertEqual(backoff.remaining(("provider",)), 900)
+            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 30)
+            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 60)
+
+    def test_vercel_checkpoint_uses_the_access_cooldown_for_its_chain(self):
+        policy = CooldownPolicy(30, 300, 3600, 300, 300, 30, 60)
+        detail = (
+            "https://meta.matcha.xyz/api/competitions access blocked by "
+            "Vercel Security Checkpoint (HTTP 429; x-vercel-mitigated=challenge)"
+        )
+        for chain in ("ethereum", "solana"):
+            with self.subTest(chain=chain):
+                backoff = AdaptiveBackoff()
+                dashboard = Mock()
+                routes = selected_routes([chain], ["USDC/USDG", "USDG/USDC"], ["dex-first"])
+                with patch.dict(os.environ, {}, clear=True), patch(
+                    "crosschain_sniper.time.monotonic", return_value=100,
+                ), patch(
+                    "crosschain_sniper.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        args=("engine",), returncode=1, stdout="", stderr=f"ERROR: {detail}\n",
+                    ),
+                ) as engine:
+                    worker(
+                        chain, routes, live=False, base_threshold=Decimal("5"),
+                        interval_seconds=1, cooldown_seconds=15, timeout_seconds=300,
+                        cooldown_policy=policy, backoff=backoff, once=True,
+                        stop=threading.Event(), logger=Mock(), dashboard=dashboard,
+                    )
+                    self.assertEqual(engine.call_count, 1)
+                    self.assertEqual(dashboard.record_result.call_args.args[2].category, "access-blocked-matcha")
+                    self.assertEqual(backoff.remaining((f"metamatcha:{chain}",)), 3600)
+                    other_chain = "ethereum" if chain == "solana" else "solana"
+                    self.assertLessEqual(backoff.remaining((f"metamatcha:{other_chain}",)), 0)
+
+    def test_plain_forbidden_errors_stop_route_checks_until_chain_cooldown_expires(self):
+        policy = CooldownPolicy(
+            transient_base_seconds=30,
+            transient_max_seconds=300,
+            provider_access_seconds=3600,
+            no_route_seconds=300,
+            capacity_seconds=300,
+            unstable_capacity_seconds=30,
+            reverted_seconds=60,
+        )
+        for chain, detail in METAMATCHA_FORBIDDEN_ERRORS.items():
+            with self.subTest(chain=chain):
+                routes = selected_routes(
+                    [chain], ["PYUSD/USDG", "USDG/PYUSD"],
+                    ["dex-first", "stable-first"],
+                )
+                backoff = AdaptiveBackoff()
+                dashboard = Mock()
+                kwargs = dict(
+                    live=False,
+                    base_threshold=Decimal("5"),
+                    interval_seconds=1,
+                    cooldown_seconds=15,
+                    timeout_seconds=300,
+                    cooldown_policy=policy,
+                    backoff=backoff,
+                    once=True,
+                    stop=threading.Event(),
+                    logger=Mock(),
+                    dashboard=dashboard,
+                )
+                with patch.dict(os.environ, {}, clear=True), patch(
+                    "crosschain_sniper.time.monotonic", return_value=100,
+                ) as monotonic, patch(
+                    "crosschain_sniper.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        args=("engine",), returncode=1,
+                        stdout="", stderr=f"ERROR: {detail}\n",
+                    ),
+                ) as engine:
+                    worker(chain, routes, **kwargs)
+                    self.assertEqual(engine.call_count, 1)
+                    outcome = dashboard.record_result.call_args.args[2]
+                    self.assertEqual(outcome.category, "access-blocked-matcha")
+                    self.assertFalse(outcome.executed)
+                    self.assertEqual(
+                        backoff.remaining((f"metamatcha:{chain}",)), 3600,
+                    )
+                    other_chain = "solana" if chain == "ethereum" else "ethereum"
+                    self.assertLessEqual(
+                        backoff.remaining((f"metamatcha:{other_chain}",)), 0,
+                    )
+
+                    worker(chain, routes, **kwargs)
+                    self.assertEqual(engine.call_count, 1)
+                    monotonic.return_value = 3701
+                    worker(chain, routes, **kwargs)
+                    self.assertEqual(engine.call_count, 2)
 
     def test_process_check_distinguishes_this_process_from_a_stale_pid(self):
         self.assertTrue(process_is_running(os.getpid()))

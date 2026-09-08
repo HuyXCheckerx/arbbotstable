@@ -1201,8 +1201,16 @@ function runJsonHelper<T>(
   });
 }
 
-async function getMetaMatchaQuote(
-  config: Config,
+export async function getMetaMatchaQuote(
+  config: Pick<
+    Config,
+    | "matchaApiBase"
+    | "matchaAggregators"
+    | "matchaPython"
+    | "matchaHelperPath"
+    | "httpTimeoutMs"
+    | "httpAttempts"
+  >,
   inputMint: PublicKey,
   outputMint: PublicKey,
   amountRaw: bigint,
@@ -1244,12 +1252,20 @@ async function getMetaMatchaQuote(
       return quote;
     } catch (error) {
       lastError = error;
+      // The sniper defers access denials and rate limits until its cooldown.
+      // Repeating the whole competition here only adds rejected requests.
+      if (/\bHTTP\s+(?:401|403|429)\b|Vercel Security Checkpoint|access blocked by Vercel|x-vercel-mitigated=challenge/i.test(errorMessage(error))) break;
       if (attempt < config.httpAttempts) {
         await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
       }
     }
   }
-  throw new Error(`MetaMatcha quote failed: ${errorMessage(lastError)}`);
+  const message = errorMessage(lastError);
+  throw new Error(
+    message.startsWith("MetaMatcha quote failed:")
+      ? message
+      : `MetaMatcha quote failed: ${message}`,
+  );
 }
 
 async function getJupiterQuote(

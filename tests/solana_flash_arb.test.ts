@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test, { type TestContext } from "node:test";
 
 import {
   MAINNET_GENESIS_HASH,
@@ -16,6 +19,7 @@ import {
   fetchJson,
   finalComputeUnitLimit,
   formatRaw,
+  getMetaMatchaQuote,
   intermediateTokenProgram,
   isBlockheightExpiry,
   isTwoHopJupiterRoute,
@@ -211,6 +215,112 @@ test("does not retry a definitive Jupiter HTTP 400", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+function metaMatchaHelperFixture(t: TestContext, failures: string[]) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "metamatcha-quote-test-"));
+  const helperPath = path.join(directory, "helper.cjs");
+  const countPath = `${helperPath}.count`;
+  t.after(() => {
+    fs.rmSync(helperPath, { force: true });
+    fs.rmSync(countPath, { force: true });
+    fs.rmdirSync(directory);
+  });
+  fs.writeFileSync(helperPath, `
+    const fs = require("node:fs");
+    const request = JSON.parse(fs.readFileSync(0, "utf8"));
+    const countPath = __filename + ".count";
+    const attempt = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) : 0;
+    fs.writeFileSync(countPath, String(attempt + 1));
+    const failures = ${JSON.stringify(failures)};
+    if (attempt < failures.length) {
+      process.stderr.write(failures[attempt] + "\\n");
+      process.exitCode = 1;
+    } else {
+      process.stdout.write(JSON.stringify({
+        provider: "MetaMatcha",
+        inputMint: request.inputMint,
+        outputMint: request.outputMint,
+        inAmount: request.amount,
+        outAmount: "10000001",
+        otherAmountThreshold: "10000001",
+        swapMode: "ExactIn",
+        slippageBps: request.slippageBps,
+        routePlan: [{ swapInfo: { label: "fixture" } }],
+        serializedTransaction: "Zml4dHVyZQ=="
+      }));
+    }
+  `);
+  return {
+    config: {
+      matchaApiBase: "https://unused.invalid",
+      matchaAggregators: ["0x", "OKX"],
+      matchaPython: process.execPath,
+      matchaHelperPath: helperPath,
+      httpTimeoutMs: 1_000,
+      httpAttempts: 3,
+    },
+    calls: () => Number(fs.readFileSync(countPath, "utf8")),
+  };
+}
+
+for (const status of [401, 403, 429]) {
+  test(`does not rerun the MetaMatcha helper after HTTP ${status}`, async (t) => {
+    const message = status === 429
+      ? "MetaMatcha quote failed: HTTP 429: Too Many Requests; retry-after=120s"
+      : `MetaMatcha quote failed: HTTP ${status}: access denied`;
+    const fixture = metaMatchaHelperFixture(t, [message]);
+    await assert.rejects(
+      getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+      { message },
+    );
+    assert.equal(fixture.calls(), 1);
+  });
+}
+
+test("preserves an aggregator HTTP denial without repeating the helper error prefix", async (t) => {
+  const message = "MetaMatcha quote failed: no simulated executable quote; request failures: 0x: HTTP 403: access denied";
+  const fixture = metaMatchaHelperFixture(t, [message]);
+  await assert.rejects(
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+    { message },
+  );
+  assert.equal(fixture.calls(), 1);
+});
+
+test("preserves the Vercel challenge diagnosis without retrying the helper", async (t) => {
+  const message = "MetaMatcha quote failed: https://meta.matcha.xyz/api/competitions access blocked by Vercel Security Checkpoint (HTTP 429; x-vercel-mitigated=challenge); request-id=test-request";
+  const fixture = metaMatchaHelperFixture(t, [message]);
+  await assert.rejects(
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+    { message },
+  );
+  assert.equal(fixture.calls(), 1);
+});
+
+for (const status of [503]) {
+  test(`retries a transient MetaMatcha HTTP ${status} and returns the recovered quote`, async (t) => {
+    const fixture = metaMatchaHelperFixture(t, [
+      `MetaMatcha quote failed: HTTP ${status}: transient failure for amount 403`,
+    ]);
+    const quote = await getMetaMatchaQuote(
+      fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT,
+    );
+    assert.equal(fixture.calls(), 2);
+    assert.equal(quote.provider, "MetaMatcha");
+    assert.equal(quote.inAmount, "10000000");
+    assert.equal(quote.slippageBps, 0);
+    assert.equal(quote.serializedTransaction, "Zml4dHVyZQ==");
+  });
+}
+
+test("bounds transient MetaMatcha retries and adds a missing helper error prefix once", async (t) => {
+  const fixture = metaMatchaHelperFixture(t, Array(3).fill("HTTP 503: unavailable"));
+  await assert.rejects(
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+    { message: "MetaMatcha quote failed: HTTP 503: unavailable" },
+  );
+  assert.equal(fixture.calls(), 3);
 });
 
 test("falls back to Jupiter Lite only for api.jup.ag authentication failures", () => {
