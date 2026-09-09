@@ -541,7 +541,7 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         if "api.0x.org" in lowered or "official 0x" in lowered:
             return (
                 f"the official 0x API rejected this request{suffix}; "
-                "check ETH_ARB_ZERO_EX_API_KEY and provider access"
+                "check provider access"
             )
         alternative = (
             "explicitly configure Jupiter (SOL_FLASH_ARB_DEX_PROVIDER=jupiter)"

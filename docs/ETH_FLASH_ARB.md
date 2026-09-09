@@ -93,9 +93,7 @@ ETH_ARB_RPC_TIMEOUT_SECONDS=90
 ETH_ARB_GAS_LIMIT_MULTIPLIER=1.20
 ETH_ARB_MAX_FEE_GWEI=
 ETH_ARB_AGGREGATORS=0x,Lightning,1inch,Barter,Bebop,Bitget,KyberSwap,OKX,ParaSwap,Enso
-ETH_ARB_QUOTE_PROVIDER=auto
-ETH_ARB_ZERO_EX_API_KEY=
-ETH_ARB_ZERO_EX_BASE_URL=https://api.0x.org
+ETH_ARB_QUOTE_PROVIDER=matcha
 ETH_ARB_MATCHA_BASE_URL=https://meta.matcha.xyz
 ETH_ARB_STABLE_BASE_URL=https://api-defi.stable.com
 ETH_ARB_OUTPUT_PATH=/tmp/eth-arb-plan.json
@@ -113,13 +111,9 @@ address.
 
 The Ethereum scripts load these values from `.env` automatically.
 
-`ETH_ARB_QUOTE_PROVIDER=auto` first uses the Matcha website endpoint and falls
-back to 0x when `ETH_ARB_ZERO_EX_API_KEY` (or `ZERO_EX_API_KEY`) is set. On a VM
-that receives a Cloudflare 403, set `ETH_ARB_QUOTE_PROVIDER=zero-ex` to skip the
-undocumented endpoint entirely. The returned AllowanceHolder spender and
-transaction are still subjected to the executor's full atomic `eth_call`, gas,
-and profit checks before broadcast. A 0x API key can be created in the 0x
-developer dashboard; do not commit it.
+`ETH_ARB_QUOTE_PROVIDER=matcha` uses the MetaMatcha website endpoint with automated
+browser cookie rotation. The returned AllowanceHolder spender and transaction are
+subjected to the executor's full atomic `eth_call`, gas, and profit checks before broadcast.
 
 Construct and simulate the route configured in `.env`:
 

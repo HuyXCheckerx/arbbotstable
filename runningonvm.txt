@@ -2,7 +2,7 @@ cd ~/arbbotstable
 source venv/bin/activate
 tmux new -s sniper 'python sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER'
 ~   
-
+python3 sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
 tmux attach -t sniper          # your original session
 tmux attach -t solana-sniper   # your new solana-only session
 

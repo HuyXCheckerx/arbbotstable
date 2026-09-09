@@ -333,10 +333,6 @@ def selected_matcha_quote(
     client = MatchaClient(
         http,
         base_url,
-        quote_provider=os.environ.get("ETH_ARB_QUOTE_PROVIDER", "auto"),
-        zero_ex_api_key=os.environ.get("ETH_ARB_ZERO_EX_API_KEY")
-        or os.environ.get("ZERO_EX_API_KEY"),
-        zero_ex_base_url=os.environ.get("ETH_ARB_ZERO_EX_BASE_URL", "https://api.0x.org"),
     )
     responses = client.quotes(
         ethereum_address,

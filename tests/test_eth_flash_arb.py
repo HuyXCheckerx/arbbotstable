@@ -132,73 +132,16 @@ class EthereumFlashArbTests(unittest.TestCase):
 
         self.assertNotIn("<html>", str(caught.exception))
 
-    def test_official_zero_ex_quote_fallback_normalizes_allowance_holder_route(self):
-        class RecordingHttp:
-            def __init__(self):
-                self.official_headers = None
-
-            def get(self, url, *, headers=None):
-                if url.startswith("https://meta.matcha.xyz"):
-                    return pyusd_arb.HttpJsonClient._decode(
-                        SimpleNamespace(
-                            status_code=403,
-                            text='{"error":{"code":"403","message":"Forbidden"}}',
-                            headers={},
-                        ),
-                        url,
-                    )
-                self.official_headers = headers
-                return {
-                    "liquidityAvailable": True,
-                    "sellAmount": "50000000000",
-                    "buyAmount": "50011000000",
-                    "issues": {
-                        "allowance": {
-                            "spender": ALLOWANCE_TARGET,
-                            "actual": "0",
-                        }
-                    },
-                    "transaction": {
-                        "to": TARGET,
-                        "data": "0x12345678",
-                        "value": "0",
-                        "gas": "245000",
-                    },
-                }
-
-        http = RecordingHttp()
-        client = pyusd_arb.MatchaClient(http, zero_ex_api_key="test-key")
-        responses = client.quotes(
-            TARGET,
-            50_000_000_000,
-            1,
-            ("0x",),
-            sell_token_address=PYUSD,
-            buy_token_address=pyusd_arb.USDC,
-        )
-        quote = pyusd_arb.select_best_matcha_quote(responses, 50_000_000_000)
-
-        self.assertEqual(quote.aggregator, "0x-official")
-        self.assertEqual(quote.allowance_target, ALLOWANCE_TARGET)
-        self.assertEqual(quote.buy_amount, 50_011_000_000)
-        self.assertEqual(http.official_headers["0x-api-key"], "test-key")
-
-    def test_matcha_denial_without_enabled_fallback_remains_access_blocked(self):
+    def test_matcha_denial_raises_access_blocked(self):
         class DeniedHttp:
             def get(self, url, *, headers=None):
-                if not url.startswith("https://meta.matcha.xyz/"):
-                    raise AssertionError("Unexpected official 0x request")
                 return pyusd_arb.HttpJsonClient._decode(
                     SimpleNamespace(status_code=403, text="Forbidden", headers={}), url
                 )
 
-        for provider, key in (("auto", None), ("matcha", "test-key")):
-            with self.subTest(provider=provider):
-                client = pyusd_arb.MatchaClient(
-                    DeniedHttp(), quote_provider=provider, zero_ex_api_key=key
-                )
-                with self.assertRaises(pyusd_arb.ProviderAccessBlockedError):
-                    client.quotes(TARGET, 50_000_000_000, 1, ("0x",))
+        client = pyusd_arb.MatchaClient(DeniedHttp())
+        with self.assertRaises(pyusd_arb.ProviderAccessBlockedError):
+            client.quotes(TARGET, 50_000_000_000, 1, ("0x",))
 
     @staticmethod
     def mixed_denial_http(competing_response):
@@ -224,49 +167,23 @@ class EthereumFlashArbTests(unittest.TestCase):
 
         return MixedHttp()
 
-    def test_mixed_denial_without_executable_quote_uses_only_enabled_fallback(self):
-        for provider, key, fallback_enabled in (
-            ("auto", "test-key", True),
-            ("auto", None, False),
-            ("matcha", "test-key", False),
-        ):
-            with self.subTest(provider=provider, fallback_enabled=fallback_enabled):
-                client = pyusd_arb.MatchaClient(
-                    self.mixed_denial_http(
-                        matcha_response(50_011_000_000, simulation_result="failed")
-                    ),
-                    quote_provider=provider,
-                    zero_ex_api_key=key,
-                )
-                with patch.object(
-                    client, "_zero_ex_quotes",
-                    return_value=[("0x-official", matcha_response(50_011_000_000))],
-                ) as fallback:
-                    if fallback_enabled:
-                        responses = client.quotes(
-                            TARGET, 50_000_000_000, 1, ("0x", "OKX")
-                        )
-                        quote = pyusd_arb.select_best_matcha_quote(
-                            responses, 50_000_000_000
-                        )
-                        self.assertEqual(quote.aggregator, "0x-official")
-                        fallback.assert_called_once()
-                    else:
-                        with self.assertRaises(pyusd_arb.ProviderAccessBlockedError):
-                            client.quotes(TARGET, 50_000_000_000, 1, ("0x", "OKX"))
-                        fallback.assert_not_called()
+    def test_mixed_denial_without_executable_quote_raises_access_blocked(self):
+        client = pyusd_arb.MatchaClient(
+            self.mixed_denial_http(
+                matcha_response(50_011_000_000, simulation_result="failed")
+            )
+        )
+        with self.assertRaises(pyusd_arb.ProviderAccessBlockedError):
+            client.quotes(TARGET, 50_000_000_000, 1, ("0x", "OKX"))
 
     def test_denied_competitor_does_not_discard_an_executable_quote(self):
         client = pyusd_arb.MatchaClient(
-            self.mixed_denial_http(matcha_response(50_011_000_000)),
-            zero_ex_api_key="test-key",
+            self.mixed_denial_http(matcha_response(50_011_000_000))
         )
-        with patch.object(client, "_zero_ex_quotes") as fallback:
-            responses = client.quotes(TARGET, 50_000_000_000, 1, ("0x", "OKX"))
-            quote = pyusd_arb.select_best_matcha_quote(responses, 50_000_000_000)
+        responses = client.quotes(TARGET, 50_000_000_000, 1, ("0x", "OKX"))
+        quote = pyusd_arb.select_best_matcha_quote(responses, 50_000_000_000)
         self.assertEqual(quote.aggregator, "OKX")
         self.assertEqual(quote.buy_amount, 50_011_000_000)
-        fallback.assert_not_called()
 
     def test_pyusd_route_checksums_lowercase_matcha_addresses_for_web3(self):
         quote = pyusd_arb.MatchaQuote(
@@ -311,8 +228,7 @@ class EthereumFlashArbTests(unittest.TestCase):
             "ETH_ARB_STABLECOIN_EXECUTOR": TARGET,
             "ETH_ARB_FLASH_PROVIDER": "uniswap-v4",
             "ETH_ARB_RECEIPT_TIMEOUT_SECONDS": "45",
-            "ETH_ARB_QUOTE_PROVIDER": "zero-ex",
-            "ETH_ARB_ZERO_EX_BASE_URL": "https://zero-ex.example",
+            "ETH_ARB_QUOTE_PROVIDER": "matcha",
         }
         with patch.dict(os.environ, configured, clear=False):
             args = pyusd_arb.parser().parse_args([])
@@ -321,8 +237,7 @@ class EthereumFlashArbTests(unittest.TestCase):
         self.assertEqual(args.executor, TARGET)
         self.assertEqual(args.flash_provider, "uniswap-v4")
         self.assertEqual(args.receipt_timeout, 45.0)
-        self.assertEqual(args.quote_provider, "zero-ex")
-        self.assertEqual(args.zero_ex_base_url, "https://zero-ex.example")
+        self.assertEqual(args.quote_provider, "matcha")
 
     def test_flash_provider_auto_falls_back_to_aave_v3_for_usdg(self):
         provider = pyusd_arb.select_flash_provider(

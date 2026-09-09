@@ -83,11 +83,8 @@ help check human access, but it does not establish that the bot's independent
 HTTP session is allowed. Changing the request origin did not resolve this PC's
 challenge.
 
-The bot also has existing alternative integrations:
+The bot also supports alternative DEX providers on Solana:
 
-- Ethereum: `ETH_ARB_QUOTE_PROVIDER=zero-ex` and a valid
-  `ETH_ARB_ZERO_EX_API_KEY`. This PC had no 0x key configured at diagnosis time.
-  [Official 0x key setup](https://docs.0x.org/docs/introduction/quickstart/getting-started).
 - Solana: `SOL_FLASH_ARB_DEX_PROVIDER=jupiter`, with `JUP_API_KEY` or
   `JUP_API_KEYS`. The configured credentials returned HTTP 200 with a direct
   USDC-to-USDG quote during diagnosis. This only verifies quote access; it does

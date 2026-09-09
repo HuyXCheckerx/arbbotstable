@@ -61,7 +61,6 @@ AAVE_V3_POOL = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
 AAVE_V3_DATA_PROVIDER = "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD"
 STABLE_POOL = "0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da"
 MATCHA_BASE_URL = "https://meta.matcha.xyz"
-ZERO_EX_BASE_URL = "https://api.0x.org"
 STABLE_BASE_URL = "https://api-defi.stable.com"
 BINANCE_ETH_PRICE_URL = (
     "https://data-api.binance.vision/api/v3/ticker/price?symbol=ETHUSDC"
@@ -992,15 +991,11 @@ class MatchaClient:
         http: HttpJsonClient,
         base_url: str = MATCHA_BASE_URL,
         *,
-        quote_provider: str = "auto",
-        zero_ex_api_key: str | None = None,
-        zero_ex_base_url: str = ZERO_EX_BASE_URL,
+        quote_provider: str = "matcha",
     ):
         self.http = http
         self.base_url = base_url.rstrip("/")
         self.quote_provider = quote_provider
-        self.zero_ex_api_key = zero_ex_api_key
-        self.zero_ex_base_url = zero_ex_base_url.rstrip("/")
         self.headers = {
             "origin": "https://meta.matcha.xyz",
             "referer": "https://meta.matcha.xyz/ethereum",
@@ -1084,70 +1079,6 @@ class MatchaClient:
                 raise max(rate_limits, key=lambda error: error.retry_after_seconds or 0) from exc
         return responses
 
-    def _zero_ex_quotes(
-        self,
-        executor: str,
-        sell_amount: int,
-        slippage_bps: int,
-        sell_token_address: str,
-        buy_token_address: str,
-    ) -> list[tuple[str, Any]]:
-        if not self.zero_ex_api_key:
-            raise ArbError(
-                "official 0x quote provider requires ETH_ARB_ZERO_EX_API_KEY "
-                "or ZERO_EX_API_KEY"
-            )
-        query = urlencode(
-            {
-                "chainId": CHAIN_ID,
-                "sellToken": sell_token_address,
-                "buyToken": buy_token_address,
-                "sellAmount": sell_amount,
-                "taker": executor,
-                "slippageBps": slippage_bps,
-            }
-        )
-        payload = self.http.get(
-            f"{self.zero_ex_base_url}/swap/allowance-holder/quote?{query}",
-            headers={
-                "0x-api-key": self.zero_ex_api_key,
-                "0x-version": "v2",
-            },
-        )
-        if not isinstance(payload, dict):
-            raise ArbError("official 0x quote response is not an object")
-        if payload.get("liquidityAvailable") is False:
-            raise ArbError("official 0x API has no liquidity for this route")
-
-        transaction = payload.get("transaction")
-        issues = payload.get("issues")
-        allowance_issue = issues.get("allowance") if isinstance(issues, dict) else None
-        allowance_target = payload.get("allowanceTarget")
-        if not allowance_target and isinstance(allowance_issue, dict):
-            allowance_target = allowance_issue.get("spender")
-        if not isinstance(transaction, dict) or not allowance_target:
-            raise ArbError(
-                "official 0x quote has no transaction or AllowanceHolder spender"
-            )
-
-        normalized = {
-            "allowanceHolder": {
-                # The executor performs its own full atomic eth_call simulation.
-                # A 0x simulation may be incomplete because the flash-borrowed
-                # sell tokens are intentionally absent before execution.
-                "simulation": {"result": "success"},
-                "quote": {
-                    "transaction": transaction,
-                    "allowanceTarget": allowance_target,
-                    "sellAmount": payload.get("sellAmount"),
-                    "buyAmount": payload.get("buyAmount"),
-                    "gas": transaction.get("gas"),
-                    "gasPrice": transaction.get("gasPrice"),
-                },
-            }
-        }
-        return [("0x-official", normalized)]
-
     def quotes(
         self,
         executor: str,
@@ -1157,33 +1088,14 @@ class MatchaClient:
         sell_token_address: str = PYUSD,
         buy_token_address: str = USDC,
     ) -> list[tuple[str, Any]]:
-        if self.quote_provider == "zero-ex":
-            return self._zero_ex_quotes(
-                executor,
-                sell_amount,
-                slippage_bps,
-                sell_token_address,
-                buy_token_address,
-            )
-        try:
-            return self._matcha_quotes(
-                executor,
-                sell_amount,
-                slippage_bps,
-                aggregators,
-                sell_token_address,
-                buy_token_address,
-            )
-        except ArbError:
-            if self.quote_provider != "auto" or not self.zero_ex_api_key:
-                raise
-            return self._zero_ex_quotes(
-                executor,
-                sell_amount,
-                slippage_bps,
-                sell_token_address,
-                buy_token_address,
-            )
+        return self._matcha_quotes(
+            executor,
+            sell_amount,
+            slippage_bps,
+            aggregators,
+            sell_token_address,
+            buy_token_address,
+        )
 
 
 class StableClient:
@@ -1838,17 +1750,9 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--quote-provider",
-        choices=("auto", "matcha", "zero-ex"),
-        default=setting("ETH_ARB_QUOTE_PROVIDER", "auto"),
-        help=(
-            "Ethereum DEX quote source: auto uses MetaMatcha and falls back to "
-            "the official 0x API when a key is configured"
-        ),
-    )
-    result.add_argument(
-        "--zero-ex-base-url",
-        default=setting("ETH_ARB_ZERO_EX_BASE_URL", ZERO_EX_BASE_URL),
-        help="official 0x API base URL",
+        choices=("matcha", "auto"),
+        default=setting("ETH_ARB_QUOTE_PROVIDER", "matcha"),
+        help="Ethereum DEX quote source: meta.matcha.xyz",
     )
     result.add_argument(
         "--stable-base-url",
@@ -1905,12 +1809,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ArbError("--eth-price-buffer-bps must be between 0 and 1000")
     if args.gas_limit_multiplier < 1:
         raise ArbError("--gas-limit-multiplier must be at least 1")
-    zero_ex_api_key = setting("ETH_ARB_ZERO_EX_API_KEY") or setting("ZERO_EX_API_KEY")
-    if args.quote_provider == "zero-ex" and not zero_ex_api_key:
-        raise ArbError(
-            "--quote-provider zero-ex requires ETH_ARB_ZERO_EX_API_KEY "
-            "or ZERO_EX_API_KEY"
-        )
 
     requested_loan_amount = amount_to_raw(args.amount)
     loan_amount = requested_loan_amount
@@ -1983,8 +1881,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         http,
         args.matcha_base_url,
         quote_provider=args.quote_provider,
-        zero_ex_api_key=zero_ex_api_key,
-        zero_ex_base_url=args.zero_ex_base_url,
     )
     stable_client = StableClient(http, args.stable_base_url)
 

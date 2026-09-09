@@ -155,20 +155,15 @@ that the server is allowed, and a generic JSON 403 does not identify its cause.
 The existing alternative provider settings in the server's `.env` are:
 
 ```dotenv
-# Ethereum: call the official 0x API directly with your own valid API key.
-ETH_ARB_QUOTE_PROVIDER=zero-ex
-ETH_ARB_ZERO_EX_API_KEY=your_0x_api_key
-# Solana: explicitly select the Jupiter integration with your own API key.
+# Ethereum: uses MetaMatcha.
+ETH_ARB_QUOTE_PROVIDER=matcha
+# Solana: explicitly select the Jupiter integration with your own API key if desired.
 SOL_FLASH_ARB_DEX_PROVIDER=jupiter
 JUP_API_KEY=your_jupiter_api_key
 ```
 
-0x key setup is documented in the
-[official 0x guide](https://docs.0x.org/docs/introduction/quickstart/getting-started),
-and Jupiter's quote API is documented in its
-[Metis Swap guide](https://developers.jup.ag/docs/swap/v1/get-quote).
-Ethereum's default `auto` mode also falls back to 0x when a key is configured;
-`zero-ex` skips the denied MetaMatcha endpoint entirely. Solana provider changes
+Jupiter's quote API is documented in its
+[Metis Swap guide](https://developers.jup.ag/docs/swap/v1/get-quote). Solana provider changes
 are explicit. Stop the existing sniper, update the server code/configuration,
 and validate with `python pyusd_usdg_sniper.py --once` before restarting live.
 
