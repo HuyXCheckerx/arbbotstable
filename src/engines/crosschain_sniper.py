@@ -1745,6 +1745,14 @@ def main(argv: list[str] | None = None) -> int:
             daemon=True,
         )
         watcher.start()
+
+        # Proactively maintain fresh Cloudflare/Kasada cookies for child quote processes
+        try:
+            from src.engines.matcha_cookie_manager import start_background_rotator
+            start_background_rotator()
+        except Exception as exc:
+            logger.debug("Failed to start cookie rotator: %s", exc)
+
         threads = []
         for chain in args.chains:
             chain_routes = [route for route in routes if route.chain == chain]

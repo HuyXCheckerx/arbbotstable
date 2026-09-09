@@ -578,7 +578,7 @@ function readConfig(cli: CliOptions): Config {
       process.env.SOL_FLASH_ARB_MATCHA_BASE_URL || "https://meta.matcha.xyz"
     ).replace(/\/$/, ""),
     matchaAggregators: (
-      process.env.SOL_FLASH_ARB_MATCHA_AGGREGATORS || "0x,OKX"
+      process.env.SOL_FLASH_ARB_MATCHA_AGGREGATORS || "0x,DFlow,Jupiter,OKX"
     ).split(",").map((value) => value.trim()).filter(Boolean),
     matchaPython:
       process.env.SOL_FLASH_ARB_MATCHA_PYTHON ||
