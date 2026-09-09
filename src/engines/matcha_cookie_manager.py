@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import time
@@ -54,6 +55,20 @@ def _write_cache(cache_file: Path, cookies: list[dict[str, Any]]) -> None:
         logger.warning("Failed to write cookie cache: %s", exc)
 
 
+DEFAULT_MATCHA_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+if not logger.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
+
+
 def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
     """Spins up headless Chromium with Playwright stealth to solve Cloudflare/Kasada."""
     try:
@@ -78,10 +93,7 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
             ],
         )
         context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
+            user_agent=DEFAULT_MATCHA_USER_AGENT,
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
@@ -89,14 +101,16 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
         # 1. Visit root matcha.xyz to solve Cloudflare challenge for .matcha.xyz domain
         try:
             page.goto("https://matcha.xyz", timeout=30000, wait_until="domcontentloaded")
-            time.sleep(4)
+            time.sleep(3)
         except Exception as exc:
             logger.debug("Failed visiting matcha.xyz: %s", exc)
 
         # 2. Visit target meta endpoint to initialize subdomain tokens
         try:
             page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
-            time.sleep(3)
+            time.sleep(2)
+            # Warm up API endpoints directly in browser to initialize tokens and WAF session
+            page.evaluate("() => fetch('/api/gas?chainId=1').catch(() => {})")
         except Exception as exc:
             logger.debug("Failed visiting %s: %s", target_url, exc)
 
@@ -145,12 +159,26 @@ def inject_matcha_cookies(
 ) -> list[dict[str, Any]]:
     """Injects fresh or cached cookies into a requests / curl_cffi Session."""
     cookies = get_valid_cookies(force_refresh=force_refresh, target_url=target_url)
+    cookie_pairs: list[str] = []
     for c in cookies:
+        name = c.get("name")
+        value = c.get("value")
+        if not name or value is None:
+            continue
         domain = c.get("domain") or ".matcha.xyz"
+        cookie_pairs.append(f"{name}={value}")
         try:
-            session.cookies.set(c["name"], c["value"], domain=domain)
+            session.cookies.set(name, value, domain=domain)
         except Exception:
-            session.cookies.set(c["name"], c["value"])
+            session.cookies.set(name, value)
+
+    # Attach explicit Cookie header so requests to any subdomain (meta.matcha.xyz) carry tokens
+    if hasattr(session, "headers"):
+        if cookie_pairs:
+            session.headers["cookie"] = "; ".join(cookie_pairs)
+        session.headers["user-agent"] = DEFAULT_MATCHA_USER_AGENT
+        session.headers["sec-ch-ua-platform"] = '"macOS"'
+        session.headers["sec-fetch-site"] = "same-origin"
 
     # Merge explicit environment override if provided
     env_keys = [chain_env_key, "MATCHA_COOKIES"] if chain_env_key else ["MATCHA_COOKIES"]

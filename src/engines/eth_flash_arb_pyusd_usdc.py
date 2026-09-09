@@ -846,7 +846,8 @@ class HttpJsonClient:
                 "accept-language": "en-US,en;q=0.9",
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-site",
+                "sec-fetch-site": "same-origin",
+                "sec-ch-ua-platform": '"macOS"',
                 "user-agent": user_agent,
             }
         )
@@ -1874,7 +1875,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     user_agent = os.getenv(
         "ETH_QUOTE_USER_AGENT",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     )
     http = HttpJsonClient(args.timeout, user_agent)
     matcha_client = MatchaClient(

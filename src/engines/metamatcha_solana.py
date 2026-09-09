@@ -21,12 +21,16 @@ except ImportError:  # Direct script execution.
     from provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
 
 try:
-    from .matcha_cookie_manager import inject_matcha_cookies
+    from .matcha_cookie_manager import DEFAULT_MATCHA_USER_AGENT, inject_matcha_cookies
 except ImportError:
     try:
-        from matcha_cookie_manager import inject_matcha_cookies
+        from matcha_cookie_manager import DEFAULT_MATCHA_USER_AGENT, inject_matcha_cookies
     except ImportError:
         inject_matcha_cookies = None
+        DEFAULT_MATCHA_USER_AGENT = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
 
 try:
     from curl_cffi import requests
@@ -48,11 +52,9 @@ HEADERS = {
     "referer": "https://meta.matcha.xyz/solana",
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "sec-fetch-site": "same-origin",
+    "sec-ch-ua-platform": '"macOS"',
+    "user-agent": DEFAULT_MATCHA_USER_AGENT,
 }
 
 

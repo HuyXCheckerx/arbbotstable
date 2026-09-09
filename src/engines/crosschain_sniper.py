@@ -261,6 +261,10 @@ def build_route_invocation(
     output_path = str(PLAN_DIR / f"{route.key}.json")
 
     if route.chain == "ethereum":
+        environment["ETH_QUOTE_USER_AGENT"] = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
         command = [
             sys.executable,
             str(PROJECT_ROOT / "src" / "engines" / "eth_flash_arb_pyusd_usdc.py"),
@@ -1217,6 +1221,9 @@ def configure_logging() -> logging.Logger:
     file_handler.setFormatter(formatter)
     logger.addHandler(console)
     logger.addHandler(file_handler)
+    matcha_logger = logging.getLogger("matcha.cookies")
+    matcha_logger.setLevel(logging.INFO)
+    matcha_logger.handlers = [console, file_handler]
     return logger
 
 
