@@ -70,7 +70,12 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
         context = browser.new_context(
             user_agent=(

@@ -301,6 +301,7 @@ def build_route_invocation(
                 f"SOL_FLASH_ARB_MIN_GROSS_PROFIT_{route.loan}": floor,
                 f"SOL_FLASH_ARB_MIN_NET_PROFIT_{route.loan}": floor,
                 "SOL_FLASH_ARB_OUTPUT_PATH": output_path,
+                "SOL_FLASH_ARB_MATCHA_PYTHON": sys.executable,
             }
         )
         if (
@@ -1748,10 +1749,12 @@ def main(argv: list[str] | None = None) -> int:
 
         # Proactively maintain fresh Cloudflare/Kasada cookies for child quote processes
         try:
-            from src.engines.matcha_cookie_manager import start_background_rotator
+            from src.engines.matcha_cookie_manager import get_valid_cookies, start_background_rotator
+            logger.info("Ensuring valid MetaMatcha browser session cookies...")
+            get_valid_cookies()
             start_background_rotator()
         except Exception as exc:
-            logger.debug("Failed to start cookie rotator: %s", exc)
+            logger.warning("Failed to initialize MetaMatcha cookie session: %s", exc)
 
         threads = []
         for chain in args.chains:
