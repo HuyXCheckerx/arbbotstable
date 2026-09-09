@@ -82,16 +82,18 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
 
     logger.info("[CookieManager] Launching headless browser to solve Cloudflare/Kasada challenge...")
     t0 = time.perf_counter()
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+    launch_kwargs: dict[str, Any] = {"headless": True, "args": launch_args}
+    proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    if proxy:
+        launch_kwargs["proxy"] = {"server": proxy}
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
+        browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
             user_agent=DEFAULT_MATCHA_USER_AGENT,
             viewport={"width": 1280, "height": 800},
@@ -179,6 +181,10 @@ def inject_matcha_cookies(
         session.headers["user-agent"] = DEFAULT_MATCHA_USER_AGENT
         session.headers["sec-ch-ua-platform"] = '"macOS"'
         session.headers["sec-fetch-site"] = "same-origin"
+
+    proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    if proxy and hasattr(session, "proxies"):
+        session.proxies = {"http": proxy, "https": proxy}
 
     # Merge explicit environment override if provided
     env_keys = [chain_env_key, "MATCHA_COOKIES"] if chain_env_key else ["MATCHA_COOKIES"]

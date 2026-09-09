@@ -78,6 +78,9 @@ def _session(force_refresh: bool = False) -> requests.Session:
     if _SHARED_SESSION is None or force_refresh:
         session = requests.Session(impersonate="chrome124")
         session.headers.update(HEADERS)
+        proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
         if inject_matcha_cookies is not None:
             try:
                 inject_matcha_cookies(

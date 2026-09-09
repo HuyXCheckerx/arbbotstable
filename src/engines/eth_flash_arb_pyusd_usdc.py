@@ -851,6 +851,9 @@ class HttpJsonClient:
                 "user-agent": user_agent,
             }
         )
+        proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        if proxy:
+            self.session.proxies = {"http": proxy, "https": proxy}
         try:
             from .matcha_cookie_manager import inject_matcha_cookies
         except ImportError:
