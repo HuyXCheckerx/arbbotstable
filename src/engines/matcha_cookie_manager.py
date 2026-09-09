@@ -86,9 +86,19 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
         )
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
+        # 1. Visit root matcha.xyz to solve Cloudflare challenge for .matcha.xyz domain
+        try:
+            page.goto("https://matcha.xyz", timeout=30000, wait_until="domcontentloaded")
+            time.sleep(4)
+        except Exception as exc:
+            logger.debug("Failed visiting matcha.xyz: %s", exc)
 
-        page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(5)  # Allow Cloudflare challenge execution & Kasada script initialization
+        # 2. Visit target meta endpoint to initialize subdomain tokens
+        try:
+            page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
+            time.sleep(3)
+        except Exception as exc:
+            logger.debug("Failed visiting %s: %s", target_url, exc)
 
         cookies = context.cookies()
         browser.close()
