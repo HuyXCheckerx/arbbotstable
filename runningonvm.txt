@@ -1,18 +1,30 @@
+# =====================================================================
+# WINDOWS VPS SETUP & RUN
+# =====================================================================
+
+# 1. Open PowerShell as Administrator and run the automated setup:
+git clone https://github.com/HuyXCheckerx/arbbotstable.git
+cd arbbotstable
+powershell -ExecutionPolicy Bypass -File .\setup_windows_vps.ps1
+
+# 2. Configure .env with your private keys and RPC URLs:
+notepad .env
+
+# 3. Test connectivity:
+.\venv\Scripts\python.exe scripts\test_vm_access.py
+
+# 4. Run the sniper:
+.\start_sniper.cmd
+# or in PowerShell:
+.\venv\Scripts\python.exe sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
+
+# To run solana-only:
+.\venv\Scripts\python.exe sniper.py --chains solana --pairs PYUSD/USDG --live --confirm-live EXECUTE_PROFIT_SNIPER
+
+# =====================================================================
+# LINUX VPS SETUP (IF USING LINUX)
+# =====================================================================
 cd ~/arbbotstable
 source venv/bin/activate
 tmux new -s sniper 'python sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER'
-~   
-python3 sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
-tmux attach -t sniper          # your original session
-tmux attach -t solana-sniper   # your new solana-only session
-
-
-tmux ls
-
-
-cd ~/arbbotstable
-source venv/bin/activate
-python sniper.py --chains solana --pairs PYUSD/USDG --live --confirm-live EXECUTE_PROFIT_SNIPER
-
-python3 pyusd_usdg_sniper.py --live --confirm-live EXECUTE_PROFIT_SNIPER
-
+tmux attach -t sniper
