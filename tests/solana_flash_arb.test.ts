@@ -355,10 +355,13 @@ test("validates CLI route and provider choices", () => {
     "marginfi",
     "--dex-provider",
     "metamatcha",
+    "--lookup-table",
+    "BoTWvDa5rCYuoseapp9X2puDQZavWTjeva384e4b619S",
   ]);
   assert.equal(options.swapOrder, "stable-first");
   assert.equal(options.provider, "marginfi");
   assert.equal(options.dexProvider, "metamatcha");
+  assert.equal(options.lookupTable, "BoTWvDa5rCYuoseapp9X2puDQZavWTjeva384e4b619S");
   assert.throws(() => parseCli(["--swap-order", "sideways"]), /must be/);
   assert.throws(() => parseCli(["--provider", "solana"]), /must be/);
   assert.throws(() => parseCli(["--dex-provider", "raydium"]), /must be/);

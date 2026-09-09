@@ -242,6 +242,7 @@ interface Config {
   commitment: Commitment;
   provider: "marginfi" | "solend" | "auto";
   swapOrder: "dex-first" | "stable-first";
+  customLookupTableAddresses: PublicKey[];
 }
 
 export interface CliOptions {
@@ -251,6 +252,7 @@ export interface CliOptions {
   provider?: "marginfi" | "solend" | "auto";
   dexProvider?: "metamatcha" | "jupiter";
   swapOrder?: "dex-first" | "stable-first";
+  lookupTable?: string;
   confirmation?: string;
 }
 
@@ -646,6 +648,13 @@ function readConfig(cli: CliOptions): Config {
     commitment: "confirmed",
     provider,
     swapOrder,
+    customLookupTableAddresses: (
+      process.env.SOL_FLASH_ARB_CUSTOM_ALT || cli.lookupTable || ""
+    )
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => new PublicKey(s)),
   };
 }
 
@@ -680,6 +689,9 @@ export function parseCli(argv: string[]): CliOptions {
         throw new Error("--swap-order must be dex-first or stable-first");
       }
       options.swapOrder = order;
+    }
+    else if (arg === "--lookup-table" || arg === "--alt") {
+      options.lookupTable = argv[++index];
     }
     else if (arg === "--confirm-mainnet") options.confirmation = argv[++index];
     else if (arg === "--help" || arg === "-h") {
@@ -2306,7 +2318,11 @@ async function main(): Promise<void> {
       getStableLeg(config, walletAddress, stableQuote),
     ]);
     stableLeg = stableLegResult;
+    const customLookupTables = config.customLookupTableAddresses.length
+      ? await fetchLookupTables(connection, config.customLookupTableAddresses)
+      : [];
     lookupTables = mergeLookupTables(
+      customLookupTables,
       client?.addressLookupTables ?? [],
       firstSwap1.lookupTables,
       firstSwap2.lookupTables,
@@ -2323,7 +2339,11 @@ async function main(): Promise<void> {
       getStableLeg(config, walletAddress, stableQuote),
     ]);
     stableLeg = stableLegResult;
+    const customLookupTables = config.customLookupTableAddresses.length
+      ? await fetchLookupTables(connection, config.customLookupTableAddresses)
+      : [];
     lookupTables = mergeLookupTables(
+      customLookupTables,
       client?.addressLookupTables ?? [],
       firstSwap.lookupTables,
     );

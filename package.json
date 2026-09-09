@@ -17,6 +17,7 @@
     "solana:live": "tsx src/engines/solana_flash_arb.ts --send --confirm-mainnet EXECUTE_SOLANA_FLASH_ARB",
     "solana:pyusd": "python scripts/solana_matcha_pyusd_arb.py",
     "solana:pyusd:live": "python scripts/solana_matcha_pyusd_arb.py --live",
+    "setup:alt": "tsx scripts/setup_solana_alt.ts",
     "solana:test": "node --import tsx --test tests/solana_flash_arb.test.ts",
     "typecheck": "tsc --noEmit"
   },
