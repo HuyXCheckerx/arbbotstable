@@ -287,14 +287,33 @@ def build_route_invocation(
             )
     elif route.chain == "solana":
         environment.pop("SOL_FLASH_ARB_SLIPPAGE_BPS", None)
-        executable = "npx.cmd" if sys.platform == "win32" else "npx"
-        command = [
-            executable,
-            "tsx",
-            str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
-            "--swap-order",
-            route.swap_order,
-        ]
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            npm_dir = Path(appdata) / "npm"
+            if not npm_dir.exists():
+                try:
+                    npm_dir.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
+        local_tsx = PROJECT_ROOT / "node_modules" / ".bin" / ("tsx.cmd" if sys.platform == "win32" else "tsx")
+        script_path = str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts")
+        if local_tsx.exists():
+            command = [
+                str(local_tsx),
+                script_path,
+                "--swap-order",
+                route.swap_order,
+            ]
+        else:
+            executable = "npx.cmd" if sys.platform == "win32" else "npx"
+            command = [
+                executable,
+                "tsx",
+                script_path,
+                "--swap-order",
+                route.swap_order,
+            ]
         environment.update(
             {
                 "SOL_FLASH_ARB_LOAN_TOKEN": route.loan,

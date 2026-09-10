@@ -459,12 +459,22 @@ def run_arb_command(
             env["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "24"
         else:
             env["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
-        executable = "npx.cmd" if sys.platform == "win32" else "npx"
-        cmd = [
-            executable,
-            "tsx",
-            str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
-        ]
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            npm_dir = Path(appdata) / "npm"
+            if not npm_dir.exists():
+                try:
+                    npm_dir.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
+        local_tsx = PROJECT_ROOT / "node_modules" / ".bin" / ("tsx.cmd" if sys.platform == "win32" else "tsx")
+        script_path = str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts")
+        if local_tsx.exists():
+            cmd = [str(local_tsx), script_path]
+        else:
+            executable = "npx.cmd" if sys.platform == "win32" else "npx"
+            cmd = [executable, "tsx", script_path]
         cmd.extend(["--swap-order", swap_order])
         if mode == "quote":
             cmd.append("--quote-only")

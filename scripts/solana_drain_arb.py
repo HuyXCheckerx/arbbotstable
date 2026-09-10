@@ -31,17 +31,30 @@ def run_loop():
         "SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS": "14",
     })
 
-    executable = "npx.cmd" if sys.platform == "win32" else "npx"
-    cmd = [
-        executable,
-        "tsx",
-        str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts"),
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        npm_dir = Path(appdata) / "npm"
+        if not npm_dir.exists():
+            try:
+                npm_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
+    local_tsx = PROJECT_ROOT / "node_modules" / ".bin" / ("tsx.cmd" if sys.platform == "win32" else "tsx")
+    script_path = str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts")
+    if local_tsx.exists():
+        cmd = [str(local_tsx), script_path]
+    else:
+        executable = "npx.cmd" if sys.platform == "win32" else "npx"
+        cmd = [executable, "tsx", script_path]
+
+    cmd.extend([
         "--swap-order",
         "stable-first",
         "--send",
         "--confirm-mainnet",
         "EXECUTE_SOLANA_FLASH_ARB",
-    ]
+    ])
 
     total_profit = Decimal("0")
     executed_count = 0

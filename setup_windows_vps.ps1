@@ -96,6 +96,10 @@ Write-Host 'Installing Playwright Chromium browser...' -ForegroundColor Cyan
 
 # 4. Node.js Dependencies
 Write-Host "`n[4/5] Installing Node.js dependencies..." -ForegroundColor Yellow
+$appdataNpm = "$env:APPDATA\npm"
+if (-not (Test-Path $appdataNpm)) {
+    New-Item -ItemType Directory -Path $appdataNpm -Force | Out-Null
+}
 if (Get-Command npm -ErrorAction SilentlyContinue) {
     npm install
 } elseif (Test-Path 'C:\Program Files\nodejs\npm.cmd') {
