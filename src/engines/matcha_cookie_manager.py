@@ -117,35 +117,57 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
         "--disable-dev-shm-usage",
     ]
     launch_kwargs: dict[str, Any] = {"headless": True, "args": launch_args}
-    proxy = os.getenv("MATCHA_PROXY", DEFAULT_PROXY) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    proxy_env = os.getenv("MATCHA_PROXY")
+    if proxy_env is not None:
+        proxy = proxy_env.strip() or None
+    else:
+        proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or DEFAULT_PROXY
     if proxy:
         launch_kwargs["proxy"] = {"server": proxy}
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_kwargs)
-        context = browser.new_context(
-            user_agent=DEFAULT_MATCHA_USER_AGENT,
-            viewport={"width": 1280, "height": 800},
-        )
-        page = context.new_page()
-        Stealth().apply_stealth_sync(page)
-        # 1. Visit root matcha.xyz to solve Cloudflare challenge for .matcha.xyz domain
-        try:
-            page.goto("https://matcha.xyz", timeout=30000, wait_until="domcontentloaded")
-            time.sleep(3)
-        except Exception as exc:
-            logger.debug("Failed visiting matcha.xyz: %s", exc)
 
-        # 2. Visit target meta endpoint to initialize subdomain tokens
-        try:
-            page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
-            time.sleep(2)
-            # Warm up API endpoints directly in browser to initialize tokens and WAF session
-            page.evaluate("() => fetch('/api/gas?chainId=1').catch(() => {})")
-        except Exception as exc:
-            logger.debug("Failed visiting %s: %s", target_url, exc)
+    def _execute_browser_solve(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**kwargs)
+            context = browser.new_context(
+                user_agent=DEFAULT_MATCHA_USER_AGENT,
+                viewport={"width": 1280, "height": 800},
+            )
+            page = context.new_page()
+            Stealth().apply_stealth_sync(page)
+            # 1. Visit root matcha.xyz to solve Cloudflare challenge for .matcha.xyz domain
+            try:
+                page.goto("https://matcha.xyz", timeout=30000, wait_until="domcontentloaded")
+                time.sleep(3)
+            except Exception as exc:
+                logger.debug("Failed visiting matcha.xyz: %s", exc)
 
-        cookies = context.cookies()
-        browser.close()
+            # 2. Visit target meta endpoint to initialize subdomain tokens
+            try:
+                page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
+                time.sleep(2)
+                # Warm up API endpoints directly in browser to initialize tokens and WAF session
+                page.evaluate("() => fetch('/api/gas?chainId=1').catch(() => {})")
+            except Exception as exc:
+                logger.debug("Failed visiting %s: %s", target_url, exc)
+
+            c = context.cookies()
+            browser.close()
+            return c
+
+    try:
+        cookies = _execute_browser_solve(launch_kwargs)
+    except Exception as exc:
+        cookies = []
+        logger.warning("[CookieManager] Headless solve failed: %s", exc)
+
+    if len(cookies) == 0 and "proxy" in launch_kwargs:
+        logger.warning("[CookieManager] Solved 0 cookies with proxy (connection reset?); falling back to direct solve...")
+        direct_kwargs = dict(launch_kwargs)
+        direct_kwargs.pop("proxy", None)
+        try:
+            cookies = _execute_browser_solve(direct_kwargs)
+        except Exception as direct_exc:
+            logger.warning("[CookieManager] Direct headless solve fallback failed: %s", direct_exc)
 
     elapsed = round(time.perf_counter() - t0, 2)
     cf_token = next((c["value"][:15] + "..." for c in cookies if c["name"] == "cf_clearance"), "None")

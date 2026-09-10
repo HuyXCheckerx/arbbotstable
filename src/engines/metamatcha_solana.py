@@ -78,8 +78,11 @@ def _session(force_refresh: bool = False) -> requests.Session:
     if _SHARED_SESSION is None or force_refresh:
         session = requests.Session(impersonate="chrome124")
         session.headers.update(HEADERS)
-        default_proxy = "http://160.250.166.37:10452"
-        proxy = os.getenv("MATCHA_PROXY", default_proxy) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        proxy_env = os.getenv("MATCHA_PROXY")
+        if proxy_env is not None:
+            proxy = proxy_env.strip() or None
+        else:
+            proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or "http://160.250.166.37:10452"
         if proxy:
             session.proxies = {"http": proxy, "https": proxy}
         if inject_matcha_cookies is not None:
@@ -109,16 +112,37 @@ def _post_json(
     allow_retry: bool = True,
 ) -> dict[str, Any]:
     sess = _session()
-    response = sess.post(url, json=payload, timeout=timeout_seconds)
-    access_detail = access_block_detail(response, url)
-
-    # If blocked by challenge, attempt headless solve & retry once (avoid retrying in unit test mocks)
     is_mock = (
         getattr(type(sess), "__module__", "").startswith("unittest.mock")
         or hasattr(_session, "_mock_return_value")
         or hasattr(_session, "assert_called")
-        or getattr(type(response), "__module__", "").startswith("unittest.mock")
     )
+    try:
+        response = sess.post(url, json=payload, timeout=timeout_seconds)
+    except Exception as exc:
+        if getattr(sess, "proxies", None) and allow_retry and not is_mock:
+            print(
+                f"[ProxyManager] MetaMatcha Solana POST failed via proxy ({exc}). Retrying direct (check ProxyISP Whitelist IP)...",
+                file=sys.stderr,
+            )
+            try:
+                response = sess.post(
+                    url,
+                    json=payload,
+                    timeout=timeout_seconds,
+                    proxies={"http": "", "https": ""},
+                )
+            except Exception as direct_exc:
+                raise RuntimeError(f"MetaMatcha quote failed: {exc} (direct fallback failed: {direct_exc})") from exc
+        else:
+            raise RuntimeError(f"MetaMatcha quote failed: {exc}") from exc
+
+    if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
+        is_mock = True
+
+    access_detail = access_block_detail(response, url)
+
+    # If blocked by challenge, attempt headless solve & retry once (avoid retrying in unit test mocks)
     if access_detail and allow_retry and not is_mock and inject_matcha_cookies is not None:
         try:
             try:

@@ -74,3 +74,42 @@ try:
         browser.close()
 except Exception as e:
     print(f"Playwright test failed: {e}")
+
+print("\n=== 4. Testing ProxyISP Rotating Residential Proxy ===")
+import os
+proxy_url = os.getenv("MATCHA_PROXY", "http://160.250.166.37:10452")
+rotate_url = os.getenv("MATCHA_ROTATE_URL", "http://rotate.proxyisp.net/rotate?key=IbOlVbvxUQzYxtyOWMWypO")
+print(f"Target Proxy: {proxy_url}")
+print(f"Rotate URL:   {rotate_url}")
+
+# Test rotate endpoint
+try:
+    import urllib.request
+    req = urllib.request.Request(rotate_url, headers={"User-Agent": "curl/7.68.0"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        rot_data = json.loads(resp.read().decode())
+        print(f"Rotation API Response: status={rot_data.get('status')} | msg='{rot_data.get('message')}' | IP={rot_data.get('ip')} | Expires={rot_data.get('Token expiration date')}")
+except Exception as exc:
+    print(f"Rotation API query failed: {exc}")
+
+# Test proxy connection
+try:
+    from curl_cffi import requests
+    s = requests.Session(impersonate="chrome124")
+    r = s.get("https://httpbin.org/ip", proxies={"http": proxy_url, "https": proxy_url}, timeout=10)
+    print(f"[OK] Proxy working! Outbound IP via proxy: {r.json().get('origin')}")
+except Exception as exc:
+    err_str = str(exc)
+    print(f"[FAIL] Proxy request failed: {err_str}")
+    if "Connection was reset" in err_str or "10054" in err_str or "curl: (55)" in err_str or "curl: (56)" in err_str:
+        print("\n" + "!" * 70)
+        print(">>> CRITICAL DIAGNOSIS: PROXY RESET CONNECTION (TCP RST) <<<")
+        print("ProxyISP uses IP Whitelisting authentication.")
+        print(f"Your VPS public IP is: {ip_data.get('ip_addr', 'Unknown')}")
+        print("Action needed:")
+        print(f"  1. Go to your ProxyISP dashboard: Proxy xoay dan cu - ORD-20260910-0009")
+        print(f"  2. In the 'Whitelist IP *' input field, paste: {ip_data.get('ip_addr', 'YOUR_VPS_IP')}")
+        print("  3. Click 'Save'")
+        print("  4. Wait 10 seconds and rerun this test.")
+        print("!" * 70)
+

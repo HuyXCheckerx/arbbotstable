@@ -13,12 +13,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 import json
+import logging
 import os
 from pathlib import Path
 import sys
 import time
+
+logger = logging.getLogger("eth_flash_arb")
 from typing import Any, Iterable
 import uuid
+
+try:
+    from .provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+except ImportError:
+    from provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -670,7 +678,11 @@ class HttpJsonClient:
                 "user-agent": user_agent,
             }
         )
-        self.matcha_proxy = os.getenv("MATCHA_PROXY", "http://160.250.166.37:10452") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        proxy_env = os.getenv("MATCHA_PROXY")
+        if proxy_env is not None:
+            self.matcha_proxy = proxy_env.strip() or None
+        else:
+            self.matcha_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or "http://160.250.166.37:10452"
         self.matcha_proxies = {"http": self.matcha_proxy, "https": self.matcha_proxy} if self.matcha_proxy else None
         try:
             from .matcha_cookie_manager import inject_matcha_cookies
@@ -708,12 +720,31 @@ class HttpJsonClient:
         kwargs: dict[str, Any] = {"headers": headers, "timeout": self.timeout}
         if proxies:
             kwargs["proxies"] = proxies
+        is_mock = (
+            getattr(type(self.session), "__module__", "").startswith("unittest.mock")
+            or hasattr(self.session, "_mock_return_value")
+            or hasattr(self.session, "assert_called")
+        )
         try:
             response = self.session.get(url, **kwargs)
         except Exception as exc:
-            raise ArbError(f"GET {url} failed: {exc}") from exc
+            if proxies and allow_retry and not is_mock:
+                logger.warning(
+                    "[ProxyManager] Matcha GET %s failed via proxy (%s). Retrying direct (check ProxyISP Whitelist IP)...",
+                    url,
+                    exc,
+                )
+                try:
+                    direct_kwargs = {"headers": headers, "timeout": self.timeout}
+                    response = self.session.get(url, **direct_kwargs)
+                except Exception as direct_exc:
+                    raise ArbError(f"GET {url} failed (proxy: {exc}, direct: {direct_exc})") from exc
+            else:
+                raise ArbError(f"GET {url} failed: {exc}") from exc
 
-        is_mock = getattr(type(response), "__module__", "").startswith("unittest.mock")
+        if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
+            is_mock = True
+
         if (
             allow_retry
             and not is_mock
@@ -759,12 +790,31 @@ class HttpJsonClient:
         kwargs: dict[str, Any] = {"json": payload, "headers": headers, "timeout": self.timeout}
         if proxies:
             kwargs["proxies"] = proxies
+        is_mock = (
+            getattr(type(self.session), "__module__", "").startswith("unittest.mock")
+            or hasattr(self.session, "_mock_return_value")
+            or hasattr(self.session, "assert_called")
+        )
         try:
             response = self.session.post(url, **kwargs)
         except Exception as exc:
-            raise ArbError(f"POST {url} failed: {exc}") from exc
+            if proxies and allow_retry and not is_mock:
+                logger.warning(
+                    "[ProxyManager] Matcha POST %s failed via proxy (%s). Retrying direct (check ProxyISP Whitelist IP)...",
+                    url,
+                    exc,
+                )
+                try:
+                    direct_kwargs = {"json": payload, "headers": headers, "timeout": self.timeout}
+                    response = self.session.post(url, **direct_kwargs)
+                except Exception as direct_exc:
+                    raise ArbError(f"POST {url} failed (proxy: {exc}, direct: {direct_exc})") from exc
+            else:
+                raise ArbError(f"POST {url} failed: {exc}") from exc
 
-        is_mock = getattr(type(response), "__module__", "").startswith("unittest.mock")
+        if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
+            is_mock = True
+
         if (
             allow_retry
             and not is_mock
