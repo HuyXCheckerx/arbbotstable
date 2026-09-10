@@ -1247,7 +1247,7 @@ export async function getMetaMatchaQuote(
           slippageBps: 0,
           timeoutMs: config.httpTimeoutMs,
         },
-        config.httpTimeoutMs + 5_000,
+        Math.max(config.httpTimeoutMs + 5_000, 120_000),
       );
       if (quote.provider !== "MetaMatcha") {
         throw new Error("MetaMatcha helper returned an unexpected provider");

@@ -44,6 +44,10 @@ COMPETITION_CACHE: dict[str, dict[str, Any]] = {}
 def get_session() -> requests.Session:
     session = requests.Session(impersonate="chrome124")
     session.headers.update(HEADERS)
+    default_proxy = "http://160.250.166.37:10452"
+    proxy = os.getenv("MATCHA_PROXY", default_proxy) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
     return session
 
 @app.after_request

@@ -78,7 +78,8 @@ def _session(force_refresh: bool = False) -> requests.Session:
     if _SHARED_SESSION is None or force_refresh:
         session = requests.Session(impersonate="chrome124")
         session.headers.update(HEADERS)
-        proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        default_proxy = "http://160.250.166.37:10452"
+        proxy = os.getenv("MATCHA_PROXY", default_proxy) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
         if proxy:
             session.proxies = {"http": proxy, "https": proxy}
         if inject_matcha_cookies is not None:
@@ -120,6 +121,18 @@ def _post_json(
     )
     if access_detail and allow_retry and not is_mock and inject_matcha_cookies is not None:
         try:
+            try:
+                from .matcha_cookie_manager import trigger_proxy_rotation
+            except ImportError:
+                try:
+                    from matcha_cookie_manager import trigger_proxy_rotation
+                except ImportError:
+                    trigger_proxy_rotation = None
+            if trigger_proxy_rotation is not None:
+                try:
+                    trigger_proxy_rotation()
+                except Exception:
+                    pass
             _session(force_refresh=True)
             return _post_json(url, payload, timeout_seconds, allow_retry=False)
         except Exception:

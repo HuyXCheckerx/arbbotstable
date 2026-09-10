@@ -55,18 +55,38 @@ def _write_cache(cache_file: Path, cookies: list[dict[str, Any]]) -> None:
         logger.warning("Failed to write cookie cache: %s", exc)
 
 
+DEFAULT_PROXY = "http://160.250.166.37:10452"
+DEFAULT_ROTATE_URL = "http://rotate.proxyisp.net/rotate?key=IbOlVbvxUQzYxtyOWMWypO"
 DEFAULT_MATCHA_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 if not logger.handlers:
-    _h = logging.StreamHandler(sys.stdout)
+    _h = logging.StreamHandler(sys.stderr)
     _h.setFormatter(
         logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     )
     logger.addHandler(_h)
     logger.setLevel(logging.INFO)
+
+
+def trigger_proxy_rotation(rotate_url: str | None = None) -> bool:
+    """Trigger residential proxy IP rotation via provider API."""
+    import urllib.request
+    url = rotate_url or os.getenv("MATCHA_ROTATE_URL", DEFAULT_ROTATE_URL)
+    if not url:
+        return False
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_MATCHA_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            msg = data.get("message", "")
+            logger.info("[ProxyManager] Proxy rotation trigger: status=%s, msg=%s", data.get("status"), msg)
+            return True
+    except Exception as exc:
+        logger.warning("[ProxyManager] Failed to trigger proxy rotation: %s", exc)
+        return False
 
 
 def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
@@ -89,7 +109,7 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
         "--disable-dev-shm-usage",
     ]
     launch_kwargs: dict[str, Any] = {"headless": True, "args": launch_args}
-    proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    proxy = os.getenv("MATCHA_PROXY", DEFAULT_PROXY) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
     if proxy:
         launch_kwargs["proxy"] = {"server": proxy}
     with sync_playwright() as p:
@@ -182,7 +202,7 @@ def inject_matcha_cookies(
         session.headers["sec-ch-ua-platform"] = '"macOS"'
         session.headers["sec-fetch-site"] = "same-origin"
 
-    proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    proxy = os.getenv("MATCHA_PROXY", DEFAULT_PROXY) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
     if proxy and hasattr(session, "proxies"):
         session.proxies = {"http": proxy, "https": proxy}
 
@@ -224,6 +244,7 @@ def start_background_rotator(interval: int = ROTATE_INTERVAL_SECONDS) -> threadi
                 time.sleep(max(60, interval - 60))
                 try:
                     logger.info("[CookieManager] Background rotation triggered...")
+                    trigger_proxy_rotation()
                     with FileLock(str(LOCK_FILE), timeout=60):
                         cookies = _solve_challenge(DEFAULT_URL)
                         _write_cache(CACHE_FILE, cookies)

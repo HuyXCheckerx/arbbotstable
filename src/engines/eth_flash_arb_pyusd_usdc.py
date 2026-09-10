@@ -851,7 +851,8 @@ class HttpJsonClient:
                 "user-agent": user_agent,
             }
         )
-        proxy = os.getenv("MATCHA_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        default_proxy = "http://160.250.166.37:10452"
+        proxy = os.getenv("MATCHA_PROXY", default_proxy) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
         if proxy:
             self.session.proxies = {"http": proxy, "https": proxy}
         try:
