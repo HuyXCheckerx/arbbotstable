@@ -851,10 +851,8 @@ class HttpJsonClient:
                 "user-agent": user_agent,
             }
         )
-        default_proxy = "http://160.250.166.37:10452"
-        proxy = os.getenv("MATCHA_PROXY", default_proxy) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-        if proxy:
-            self.session.proxies = {"http": proxy, "https": proxy}
+        self.matcha_proxy = os.getenv("MATCHA_PROXY", "http://160.250.166.37:10452") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        self.matcha_proxies = {"http": self.matcha_proxy, "https": self.matcha_proxy} if self.matcha_proxy else None
         try:
             from .matcha_cookie_manager import inject_matcha_cookies
         except ImportError:
@@ -887,8 +885,12 @@ class HttpJsonClient:
         headers: dict[str, str] | None = None,
         allow_retry: bool = True,
     ) -> Any:
+        proxies = self.matcha_proxies if "matcha.xyz" in url else None
+        kwargs: dict[str, Any] = {"headers": headers, "timeout": self.timeout}
+        if proxies:
+            kwargs["proxies"] = proxies
         try:
-            response = self.session.get(url, headers=headers, timeout=self.timeout)
+            response = self.session.get(url, **kwargs)
         except Exception as exc:
             raise ArbError(f"GET {url} failed: {exc}") from exc
 
@@ -900,12 +902,18 @@ class HttpJsonClient:
             and (response.status_code in (401, 403, 429) or access_block_detail(response, url))
         ):
             try:
-                from .matcha_cookie_manager import inject_matcha_cookies
+                from .matcha_cookie_manager import inject_matcha_cookies, trigger_proxy_rotation
             except ImportError:
                 try:
-                    from matcha_cookie_manager import inject_matcha_cookies
+                    from matcha_cookie_manager import inject_matcha_cookies, trigger_proxy_rotation
                 except ImportError:
                     inject_matcha_cookies = None
+                    trigger_proxy_rotation = None
+            if trigger_proxy_rotation is not None:
+                try:
+                    trigger_proxy_rotation()
+                except Exception:
+                    pass
             if inject_matcha_cookies is not None:
                 try:
                     inject_matcha_cookies(
@@ -928,13 +936,12 @@ class HttpJsonClient:
         headers: dict[str, str] | None = None,
         allow_retry: bool = True,
     ) -> Any:
+        proxies = self.matcha_proxies if "matcha.xyz" in url else None
+        kwargs: dict[str, Any] = {"json": payload, "headers": headers, "timeout": self.timeout}
+        if proxies:
+            kwargs["proxies"] = proxies
         try:
-            response = self.session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=self.timeout,
-            )
+            response = self.session.post(url, **kwargs)
         except Exception as exc:
             raise ArbError(f"POST {url} failed: {exc}") from exc
 

@@ -1200,7 +1200,9 @@ function runJsonHelper<T>(
     child.once("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        reject(new Error(stderr.trim() || `MetaMatcha helper exited with code ${code}`));
+        const errLines = stderr.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+        const lastErr = errLines.find((l) => l.includes("MetaMatcha quote failed:")) || errLines[errLines.length - 1] || `MetaMatcha helper exited with code ${code}`;
+        reject(new Error(lastErr));
         return;
       }
       try {

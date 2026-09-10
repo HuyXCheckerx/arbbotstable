@@ -35,14 +35,21 @@ def _read_cache(cache_file: Path, ttl: int) -> list[dict[str, Any]] | None:
             data = json.load(f)
         age = time.time() - float(data.get("timestamp", 0))
         cookies = data.get("cookies")
-        if age < ttl and isinstance(cookies, list) and len(cookies) > 0:
-            return cookies
+        if isinstance(cookies, list) and len(cookies) > 0:
+            if age < ttl:
+                return cookies
+            # Fallback to stale cookies up to 3x TTL rather than blocking quotes with 60s browser solve
+            if age < ttl * 3:
+                return cookies
     except Exception as exc:
         logger.debug("Failed to read cookie cache: %s", exc)
     return None
 
 
 def _write_cache(cache_file: Path, cookies: list[dict[str, Any]]) -> None:
+    if not cookies or len(cookies) == 0:
+        logger.warning("[CookieManager] Solved 0 cookies; skipping cache overwrite to preserve existing session")
+        return
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_path = tempfile.mkstemp(
@@ -72,7 +79,7 @@ if not logger.handlers:
 
 
 def trigger_proxy_rotation(rotate_url: str | None = None) -> bool:
-    """Trigger residential proxy IP rotation via provider API."""
+    """Trigger residential proxy IP rotation via provider API and pause for reconnection."""
     import urllib.request
     url = rotate_url or os.getenv("MATCHA_ROTATE_URL", DEFAULT_ROTATE_URL)
     if not url:
@@ -83,6 +90,7 @@ def trigger_proxy_rotation(rotate_url: str | None = None) -> bool:
             data = json.loads(resp.read().decode("utf-8"))
             msg = data.get("message", "")
             logger.info("[ProxyManager] Proxy rotation trigger: status=%s, msg=%s", data.get("status"), msg)
+            time.sleep(5)  # Allow modem to reconnect and establish new IP circuit
             return True
     except Exception as exc:
         logger.warning("[ProxyManager] Failed to trigger proxy rotation: %s", exc)
@@ -201,10 +209,6 @@ def inject_matcha_cookies(
         session.headers["user-agent"] = DEFAULT_MATCHA_USER_AGENT
         session.headers["sec-ch-ua-platform"] = '"macOS"'
         session.headers["sec-fetch-site"] = "same-origin"
-
-    proxy = os.getenv("MATCHA_PROXY", DEFAULT_PROXY) or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-    if proxy and hasattr(session, "proxies"):
-        session.proxies = {"http": proxy, "https": proxy}
 
     # Merge explicit environment override if provided
     env_keys = [chain_env_key, "MATCHA_COOKIES"] if chain_env_key else ["MATCHA_COOKIES"]
