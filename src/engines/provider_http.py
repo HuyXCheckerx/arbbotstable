@@ -29,6 +29,26 @@ def response_headers(response: Any) -> dict[str, str]:
     return {str(key).lower(): str(value).strip() for key, value in headers.items()}
 
 
+def is_browser_challenge(response: Any) -> bool:
+    """Only refresh browser state for a challenge, not a deny or rate limit."""
+    if response.status_code < 400:
+        return False
+    headers = response_headers(response)
+    mitigation = headers.get("x-vercel-mitigated", "").lower()
+    if mitigation in ("deny", "denied"):
+        return False
+    if mitigation == "challenge":
+        return True
+    body = getattr(response, "text", "")
+    body = body.lower() if isinstance(body, str) else ""
+    html = "text/html" in headers.get("content-type", "").lower() or any(
+        marker in body for marker in ("<html", "<!doctype html", "<title")
+    )
+    return html and any(marker in body for marker in (
+        "vercel security checkpoint", "/cdn-cgi/challenge-platform/", "cf-chl-",
+    ))
+
+
 def _request_id(headers: dict[str, str]) -> str:
     for name in ("x-vercel-id", "cf-ray", "x-request-id"):
         value = headers.get(name, "")

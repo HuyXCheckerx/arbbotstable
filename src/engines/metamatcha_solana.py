@@ -16,9 +16,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 try:
-    from .provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+    from .provider_http import access_block_detail, is_browser_challenge, rate_limit_detail, retry_after_seconds
 except ImportError:  # Direct script execution.
-    from provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+    from provider_http import access_block_detail, is_browser_challenge, rate_limit_detail, retry_after_seconds
 
 try:
     from .matcha_cookie_manager import DEFAULT_MATCHA_USER_AGENT, inject_matcha_cookies
@@ -76,15 +76,10 @@ _SHARED_SESSION: requests.Session | None = None
 def _session(force_refresh: bool = False) -> requests.Session:
     global _SHARED_SESSION
     if _SHARED_SESSION is None or force_refresh:
-        session = requests.Session(impersonate="chrome124")
+        matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
+        proxies = {"http": matcha_proxy, "https": matcha_proxy} if matcha_proxy else {"http": "", "https": ""}
+        session = requests.Session(impersonate="chrome124", trust_env=False, proxies=proxies)
         session.headers.update(HEADERS)
-        proxy_env = os.getenv("MATCHA_PROXY")
-        if proxy_env is not None:
-            proxy = proxy_env.strip() or None
-        else:
-            proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or "http://160.250.166.37:10452"
-        if proxy:
-            session.proxies = {"http": proxy, "https": proxy}
         if inject_matcha_cookies is not None:
             try:
                 inject_matcha_cookies(
@@ -120,22 +115,7 @@ def _post_json(
     try:
         response = sess.post(url, json=payload, timeout=timeout_seconds)
     except Exception as exc:
-        if getattr(sess, "proxies", None) and allow_retry and not is_mock:
-            print(
-                f"[ProxyManager] MetaMatcha Solana POST failed via proxy ({exc}). Retrying direct (check ProxyISP Whitelist IP)...",
-                file=sys.stderr,
-            )
-            try:
-                response = sess.post(
-                    url,
-                    json=payload,
-                    timeout=timeout_seconds,
-                    proxies={"http": "", "https": ""},
-                )
-            except Exception as direct_exc:
-                raise RuntimeError(f"MetaMatcha quote failed: {exc} (direct fallback failed: {direct_exc})") from exc
-        else:
-            raise RuntimeError(f"MetaMatcha quote failed: {exc}") from exc
+        raise RuntimeError(f"MetaMatcha quote failed: {exc}") from exc
 
     if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
         is_mock = True
@@ -143,20 +123,8 @@ def _post_json(
     access_detail = access_block_detail(response, url)
 
     # If blocked by challenge, attempt headless solve & retry once (avoid retrying in unit test mocks)
-    if access_detail and allow_retry and not is_mock and inject_matcha_cookies is not None:
+    if is_browser_challenge(response) and allow_retry and not is_mock and inject_matcha_cookies is not None:
         try:
-            try:
-                from .matcha_cookie_manager import trigger_proxy_rotation
-            except ImportError:
-                try:
-                    from matcha_cookie_manager import trigger_proxy_rotation
-                except ImportError:
-                    trigger_proxy_rotation = None
-            if trigger_proxy_rotation is not None:
-                try:
-                    trigger_proxy_rotation()
-                except Exception:
-                    pass
             _session(force_refresh=True)
             return _post_json(url, payload, timeout_seconds, allow_retry=False)
         except Exception:

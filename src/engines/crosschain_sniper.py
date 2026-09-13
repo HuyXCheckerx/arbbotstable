@@ -34,7 +34,7 @@ STOP_PATH = LOG_DIR / ".crosschain-sniper.stop"
 DASHBOARD_PATH = LOG_DIR / "sniper-dashboard.json"
 LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("4")
-SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("1")
+SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("0.5")
 TOKEN_QUANTUM = Decimal("0.000001")
 ROUTE_TOKENS = ("USDC", "USDG", "PYUSD")
 DEFAULT_SWAP_ORDERS = ("dex-first", "stable-first")
@@ -221,7 +221,7 @@ def strict_execution_floor(threshold: Decimal, route: Route | None = None) -> De
 def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
     if route.chain == "solana":
         effective_threshold = (
-            Decimal("1")
+            Decimal("0.5")
             if base_threshold in {Decimal("4"), Decimal("5")}
             else base_threshold
         )
@@ -1551,7 +1551,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=decimal_setting("SNIPER_PROFIT_THRESHOLD_USD", "4"),
         help=(
             "execute only above this net starting-token profit "
-            "(default 4 for Ethereum; 1 for Solana)"
+            "(default 4 for Ethereum; 0.5 for Solana)"
         ),
     )
     parser.add_argument(

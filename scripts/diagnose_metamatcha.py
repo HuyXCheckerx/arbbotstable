@@ -102,7 +102,7 @@ def diagnose(chain: str, timeout: float) -> tuple[dict[str, Any], int]:
         "gas_probe_chain": "ethereum",
         "requests": [],
     }
-    session = requests.Session(impersonate="chrome124")
+    session = requests.Session(impersonate="chrome124", trust_env=False, proxies={"http": "", "https": ""})
     session.headers.update(HEADERS)
     try:
         gas_url = f"{BASE_URL}/api/gas?chainId=1"

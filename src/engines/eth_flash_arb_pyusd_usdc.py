@@ -26,9 +26,9 @@ import uuid
 logger = logging.getLogger("eth_flash_arb_pyusd_usdc")
 
 try:
-    from .provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+    from .provider_http import access_block_detail, is_browser_challenge, rate_limit_detail, retry_after_seconds
 except ImportError:  # Direct script execution.
-    from provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+    from provider_http import access_block_detail, is_browser_challenge, rate_limit_detail, retry_after_seconds
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -835,10 +835,15 @@ def parse_stable_order(payload: Any, expected_amount_in: int) -> StableOrder:
 
 class HttpJsonClient:
     def __init__(self, timeout: float, user_agent: str):
+        matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
+        proxies = {"http": matcha_proxy, "https": matcha_proxy} if matcha_proxy else {"http": "", "https": ""}
         if cffi_requests is not None:
-            self.session = cffi_requests.Session(impersonate="chrome124")
+            self.session = cffi_requests.Session(impersonate="chrome124", trust_env=False, proxies=proxies)
         elif requests is not None:
             self.session = requests.Session()
+            self.session.trust_env = False
+            if matcha_proxy:
+                self.session.proxies.update(proxies)
         else:
             raise ArbError("requests or curl_cffi is required; install requirements-eth.txt")
 
@@ -854,12 +859,6 @@ class HttpJsonClient:
                 "user-agent": user_agent,
             }
         )
-        proxy_env = os.getenv("MATCHA_PROXY")
-        if proxy_env is not None:
-            self.matcha_proxy = proxy_env.strip() or None
-        else:
-            self.matcha_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or "http://160.250.166.37:10452"
-        self.matcha_proxies = {"http": self.matcha_proxy, "https": self.matcha_proxy} if self.matcha_proxy else None
         try:
             from .matcha_cookie_manager import inject_matcha_cookies
         except ImportError:
@@ -892,10 +891,7 @@ class HttpJsonClient:
         headers: dict[str, str] | None = None,
         allow_retry: bool = True,
     ) -> Any:
-        proxies = self.matcha_proxies if "matcha.xyz" in url else None
         kwargs: dict[str, Any] = {"headers": headers, "timeout": self.timeout}
-        if proxies:
-            kwargs["proxies"] = proxies
         is_mock = (
             getattr(type(self.session), "__module__", "").startswith("unittest.mock")
             or hasattr(self.session, "_mock_return_value")
@@ -904,19 +900,7 @@ class HttpJsonClient:
         try:
             response = self.session.get(url, **kwargs)
         except Exception as exc:
-            if proxies and allow_retry and not is_mock:
-                logger.warning(
-                    "[ProxyManager] Matcha GET %s failed via proxy (%s). Retrying direct (check ProxyISP Whitelist IP)...",
-                    url,
-                    exc,
-                )
-                try:
-                    direct_kwargs = {"headers": headers, "timeout": self.timeout}
-                    response = self.session.get(url, **direct_kwargs)
-                except Exception as direct_exc:
-                    raise ArbError(f"GET {url} failed (proxy: {exc}, direct: {direct_exc})") from exc
-            else:
-                raise ArbError(f"GET {url} failed: {exc}") from exc
+            raise ArbError(f"GET {url} failed: {exc}") from exc
 
         if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
             is_mock = True
@@ -925,21 +909,15 @@ class HttpJsonClient:
             allow_retry
             and not is_mock
             and "meta.matcha.xyz" in url
-            and (response.status_code in (401, 403, 429) or access_block_detail(response, url))
+            and is_browser_challenge(response)
         ):
             try:
-                from .matcha_cookie_manager import inject_matcha_cookies, trigger_proxy_rotation
+                from .matcha_cookie_manager import inject_matcha_cookies
             except ImportError:
                 try:
-                    from matcha_cookie_manager import inject_matcha_cookies, trigger_proxy_rotation
+                    from matcha_cookie_manager import inject_matcha_cookies
                 except ImportError:
                     inject_matcha_cookies = None
-                    trigger_proxy_rotation = None
-            if trigger_proxy_rotation is not None:
-                try:
-                    trigger_proxy_rotation()
-                except Exception:
-                    pass
             if inject_matcha_cookies is not None:
                 try:
                     inject_matcha_cookies(
@@ -962,10 +940,7 @@ class HttpJsonClient:
         headers: dict[str, str] | None = None,
         allow_retry: bool = True,
     ) -> Any:
-        proxies = self.matcha_proxies if "matcha.xyz" in url else None
         kwargs: dict[str, Any] = {"json": payload, "headers": headers, "timeout": self.timeout}
-        if proxies:
-            kwargs["proxies"] = proxies
         is_mock = (
             getattr(type(self.session), "__module__", "").startswith("unittest.mock")
             or hasattr(self.session, "_mock_return_value")
@@ -974,19 +949,7 @@ class HttpJsonClient:
         try:
             response = self.session.post(url, **kwargs)
         except Exception as exc:
-            if proxies and allow_retry and not is_mock:
-                logger.warning(
-                    "[ProxyManager] Matcha POST %s failed via proxy (%s). Retrying direct (check ProxyISP Whitelist IP)...",
-                    url,
-                    exc,
-                )
-                try:
-                    direct_kwargs = {"json": payload, "headers": headers, "timeout": self.timeout}
-                    response = self.session.post(url, **direct_kwargs)
-                except Exception as direct_exc:
-                    raise ArbError(f"POST {url} failed (proxy: {exc}, direct: {direct_exc})") from exc
-            else:
-                raise ArbError(f"POST {url} failed: {exc}") from exc
+            raise ArbError(f"POST {url} failed: {exc}") from exc
 
         if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
             is_mock = True
@@ -995,7 +958,7 @@ class HttpJsonClient:
             allow_retry
             and not is_mock
             and "meta.matcha.xyz" in url
-            and (response.status_code in (401, 403, 429) or access_block_detail(response, url))
+            and is_browser_challenge(response)
         ):
             try:
                 from .matcha_cookie_manager import inject_matcha_cookies

@@ -621,12 +621,12 @@ function readConfig(cli: CliOptions): Config {
     minimumGrossProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_GROSS_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC ||
-        "1",
+        "0.5",
     ),
     minimumNetProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_NET_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC ||
-        "1",
+        "0.5",
     ),
     maxAccounts: routeConstraints.maxAccounts,
     onlyDirectRoutes: routeConstraints.onlyDirectRoutes,

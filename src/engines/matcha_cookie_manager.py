@@ -36,6 +36,11 @@ def _read_cache(cache_file: Path, ttl: int) -> list[dict[str, Any]] | None:
         age = time.time() - float(data.get("timestamp", 0))
         cookies = data.get("cookies")
         if isinstance(cookies, list) and len(cookies) > 0:
+            # Require clearance cookie (_vcrcs or cf_clearance) in cache
+            has_clearance = any(c.get("name") in ("_vcrcs", "cf_clearance") for c in cookies)
+            if not has_clearance:
+                logger.debug("Cached cookies missing clearance token (_vcrcs / cf_clearance); invalidating cache")
+                return None
             if age < ttl:
                 return cookies
             # Fallback to stale cookies up to 3x TTL rather than blocking quotes with 60s browser solve
@@ -62,8 +67,6 @@ def _write_cache(cache_file: Path, cookies: list[dict[str, Any]]) -> None:
         logger.warning("Failed to write cookie cache: %s", exc)
 
 
-DEFAULT_PROXY = "http://160.250.166.37:10452"
-DEFAULT_ROTATE_URL = "http://rotate.proxyisp.net/rotate?key=IbOlVbvxUQzYxtyOWMWypO"
 DEFAULT_MATCHA_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -78,27 +81,8 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
-def trigger_proxy_rotation(rotate_url: str | None = None) -> bool:
-    """Trigger residential proxy IP rotation via provider API and pause for reconnection."""
-    import urllib.request
-    url = rotate_url or os.getenv("MATCHA_ROTATE_URL", DEFAULT_ROTATE_URL)
-    if not url:
-        return False
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_MATCHA_USER_AGENT})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            msg = data.get("message", "")
-            logger.info("[ProxyManager] Proxy rotation trigger: status=%s, msg=%s", data.get("status"), msg)
-            time.sleep(5)  # Allow modem to reconnect and establish new IP circuit
-            return True
-    except Exception as exc:
-        logger.warning("[ProxyManager] Failed to trigger proxy rotation: %s", exc)
-        return False
-
-
 def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
-    """Spins up headless Chromium with Playwright stealth to solve Cloudflare/Kasada."""
+    """Spins up headless Chromium with Playwright stealth to solve Vercel/Cloudflare."""
     try:
         from playwright.sync_api import sync_playwright
         from playwright_stealth import Stealth
@@ -108,22 +92,21 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
             "Run `pip install playwright playwright-stealth && python -m playwright install chromium`"
         ) from exc
 
-    logger.info("[CookieManager] Launching headless browser to solve Cloudflare/Kasada challenge...")
+    logger.info("[CookieManager] Launching headless browser to solve Vercel/Cloudflare challenge...")
     t0 = time.perf_counter()
+    proxy_url = os.getenv("MATCHA_PROXY", "").strip()
     launch_args = [
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
     ]
+    if not proxy_url:
+        launch_args.append("--no-proxy-server")
     launch_kwargs: dict[str, Any] = {"headless": True, "args": launch_args}
-    proxy_env = os.getenv("MATCHA_PROXY")
-    if proxy_env is not None:
-        proxy = proxy_env.strip() or None
-    else:
-        proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or DEFAULT_PROXY
-    if proxy:
-        launch_kwargs["proxy"] = {"server": proxy}
+    if proxy_url:
+        launch_kwargs["proxy"] = {"server": proxy_url}
+        logger.info("[CookieManager] Using proxy for challenge solver: %s", proxy_url.split("@")[-1])
 
     def _execute_browser_solve(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
         with sync_playwright() as p:
@@ -134,21 +117,44 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
             )
             page = context.new_page()
             Stealth().apply_stealth_sync(page)
-            # 1. Visit root matcha.xyz to solve Cloudflare challenge for .matcha.xyz domain
-            try:
-                page.goto("https://matcha.xyz", timeout=30000, wait_until="domcontentloaded")
-                time.sleep(3)
-            except Exception as exc:
-                logger.debug("Failed visiting matcha.xyz: %s", exc)
 
-            # 2. Visit target meta endpoint to initialize subdomain tokens
+            # Navigate directly to target MetaMatcha endpoint
             try:
-                page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
-                time.sleep(2)
-                # Warm up API endpoints directly in browser to initialize tokens and WAF session
-                page.evaluate("() => fetch('/api/gas?chainId=1').catch(() => {})")
+                page.goto(target_url, timeout=35000, wait_until="domcontentloaded")
             except Exception as exc:
-                logger.debug("Failed visiting %s: %s", target_url, exc)
+                logger.debug("Failed initial navigation to %s: %s", target_url, exc)
+
+            # Actively poll for Vercel challenge clearance (_vcrcs or cf_clearance)
+            cleared = False
+            for poll_sec in range(30):
+                time.sleep(1)
+                cookies = context.cookies()
+                cookie_map = {c.get("name"): c.get("value") for c in cookies}
+                has_clearance = "_vcrcs" in cookie_map or "cf_clearance" in cookie_map
+                title = (page.title() or "").lower()
+
+                if has_clearance or ("checkpoint" not in title and "just a moment" not in title and len(title) > 0):
+                    try:
+                        res = page.evaluate("""async () => {
+                            try {
+                                const r = await fetch('/api/gas?chainId=1');
+                                return {status: r.status, ok: r.ok};
+                            } catch (e) {
+                                return {status: 0, error: String(e)};
+                            }
+                        }""")
+                        if res.get("status") == 200:
+                            cleared = True
+                            logger.info(
+                                "[CookieManager] In-browser API clearance verified at %ds (status: 200)",
+                                poll_sec + 1,
+                            )
+                            break
+                    except Exception:
+                        pass
+                if has_clearance and poll_sec >= 2:
+                    cleared = True
+                    break
 
             c = context.cookies()
             browser.close()
@@ -160,22 +166,15 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
         cookies = []
         logger.warning("[CookieManager] Headless solve failed: %s", exc)
 
-    if len(cookies) == 0 and "proxy" in launch_kwargs:
-        logger.warning("[CookieManager] Solved 0 cookies with proxy (connection reset?); falling back to direct solve...")
-        direct_kwargs = dict(launch_kwargs)
-        direct_kwargs.pop("proxy", None)
-        try:
-            cookies = _execute_browser_solve(direct_kwargs)
-        except Exception as direct_exc:
-            logger.warning("[CookieManager] Direct headless solve fallback failed: %s", direct_exc)
-
     elapsed = round(time.perf_counter() - t0, 2)
-    cf_token = next((c["value"][:15] + "..." for c in cookies if c["name"] == "cf_clearance"), "None")
+    has_vcrcs = any(c.get("name") == "_vcrcs" for c in cookies)
+    has_cf = any(c.get("name") == "cf_clearance" for c in cookies)
     logger.info(
-        "[CookieManager] Successfully solved challenge: %d cookies in %ss (cf_clearance: %s)",
+        "[CookieManager] Collected %d cookies in %ss (_vcrcs: %s, cf_clearance: %s)",
         len(cookies),
         elapsed,
-        cf_token,
+        "Present" if has_vcrcs else "Missing",
+        "Present" if has_cf else "Missing",
     )
     return cookies
 
@@ -270,7 +269,6 @@ def start_background_rotator(interval: int = ROTATE_INTERVAL_SECONDS) -> threadi
                 time.sleep(max(60, interval - 60))
                 try:
                     logger.info("[CookieManager] Background rotation triggered...")
-                    trigger_proxy_rotation()
                     with FileLock(str(LOCK_FILE), timeout=60):
                         cookies = _solve_challenge(DEFAULT_URL)
                         _write_cache(CACHE_FILE, cookies)
