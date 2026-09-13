@@ -72,13 +72,27 @@ DEFAULT_MATCHA_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-if not logger.handlers:
-    _h = logging.StreamHandler(sys.stderr)
-    _h.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    )
-    logger.addHandler(_h)
-    logger.setLevel(logging.INFO)
+def trigger_proxy_rotation(rotate_url: str | None = None) -> bool:
+    """Trigger residential proxy IP rotation via provider API if MATCHA_ROTATE_URL is set."""
+    import urllib.request
+    url = rotate_url or os.getenv("MATCHA_ROTATE_URL", "").strip()
+    if not url:
+        return False
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_MATCHA_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            logger.info(
+                "[ProxyManager] Proxy rotation triggered: status=%s, msg=%s, ip=%s",
+                data.get("status"),
+                data.get("message"),
+                data.get("ip"),
+            )
+            time.sleep(3)
+            return True
+    except Exception as exc:
+        logger.warning("[ProxyManager] Failed to trigger proxy rotation: %s", exc)
+        return False
 
 
 def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
@@ -269,6 +283,7 @@ def start_background_rotator(interval: int = ROTATE_INTERVAL_SECONDS) -> threadi
                 time.sleep(max(60, interval - 60))
                 try:
                     logger.info("[CookieManager] Background rotation triggered...")
+                    trigger_proxy_rotation()
                     with FileLock(str(LOCK_FILE), timeout=60):
                         cookies = _solve_challenge(DEFAULT_URL)
                         _write_cache(CACHE_FILE, cookies)
