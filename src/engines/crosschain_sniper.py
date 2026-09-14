@@ -1423,14 +1423,18 @@ def worker(
                     "transient-matcha": f"metamatcha:{route.chain}",
                     "transient-rpc": f"rpc:{route.chain}",
                 }[outcome.category]
-                delay = backoff.fail(
-                    dependency,
-                    cooldown_policy.transient_base_seconds,
-                    cooldown_policy.transient_max_seconds,
-                    minimum_seconds=outcome.retry_after_seconds or 0.0,
-                )
+                is_conn_reset = "connection reset" in outcome.detail.lower()
+                if is_conn_reset and outcome.category == "transient-matcha":
+                    delay = 5.0
+                else:
+                    delay = backoff.fail(
+                        dependency,
+                        cooldown_policy.transient_base_seconds,
+                        cooldown_policy.transient_max_seconds,
+                        minimum_seconds=outcome.retry_after_seconds or 0.0,
+                    )
                 status = re.search(r"HTTP\s+(\d{3})", outcome.detail, re.IGNORECASE)
-                suffix = f" (HTTP {status.group(1)})" if status else ""
+                suffix = f" (HTTP {status.group(1)})" if status else (" (connection reset)" if is_conn_reset else "")
                 logger.info(
                     "PAUSE   | %-17s | %.0fs | temporary provider failure%s",
                     dependency_label(dependency),

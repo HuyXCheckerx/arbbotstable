@@ -722,13 +722,13 @@ class HttpJsonClient:
             or hasattr(self.session, "_mock_return_value")
             or hasattr(self.session, "assert_called")
         )
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 response = self.session.get(url, **kwargs)
                 break
             except Exception as exc:
-                if attempt == 0 and allow_retry and not is_mock:
-                    time.sleep(0.5)
+                if attempt < 2 and allow_retry and not is_mock:
+                    time.sleep(0.4 * (attempt + 1))
                     continue
                 raise ArbError(f"GET {url} failed: {exc}") from exc
 
@@ -776,13 +776,13 @@ class HttpJsonClient:
             or hasattr(self.session, "_mock_return_value")
             or hasattr(self.session, "assert_called")
         )
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 response = self.session.post(url, **kwargs)
                 break
             except Exception as exc:
-                if attempt == 0 and allow_retry and not is_mock:
-                    time.sleep(0.5)
+                if attempt < 2 and allow_retry and not is_mock:
+                    time.sleep(0.4 * (attempt + 1))
                     continue
                 raise ArbError(f"POST {url} failed: {exc}") from exc
 
@@ -965,7 +965,9 @@ class MatchaClient:
         responses: list[tuple[str, Any]] = []
         errors: list[str] = []
         selected = tuple(aggregators)
-        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as pool:
+        matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
+        workers = 1 if matcha_proxy else min(4, len(selected))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(fetch, name): name for name in selected}
             for future in as_completed(futures):
                 try:

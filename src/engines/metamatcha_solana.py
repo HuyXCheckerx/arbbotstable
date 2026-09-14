@@ -113,13 +113,13 @@ def _post_json(
         or hasattr(_session, "_mock_return_value")
         or hasattr(_session, "assert_called")
     )
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             response = sess.post(url, json=payload, timeout=timeout_seconds)
             break
         except Exception as exc:
-            if attempt == 0 and allow_retry and not is_mock:
-                time.sleep(0.5)
+            if attempt < 2 and allow_retry and not is_mock:
+                time.sleep(0.4 * (attempt + 1))
                 continue
             raise RuntimeError(f"MetaMatcha quote failed: {exc}") from exc
 
@@ -248,7 +248,8 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     access_blocks: list[ProviderAccessBlockedError] = []
     rate_limits: list[ProviderRateLimitedError] = []
-    with ThreadPoolExecutor(max_workers=min(4, len(clean_aggregators))) as pool:
+    workers = 1 if os.getenv("MATCHA_PROXY", "").strip() else min(4, len(clean_aggregators))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(query, name): name for name in clean_aggregators}
         for future in as_completed(futures):
             name = futures[future]
