@@ -834,15 +834,16 @@ def parse_stable_order(payload: Any, expected_amount_in: int) -> StableOrder:
 
 
 class HttpJsonClient:
-    def __init__(self, timeout: float, user_agent: str):
-        matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
-        proxies = {"http": matcha_proxy, "https": matcha_proxy} if matcha_proxy else {"http": "", "https": ""}
+    def __init__(self, timeout: float, user_agent: str, proxy: str | None = None):
+        if proxy is None:
+            proxy = os.getenv("MATCHA_PROXY", "").strip()
+        proxies = {"http": proxy, "https": proxy} if proxy else {"http": "", "https": ""}
         if cffi_requests is not None:
-            self.session = cffi_requests.Session(impersonate="chrome124", trust_env=False, proxies=proxies)
+            self.session = cffi_requests.Session(impersonate="chrome119", trust_env=False, proxies=proxies)
         elif requests is not None:
             self.session = requests.Session()
             self.session.trust_env = False
-            if matcha_proxy:
+            if proxy:
                 self.session.proxies.update(proxies)
         else:
             raise ArbError("requests or curl_cffi is required; install requirements-eth.txt")
@@ -871,7 +872,7 @@ class HttpJsonClient:
             try:
                 inject_matcha_cookies(
                     self.session,
-                    target_url="https://meta.matcha.xyz/ethereum",
+                    target_url="https://meta.matcha.xyz/solana",
                     chain_env_key="ETH_ARB_MATCHA_COOKIES",
                 )
             except Exception:
@@ -897,10 +898,15 @@ class HttpJsonClient:
             or hasattr(self.session, "_mock_return_value")
             or hasattr(self.session, "assert_called")
         )
-        try:
-            response = self.session.get(url, **kwargs)
-        except Exception as exc:
-            raise ArbError(f"GET {url} failed: {exc}") from exc
+        for attempt in range(2):
+            try:
+                response = self.session.get(url, **kwargs)
+                break
+            except Exception as exc:
+                if attempt == 0 and allow_retry and not is_mock:
+                    time.sleep(0.5)
+                    continue
+                raise ArbError(f"GET {url} failed: {exc}") from exc
 
         if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
             is_mock = True
@@ -923,7 +929,7 @@ class HttpJsonClient:
                     inject_matcha_cookies(
                         self.session,
                         force_refresh=True,
-                        target_url="https://meta.matcha.xyz/ethereum",
+                        target_url="https://meta.matcha.xyz/solana",
                         chain_env_key="ETH_ARB_MATCHA_COOKIES",
                     )
                     return self.get(url, headers=headers, allow_retry=False)
@@ -946,10 +952,15 @@ class HttpJsonClient:
             or hasattr(self.session, "_mock_return_value")
             or hasattr(self.session, "assert_called")
         )
-        try:
-            response = self.session.post(url, **kwargs)
-        except Exception as exc:
-            raise ArbError(f"POST {url} failed: {exc}") from exc
+        for attempt in range(2):
+            try:
+                response = self.session.post(url, **kwargs)
+                break
+            except Exception as exc:
+                if attempt == 0 and allow_retry and not is_mock:
+                    time.sleep(0.5)
+                    continue
+                raise ArbError(f"POST {url} failed: {exc}") from exc
 
         if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
             is_mock = True
@@ -972,7 +983,7 @@ class HttpJsonClient:
                     inject_matcha_cookies(
                         self.session,
                         force_refresh=True,
-                        target_url="https://meta.matcha.xyz/ethereum",
+                        target_url="https://meta.matcha.xyz/solana",
                         chain_env_key="ETH_ARB_MATCHA_COOKIES",
                     )
                     return self.post(url, payload, headers=headers, allow_retry=False)
@@ -1958,14 +1969,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     )
-    http = HttpJsonClient(args.timeout, user_agent)
+    matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
+    matcha_http = HttpJsonClient(args.timeout, user_agent, proxy=matcha_proxy)
+    direct_http = HttpJsonClient(args.timeout, user_agent, proxy="")
     matcha_client = MatchaClient(
-        http,
+        matcha_http,
         args.matcha_base_url,
         quote_provider=args.quote_provider,
         rpc_url=args.rpc_url,
     )
-    stable_client = StableClient(http, args.stable_base_url)
+    stable_client = StableClient(direct_http, args.stable_base_url)
 
     def fetch_eth_price(primary_url: str) -> Decimal:
         candidates = [
@@ -1979,7 +1992,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         last_exc = None
         for u in urls:
             try:
-                data = http.get(u)
+                data = direct_http.get(u)
                 return parse_binance_eth_usdc_price(data)
             except Exception as exc:
                 last_exc = exc

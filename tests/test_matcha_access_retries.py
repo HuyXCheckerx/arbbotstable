@@ -37,6 +37,7 @@ class MatchaAccessRetriesTests(unittest.TestCase):
         proxy_env = {key: "http://127.0.0.1:1" for key in (
             "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
         )}
+        proxy_env["MATCHA_PROXY"] = ""
         with patch.dict("os.environ", proxy_env, clear=False), \
                 patch.object(cookies, "inject_matcha_cookies"), \
                 patch.object(eth.cffi_requests, "Session") as factory:

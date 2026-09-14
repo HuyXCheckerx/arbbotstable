@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -78,7 +79,7 @@ def _session(force_refresh: bool = False) -> requests.Session:
     if _SHARED_SESSION is None or force_refresh:
         matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
         proxies = {"http": matcha_proxy, "https": matcha_proxy} if matcha_proxy else {"http": "", "https": ""}
-        session = requests.Session(impersonate="chrome124", trust_env=False, proxies=proxies)
+        session = requests.Session(impersonate="chrome119", trust_env=False, proxies=proxies)
         session.headers.update(HEADERS)
         if inject_matcha_cookies is not None:
             try:
@@ -112,10 +113,15 @@ def _post_json(
         or hasattr(_session, "_mock_return_value")
         or hasattr(_session, "assert_called")
     )
-    try:
-        response = sess.post(url, json=payload, timeout=timeout_seconds)
-    except Exception as exc:
-        raise RuntimeError(f"MetaMatcha quote failed: {exc}") from exc
+    for attempt in range(2):
+        try:
+            response = sess.post(url, json=payload, timeout=timeout_seconds)
+            break
+        except Exception as exc:
+            if attempt == 0 and allow_retry and not is_mock:
+                time.sleep(0.5)
+                continue
+            raise RuntimeError(f"MetaMatcha quote failed: {exc}") from exc
 
     if not is_mock and getattr(type(response), "__module__", "").startswith("unittest.mock"):
         is_mock = True

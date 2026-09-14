@@ -587,7 +587,7 @@ class HttpJsonClient:
     def __init__(self, timeout: float, user_agent: str):
         self.timeout = timeout
         if cffi_requests is not None:
-            self.session = cffi_requests.Session(impersonate="chrome124")
+            self.session = cffi_requests.Session(impersonate="chrome119")
         else:
             self.session = requests.Session()
 

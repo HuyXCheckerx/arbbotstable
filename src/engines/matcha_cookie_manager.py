@@ -114,13 +114,36 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-breakpad",
+        "--disable-client-side-phishing-detection",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-domain-reliability",
+        "--disable-extensions",
+        "--disable-hang-monitor",
+        "--disable-ipc-flooding-protection",
+        "--disable-popup-blocking",
+        "--disable-prompt-on-repost",
+        "--disable-renderer-backgrounding",
+        "--disable-sync",
     ]
     if not proxy_url:
         launch_args.append("--no-proxy-server")
     launch_kwargs: dict[str, Any] = {"headless": True, "args": launch_args}
     if proxy_url:
-        launch_kwargs["proxy"] = {"server": proxy_url}
-        logger.info("[CookieManager] Using proxy for challenge solver: %s", proxy_url.split("@")[-1])
+        from urllib.parse import urlparse
+        p = urlparse(proxy_url)
+        scheme = p.scheme or "http"
+        proxy_cfg: dict[str, str] = {"server": f"{scheme}://{p.hostname}:{p.port}"}
+        if p.username:
+            proxy_cfg["username"] = p.username
+        if p.password:
+            proxy_cfg["password"] = p.password
+        launch_kwargs["proxy"] = proxy_cfg
+        logger.info("[CookieManager] Using proxy for challenge solver: %s:%s", p.hostname, p.port)
 
     def _execute_browser_solve(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
         with sync_playwright() as p:
@@ -147,26 +170,14 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
                 has_clearance = "_vcrcs" in cookie_map or "cf_clearance" in cookie_map
                 title = (page.title() or "").lower()
 
-                if has_clearance or ("checkpoint" not in title and "just a moment" not in title and len(title) > 0):
-                    try:
-                        res = page.evaluate("""async () => {
-                            try {
-                                const r = await fetch('/api/gas?chainId=1');
-                                return {status: r.status, ok: r.ok};
-                            } catch (e) {
-                                return {status: 0, error: String(e)};
-                            }
-                        }""")
-                        if res.get("status") == 200:
-                            cleared = True
-                            logger.info(
-                                "[CookieManager] In-browser API clearance verified at %ds (status: 200)",
-                                poll_sec + 1,
-                            )
-                            break
-                    except Exception:
-                        pass
-                if has_clearance and poll_sec >= 2:
+                if has_clearance:
+                    logger.info(
+                        "[CookieManager] Vercel clearance cookie acquired at %ds",
+                        poll_sec + 1,
+                    )
+                    cleared = True
+                    break
+                elif "checkpoint" not in title and "just a moment" not in title and len(title) > 0 and poll_sec >= 3:
                     cleared = True
                     break
 
