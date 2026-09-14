@@ -2,12 +2,88 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import math
+import os
+from pathlib import Path
 import re
+import tempfile
+import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+
+DEFAULT_PROXY_LOCK_PATH = Path(tempfile.gettempdir()) / ".matcha_proxy_gate.lock"
+
+
+@contextlib.contextmanager
+def proxy_gate_lock(lock_path: str | Path | None = None, timeout: float = 30.0):
+    """Ensure strictly serialized access to single-concurrency residential proxies."""
+    proxy_url = os.getenv("MATCHA_PROXY", "").strip()
+    if not proxy_url:
+        yield
+        return
+
+    path = Path(lock_path or DEFAULT_PROXY_LOCK_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    start_time = time.monotonic()
+    acquired = False
+    lock_fd = None
+    try:
+        try:
+            import fcntl
+
+            lock_fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except (BlockingIOError, OSError):
+                    if time.monotonic() - start_time >= timeout:
+                        break
+                    time.sleep(0.05)
+        except ImportError:
+            try:
+                import msvcrt
+
+                lock_fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+                while True:
+                    try:
+                        msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
+                        acquired = True
+                        break
+                    except OSError:
+                        if time.monotonic() - start_time >= timeout:
+                            break
+                        time.sleep(0.05)
+            except ImportError:
+                pass
+        yield
+    finally:
+        if acquired and lock_fd is not None:
+            try:
+                try:
+                    import fcntl
+
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except ImportError:
+                    import msvcrt
+
+                    msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except Exception:
+                pass
+        # Brief cooldown after releasing proxy gate so upstream gateway closes TCP socket
+        time.sleep(0.2)
 
 
 def safe_endpoint(url: str) -> str:

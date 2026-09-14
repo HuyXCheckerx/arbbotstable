@@ -24,9 +24,9 @@ from typing import Any, Iterable
 import uuid
 
 try:
-    from .provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+    from .provider_http import access_block_detail, proxy_gate_lock, rate_limit_detail, retry_after_seconds
 except ImportError:
-    from provider_http import access_block_detail, rate_limit_detail, retry_after_seconds
+    from provider_http import access_block_detail, proxy_gate_lock, rate_limit_detail, retry_after_seconds
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -684,6 +684,8 @@ class HttpJsonClient:
                 "user-agent": user_agent,
             }
         )
+        if proxy:
+            self.session.headers["connection"] = "close"
         try:
             from .matcha_cookie_manager import inject_matcha_cookies
         except ImportError:
@@ -932,48 +934,49 @@ class MatchaClient:
         sell_token_address: str = USDC,
         buy_token_address: str = USDT,
     ) -> list[tuple[str, Any]]:
-        gas_price = self.gas_price()
-        competition = self.http.post(
-            f"{self.base_url}/api/competitions",
-            {
-                "chainId": CHAIN_ID,
-                "isAllowanceHolderFlow": True,
-                "gasPrice": str(gas_price),
-                "sellTokenAddress": sell_token_address.lower(),
-                "sellTokenDecimals": DECIMALS,
-                "buyTokenAddress": buy_token_address.lower(),
-                "buyTokenDecimals": DECIMALS,
-                "sellAmount": str(sell_amount),
-                "slippageBps": slippage_bps,
-                "slippagePpm": slippage_bps * 100,
-                "taker": executor,
-            },
-            headers=self.headers,
-        )
-        competition_id = first_key(competition, ("competitionId", "id"))
-        if not competition_id:
-            raise ArbError("Matcha competition response has no competitionId")
-
-        def fetch(aggregator: str) -> tuple[str, Any]:
-            response = self.http.post(
-                f"{self.base_url}/api/quotes?aggregator={aggregator}",
-                {"competitionId": competition_id, "aggregator": aggregator},
+        with proxy_gate_lock():
+            gas_price = self.gas_price()
+            competition = self.http.post(
+                f"{self.base_url}/api/competitions",
+                {
+                    "chainId": CHAIN_ID,
+                    "isAllowanceHolderFlow": True,
+                    "gasPrice": str(gas_price),
+                    "sellTokenAddress": sell_token_address.lower(),
+                    "sellTokenDecimals": DECIMALS,
+                    "buyTokenAddress": buy_token_address.lower(),
+                    "buyTokenDecimals": DECIMALS,
+                    "sellAmount": str(sell_amount),
+                    "slippageBps": slippage_bps,
+                    "slippagePpm": slippage_bps * 100,
+                    "taker": executor,
+                },
                 headers=self.headers,
             )
-            return aggregator, response
+            competition_id = first_key(competition, ("competitionId", "id"))
+            if not competition_id:
+                raise ArbError("Matcha competition response has no competitionId")
 
-        responses: list[tuple[str, Any]] = []
-        errors: list[str] = []
-        selected = tuple(aggregators)
-        matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
-        workers = 1 if matcha_proxy else min(4, len(selected))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(fetch, name): name for name in selected}
-            for future in as_completed(futures):
-                try:
-                    responses.append(future.result())
-                except ArbError as exc:
-                    errors.append(f"{futures[future]}: {exc}")
+            def fetch(aggregator: str) -> tuple[str, Any]:
+                response = self.http.post(
+                    f"{self.base_url}/api/quotes?aggregator={aggregator}",
+                    {"competitionId": competition_id, "aggregator": aggregator},
+                    headers=self.headers,
+                )
+                return aggregator, response
+
+            responses: list[tuple[str, Any]] = []
+            errors: list[str] = []
+            selected = tuple(aggregators)
+            matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
+            workers = 1 if matcha_proxy else min(4, len(selected))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(fetch, name): name for name in selected}
+                for future in as_completed(futures):
+                    try:
+                        responses.append(future.result())
+                    except ArbError as exc:
+                        errors.append(f"{futures[future]}: {exc}")
         if not responses:
             raise ArbError("all Matcha quote requests failed: " + "; ".join(errors))
         return responses

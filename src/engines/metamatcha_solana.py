@@ -15,11 +15,22 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
-
 try:
-    from .provider_http import access_block_detail, is_browser_challenge, rate_limit_detail, retry_after_seconds
+    from .provider_http import (
+        access_block_detail,
+        is_browser_challenge,
+        proxy_gate_lock,
+        rate_limit_detail,
+        retry_after_seconds,
+    )
 except ImportError:  # Direct script execution.
-    from provider_http import access_block_detail, is_browser_challenge, rate_limit_detail, retry_after_seconds
+    from provider_http import (
+        access_block_detail,
+        is_browser_challenge,
+        proxy_gate_lock,
+        rate_limit_detail,
+        retry_after_seconds,
+    )
 
 try:
     from .matcha_cookie_manager import DEFAULT_MATCHA_USER_AGENT, inject_matcha_cookies
@@ -55,6 +66,7 @@ HEADERS = {
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
     "sec-ch-ua-platform": '"macOS"',
+    "connection": "close",
     "user-agent": DEFAULT_MATCHA_USER_AGENT,
 }
 
@@ -230,38 +242,40 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
         "slippageBps": slippage_bps,
         "taker": taker,
     }
-    competition = _post_json(
-        f"{base_url}/api/competitions", competition_payload, timeout_seconds
-    )
-    competition_id = competition.get("id") or competition.get("competitionId")
-    if not competition_id:
-        raise RuntimeError("MetaMatcha returned no competition ID")
-
-    def query(aggregator: str) -> tuple[str, dict[str, Any]]:
-        payload = {"competitionId": competition_id, "aggregator": aggregator}
-        response = _post_json(
-            f"{base_url}/api/quotes?aggregator={aggregator}", payload, timeout_seconds
+    proxy_url = os.getenv("MATCHA_PROXY", "").strip()
+    with proxy_gate_lock():
+        competition = _post_json(
+            f"{base_url}/api/competitions", competition_payload, timeout_seconds
         )
-        return aggregator, response
+        competition_id = competition.get("id") or competition.get("competitionId")
+        if not competition_id:
+            raise RuntimeError("MetaMatcha returned no competition ID")
 
-    responses: dict[str, dict[str, Any]] = {}
-    failures: list[str] = []
-    access_blocks: list[ProviderAccessBlockedError] = []
-    rate_limits: list[ProviderRateLimitedError] = []
-    workers = 1 if os.getenv("MATCHA_PROXY", "").strip() else min(4, len(clean_aggregators))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(query, name): name for name in clean_aggregators}
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                aggregator, response = future.result()
-                responses[aggregator] = response
-            except ProviderAccessBlockedError as exc:
-                access_blocks.append(exc)
-            except ProviderRateLimitedError as exc:
-                rate_limits.append(exc)
-            except Exception as exc:  # each competitor may fail independently
-                failures.append(f"{name}: {exc}")
+        def query(aggregator: str) -> tuple[str, dict[str, Any]]:
+            payload = {"competitionId": competition_id, "aggregator": aggregator}
+            response = _post_json(
+                f"{base_url}/api/quotes?aggregator={aggregator}", payload, timeout_seconds
+            )
+            return aggregator, response
+
+        responses: dict[str, dict[str, Any]] = {}
+        failures: list[str] = []
+        access_blocks: list[ProviderAccessBlockedError] = []
+        rate_limits: list[ProviderRateLimitedError] = []
+        workers = 1 if proxy_url else min(4, len(clean_aggregators))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(query, name): name for name in clean_aggregators}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    aggregator, response = future.result()
+                    responses[aggregator] = response
+                except ProviderAccessBlockedError as exc:
+                    access_blocks.append(exc)
+                except ProviderRateLimitedError as exc:
+                    rate_limits.append(exc)
+                except Exception as exc:  # each competitor may fail independently
+                    failures.append(f"{name}: {exc}")
 
     try:
         aggregator, quote, simulation = select_best_quote(
