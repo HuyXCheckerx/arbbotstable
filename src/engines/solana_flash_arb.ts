@@ -470,6 +470,23 @@ export function bufferedFeeRaw(
   return (numerator + denominator - 1n) / denominator;
 }
 
+export function effectiveScaledMinimumProfitRaw(
+  baseMinimumRaw: bigint,
+  actualLoanRaw: bigint,
+  configuredMaxLoanRaw: bigint,
+  absoluteSafetyFloorRaw = 10_000n,
+): bigint {
+  if (configuredMaxLoanRaw <= 0n || actualLoanRaw >= configuredMaxLoanRaw) {
+    return baseMinimumRaw;
+  }
+  const scaled = (baseMinimumRaw * actualLoanRaw) / configuredMaxLoanRaw;
+  const floorLimit =
+    baseMinimumRaw < absoluteSafetyFloorRaw
+      ? baseMinimumRaw
+      : absoluteSafetyFloorRaw;
+  return scaled > floorLimit ? scaled : floorLimit;
+}
+
 export function finalComputeUnitLimit(
   unitsConsumed: number,
   safetyBps: number,
@@ -621,12 +638,12 @@ function readConfig(cli: CliOptions): Config {
     minimumGrossProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_GROSS_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC ||
-        "0.5",
+        "1",
     ),
     minimumNetProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_NET_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC ||
-        "0.5",
+        "1",
     ),
     maxAccounts: routeConstraints.maxAccounts,
     onlyDirectRoutes: routeConstraints.onlyDirectRoutes,
@@ -1541,7 +1558,12 @@ async function getCapacitySizedCycle(
         stableQuote.outputRaw,
         loanAmountRaw,
       );
-      if (cycle.grossProfitRaw >= config.minimumGrossProfitRaw || attempt >= config.stableCapacitySizingAttempts - 1) {
+      const effectiveMinGrossRaw = effectiveScaledMinimumProfitRaw(
+        config.minimumGrossProfitRaw,
+        loanAmountRaw,
+        config.maximumLoanAmountRaw,
+      );
+      if (cycle.grossProfitRaw >= effectiveMinGrossRaw || attempt >= config.stableCapacitySizingAttempts - 1) {
         return {
           loanAmountRaw,
           firstQuote,
@@ -2293,11 +2315,27 @@ async function main(): Promise<void> {
   console.log(
     `Stable.com token fee: ${formatRaw(stableQuote.tokenFeeRaw)} ${stableOutputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol)}`,
   );
-  console.log(`Guaranteed gross result: ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol}`);
+  const effectiveMinGrossRaw = effectiveScaledMinimumProfitRaw(
+    config.minimumGrossProfitRaw,
+    loanAmountRaw,
+    config.maximumLoanAmountRaw,
+  );
+  const effectiveMinNetRaw = effectiveScaledMinimumProfitRaw(
+    config.minimumNetProfitRaw,
+    loanAmountRaw,
+    config.maximumLoanAmountRaw,
+  );
 
-  if (cycle.grossProfitRaw < config.minimumGrossProfitRaw) {
+  console.log(`Guaranteed gross result: ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol}`);
+  if (loanAmountRaw < config.maximumLoanAmountRaw) {
+    console.log(
+      `Scaled minimum profit required: ${formatRaw(effectiveMinGrossRaw)} ${config.loanSymbol} (scaled proportionally from ${formatRaw(config.minimumGrossProfitRaw)} ${config.loanSymbol} base for ${formatRaw(loanAmountRaw)}/${formatRaw(config.maximumLoanAmountRaw)} principal)`,
+    );
+  }
+
+  if (cycle.grossProfitRaw < effectiveMinGrossRaw) {
     throw new Error(
-      `No executable opportunity: guaranteed gross ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol} is below ${formatRaw(config.minimumGrossProfitRaw)} ${config.loanSymbol}`,
+      `No executable opportunity: guaranteed gross ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol} is below ${formatRaw(effectiveMinGrossRaw)} ${config.loanSymbol} (scaled minimum)`,
     );
   }
   if (cli.quoteOnly) {
@@ -2483,6 +2521,10 @@ async function main(): Promise<void> {
     grossProfitRaw: cycle.grossProfitRaw.toString(),
     executionCostRaw: executionCostRaw.toString(),
     netProfitRaw: netProfitRaw.toString(),
+    effectiveMinimumGrossProfitRaw: effectiveMinGrossRaw.toString(),
+    effectiveMinimumNetProfitRaw: effectiveMinNetRaw.toString(),
+    configuredBaseMinimumGrossProfitRaw: config.minimumGrossProfitRaw.toString(),
+    configuredBaseMinimumNetProfitRaw: config.minimumNetProfitRaw.toString(),
     solUsd,
     networkFeeLamports: feeResponse.value,
     stableExecutionFeeLamports: stableLeg.executionFeeLamports.toString(),
@@ -2501,9 +2543,9 @@ async function main(): Promise<void> {
   writePlan(config.outputPath, plan);
   console.log(`Plan: ${config.outputPath}`);
 
-  if (netProfitRaw < config.minimumNetProfitRaw) {
+  if (netProfitRaw < effectiveMinNetRaw) {
     throw new Error(
-      `No executable opportunity: guaranteed net ${formatRaw(netProfitRaw)} ${config.loanSymbol} is below ${formatRaw(config.minimumNetProfitRaw)} ${config.loanSymbol}`,
+      `No executable opportunity: guaranteed net ${formatRaw(netProfitRaw)} ${config.loanSymbol} is below ${formatRaw(effectiveMinNetRaw)} ${config.loanSymbol} (scaled minimum)`,
     );
   }
   if (!cli.send) {

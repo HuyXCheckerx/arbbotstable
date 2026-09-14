@@ -35,6 +35,7 @@ import {
   stableInputSymbol,
   stableOutputSymbol,
   classifySignatureStatus,
+  effectiveScaledMinimumProfitRaw,
 } from "../src/engines/solana_flash_arb.js";
 import { PublicKey } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
@@ -447,4 +448,36 @@ test("compute limit adds safety padding and respects bounds", () => {
   assert.equal(finalComputeUnitLimit(500_000, 1_500, 1_400_000), 575_000);
   assert.equal(finalComputeUnitLimit(100_000, 1_500, 1_400_000), 200_000);
   assert.equal(finalComputeUnitLimit(1_300_000, 1_500, 1_400_000), 1_400_000);
+});
+
+test("proportional profit scaling calculates minimums according to principal size", () => {
+  const base100kProfit = 1_000_000n; // $1.00 for 100,000 tokens
+  const max100kLoan = 100_000_000_000n; // 100,000 tokens
+
+  // Full 100,000 loan -> exact base minimum ($1.00)
+  assert.equal(
+    effectiveScaledMinimumProfitRaw(base100kProfit, max100kLoan, max100kLoan),
+    1_000_000n,
+  );
+
+  // Scaled down to 15,511.802846 loan (Marginfi PYUSD headroom)
+  const loan15k = 15_511_802_846n;
+  const scaled15k = effectiveScaledMinimumProfitRaw(base100kProfit, loan15k, max100kLoan);
+  assert.equal(scaled15k, 155_118n); // ~0.155118 tokens
+
+  // Scaled down to 2,601.659317 loan (Marginfi USDG headroom)
+  const loan2k = 2_601_659_317n;
+  const scaled2k = effectiveScaledMinimumProfitRaw(base100kProfit, loan2k, max100kLoan);
+  assert.equal(scaled2k, 26_016n); // ~0.026016 tokens
+
+  // Very small loan clamps to absolute safety floor (10_000n = 0.01 tokens)
+  const tinyLoan = 500_000_000n; // 500 tokens
+  const scaledTiny = effectiveScaledMinimumProfitRaw(base100kProfit, tinyLoan, max100kLoan);
+  assert.equal(scaledTiny, 10_000n); // clamped to safety floor 0.01
+
+  // Loan greater than or equal to configured max returns base minimum
+  assert.equal(
+    effectiveScaledMinimumProfitRaw(base100kProfit, 120_000_000_000n, max100kLoan),
+    1_000_000n,
+  );
 });
