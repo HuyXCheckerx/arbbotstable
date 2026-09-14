@@ -76,7 +76,7 @@ gas_ok = False
 try:
     from curl_cffi import requests
     proxies = {"http": matcha_proxy, "https": matcha_proxy} if matcha_proxy else {"http": "", "https": ""}
-    s = requests.Session(impersonate="chrome124", trust_env=False, proxies=proxies)
+    s = requests.Session(impersonate="chrome119", trust_env=False, proxies=proxies)
     cm.inject_matcha_cookies(s, force_refresh=False, target_url="https://meta.matcha.xyz/solana")
     r = s.get(
         "https://meta.matcha.xyz/api/gas?chainId=1",
