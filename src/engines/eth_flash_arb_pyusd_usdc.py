@@ -1005,6 +1005,53 @@ class HttpJsonClient:
         return payload
 
 
+def fetch_live_gas_price(rpc_url: str | None = None) -> int | None:
+    """Fetch live gas price in wei from connected Ethereum RPC or public fallback endpoints."""
+    rpc_candidates: list[str] = []
+    if rpc_url:
+        rpc_candidates.append(rpc_url)
+    env_rpc = os.getenv("ETH_RPC_URL")
+    if env_rpc and env_rpc not in rpc_candidates:
+        rpc_candidates.append(env_rpc)
+    rpc_candidates.extend([
+        "https://ethereum-rpc.publicnode.com",
+        "https://rpc.mevblocker.io",
+        "https://1rpc.io/eth",
+    ])
+
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "method": "eth_gasPrice",
+        "params": [],
+        "id": 1,
+    }).encode("utf-8")
+
+    import urllib.request
+    for endpoint in rpc_candidates:
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                },
+            )
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                result = data.get("result")
+                if isinstance(result, str) and result.startswith("0x"):
+                    wei = int(result, 16)
+                    if wei > 0:
+                        return wei
+        except Exception:
+            continue
+    return None
+
+
 class MatchaClient:
     def __init__(
         self,
@@ -1012,22 +1059,37 @@ class MatchaClient:
         base_url: str = MATCHA_BASE_URL,
         *,
         quote_provider: str = "matcha",
+        rpc_url: str | None = None,
     ):
         self.http = http
         self.base_url = base_url.rstrip("/")
         self.quote_provider = quote_provider
+        self.rpc_url = rpc_url
         self.headers = {
             "origin": "https://meta.matcha.xyz",
             "referer": "https://meta.matcha.xyz/ethereum",
         }
 
     def gas_price(self) -> int:
-        payload = self.http.get(
-            f"{self.base_url}/api/gas?chainId={CHAIN_ID}",
-            headers=self.headers,
-        )
-        value = first_key(payload, ("price", "gasPrice", "fast", "standard"))
-        return parse_integer(value, "Matcha gas price")
+        if self.rpc_url:
+            gas = fetch_live_gas_price(self.rpc_url)
+            if gas is not None:
+                return gas
+
+        try:
+            payload = self.http.get(
+                f"{self.base_url}/api/gas?chainId={CHAIN_ID}",
+                headers=self.headers,
+            )
+            value = first_key(payload, ("price", "gasPrice", "fast", "standard"))
+            return parse_integer(value, "Matcha gas price")
+        except ProviderAccessBlockedError:
+            raise
+        except (ProviderRateLimitedError, RetryableArbError):
+            gas = fetch_live_gas_price(None)
+            if gas is not None:
+                return gas
+            return int(os.getenv("ETH_FALLBACK_GAS_PRICE_WEI", "15000000000"))
 
     def _matcha_quotes(
         self,
@@ -1901,6 +1963,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         http,
         args.matcha_base_url,
         quote_provider=args.quote_provider,
+        rpc_url=args.rpc_url,
     )
     stable_client = StableClient(http, args.stable_base_url)
 
