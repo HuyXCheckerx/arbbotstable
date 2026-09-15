@@ -1641,16 +1641,38 @@ def prepare_transaction(
     matcha_arguments = checksum_matcha_arguments(web3, matcha)
 
     swap_order_id = 1 if swap_order == "stable-first" else 0
-    call = contract.functions.executeArbitrageWithTokensAndProviderAndOrder(
-        loan_amount,
-        web3.to_checksum_address(loan_token),
-        web3.to_checksum_address(intermediate_token),
-        flash_provider.provider_id,
-        swap_order_id,
-        matcha_arguments,
-        stable.contract_tuple(),
-        min_profit,
+    executor_code = web3.eth.get_code(web3.to_checksum_address(executor)).hex().lower()
+    has_order_method = "17feadd1" in executor_code and hasattr(
+        contract.functions, "executeArbitrageWithTokensAndProviderAndOrder"
     )
+
+    if not has_order_method:
+        if swap_order == "dex-first" and hasattr(contract.functions, "executeArbitrageWithTokensAndProvider"):
+            call = contract.functions.executeArbitrageWithTokensAndProvider(
+                loan_amount,
+                web3.to_checksum_address(loan_token),
+                web3.to_checksum_address(intermediate_token),
+                flash_provider.provider_id,
+                matcha_arguments,
+                stable.contract_tuple(),
+                min_profit,
+            )
+        else:
+            raise ArbError(
+                f"deployed executor contract {executor} does not support "
+                f"--swap-order {swap_order}; redeploy MorphoMatchaStableArbUsdc"
+            )
+    else:
+        call = contract.functions.executeArbitrageWithTokensAndProviderAndOrder(
+            loan_amount,
+            web3.to_checksum_address(loan_token),
+            web3.to_checksum_address(intermediate_token),
+            flash_provider.provider_id,
+            swap_order_id,
+            matcha_arguments,
+            stable.contract_tuple(),
+            min_profit,
+        )
 
     native_value = matcha.value + stable.execution_fee_native
     tx_params: dict[str, Any] = {
@@ -1662,6 +1684,10 @@ def prepare_transaction(
     try:
         estimated_gas = call.estimate_gas(tx_params)
     except Exception as exc:
+        try:
+            call.call(tx_params)
+        except Exception as call_exc:
+            raise classify_atomic_simulation_error(call_exc) from call_exc
         raise classify_atomic_simulation_error(exc) from exc
 
     gas_limit = int(
