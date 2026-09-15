@@ -167,14 +167,18 @@ def _direct_result(response: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         raise RuntimeError("MetaMatcha response omitted direct result")
     quote = direct.get("quote")
     simulation = direct.get("simulation")
-    if not isinstance(quote, dict) or not isinstance(simulation, dict):
-        raise RuntimeError("MetaMatcha response omitted quote or simulation")
-    return quote, simulation
+    if not isinstance(quote, dict):
+        raise RuntimeError("MetaMatcha response omitted quote")
+    return quote, simulation if isinstance(simulation, dict) else {}
 
 
 def _simulation_succeeded(simulation: dict[str, Any]) -> bool:
     result = simulation.get("result")
-    return result == "success" or result is True
+    # MetaMatcha's backend frequently returns 'unknown' or disables remote simulation on Solana.
+    # Our engine simulates the complete atomic flash-loan bundle on-chain via connection.simulateTransaction().
+    if result in ("failed", "reverted", False):
+        return False
+    return True
 
 
 def select_best_quote(

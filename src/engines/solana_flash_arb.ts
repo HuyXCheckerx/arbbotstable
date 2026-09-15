@@ -601,7 +601,22 @@ function readConfig(cli: CliOptions): Config {
     ).split(",").map((value) => value.trim()).filter(Boolean),
     matchaPython:
       process.env.SOL_FLASH_ARB_MATCHA_PYTHON ||
-      (process.platform === "win32" ? "python" : "python3"),
+      (() => {
+        const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+        const venvEth = path.join(
+          root,
+          ".venv-eth",
+          process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
+        );
+        if (fs.existsSync(venvEth)) return venvEth;
+        const venv = path.join(
+          root,
+          ".venv",
+          process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
+        );
+        if (fs.existsSync(venv)) return venv;
+        return process.platform === "win32" ? "python" : "python3";
+      })(),
     matchaHelperPath:
       process.env.SOL_FLASH_ARB_MATCHA_HELPER ||
       path.join(path.dirname(fileURLToPath(import.meta.url)), "metamatcha_solana.py"),
