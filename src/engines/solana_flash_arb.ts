@@ -109,6 +109,7 @@ export interface JupiterQuote {
   provider?: "MetaMatcha" | "Jupiter";
   aggregator?: string;
   serializedTransaction?: string;
+  candidates?: JupiterQuote[];
   [key: string]: unknown;
 }
 
@@ -1998,6 +1999,317 @@ async function simulate(
   return result.value.unitsConsumed;
 }
 
+export interface ExecutableCandidate {
+  candidate: JupiterQuote;
+  aggregatorName: string;
+  grossProfitRaw: bigint;
+  cycle: ConservativeCycle;
+  swapInstructions: TransactionInstruction[];
+  lookupTables: AddressLookupTableAccount[];
+  ignoredComputeBudgetCount: number;
+  stableLeg: StableLeg;
+  probe: VersionedTransaction;
+  probeUnits: number;
+}
+
+export interface CandidateEvaluationResult {
+  candidate: JupiterQuote;
+  aggregatorName: string;
+  grossProfitRaw: bigint;
+  executable?: ExecutableCandidate;
+  error?: string;
+  isPoisoned?: boolean;
+}
+
+export async function prerunCandidateQuotes(
+  config: Config,
+  connection: Connection,
+  walletAddress: PublicKey,
+  account: MarginfiAccountWrapper | undefined,
+  loanBank: Bank | undefined,
+  loanAmountRaw: bigint,
+  isWalletFunded: boolean,
+  firstQuote: JupiterQuote,
+  stableQuote: StableQuote,
+  effectiveMinGrossRaw: bigint,
+  clientLookupTables: AddressLookupTableAccount[],
+  customLookupTables: AddressLookupTableAccount[],
+  blockhash: string,
+  simulateFn: (
+    connection: Connection,
+    transaction: VersionedTransaction,
+  ) => Promise<number> = simulate,
+  existingStableLeg?: StableLeg,
+): Promise<ExecutableCandidate> {
+  const candidates: JupiterQuote[] = firstQuote.candidates?.length
+    ? firstQuote.candidates
+    : [firstQuote];
+
+  let results: CandidateEvaluationResult[];
+
+  if (config.swapOrder === "stable-first") {
+    const stableLeg =
+      existingStableLeg ??
+      (await getStableLeg(config, walletAddress, stableQuote));
+    results = await Promise.all(
+      candidates.map(async (cand, index): Promise<CandidateEvaluationResult> => {
+        const aggregatorName =
+          cand.aggregator ?? cand.provider ?? `Aggregator #${index + 1}`;
+        const candOutputRaw = BigInt(cand.otherAmountThreshold);
+        const candGrossProfitRaw = candOutputRaw - loanAmountRaw;
+        if (candGrossProfitRaw < effectiveMinGrossRaw) {
+          return {
+            candidate: cand,
+            aggregatorName,
+            grossProfitRaw: candGrossProfitRaw,
+            error: `gross profit ${formatRaw(candGrossProfitRaw)} ${config.loanSymbol} is below scaled minimum ${formatRaw(effectiveMinGrossRaw)} ${config.loanSymbol}`,
+            isPoisoned: false,
+          };
+        }
+        try {
+          const swapLeg = await getSwapLeg(
+            config,
+            cand,
+            walletAddress,
+            index + 1,
+            connection,
+          );
+          const lookupTables = mergeLookupTables(
+            customLookupTables,
+            clientLookupTables,
+            swapLeg.lookupTables,
+          );
+          const swapInstructions = [
+            stableLeg.instruction,
+            ...swapLeg.instructions,
+          ];
+          const probe = isWalletFunded
+            ? await buildWalletFundedTransaction(
+                config.keypair,
+                swapInstructions,
+                lookupTables,
+                blockhash,
+                config.probeComputeUnitLimit,
+                0,
+              )
+            : await buildFlashTransaction(
+                account!,
+                config.keypair,
+                loanBank!.address,
+                loanAmountRaw,
+                swapInstructions,
+                lookupTables,
+                blockhash,
+                config.probeComputeUnitLimit,
+                0,
+              );
+          const probeWireSize = probe.serialize().length;
+          if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
+            return {
+              candidate: cand,
+              aggregatorName,
+              grossProfitRaw: candGrossProfitRaw,
+              error: `transaction size ${probeWireSize} bytes exceeds Solana 1232-byte limit`,
+              isPoisoned: false,
+            };
+          }
+          const probeUnits = await simulateFn(connection, probe);
+          const cycle: ConservativeCycle = {
+            firstLegMinimumRaw: stableQuote.outputRaw,
+            secondLegMinimumRaw: candOutputRaw,
+            grossProfitRaw: candGrossProfitRaw,
+          };
+          return {
+            candidate: cand,
+            aggregatorName,
+            grossProfitRaw: candGrossProfitRaw,
+            executable: {
+              candidate: cand,
+              aggregatorName,
+              grossProfitRaw: candGrossProfitRaw,
+              cycle,
+              swapInstructions,
+              lookupTables,
+              ignoredComputeBudgetCount:
+                swapLeg.ignoredComputeBudgetInstructionCount,
+              stableLeg,
+              probe,
+              probeUnits,
+            },
+          };
+        } catch (error) {
+          return {
+            candidate: cand,
+            aggregatorName,
+            grossProfitRaw: candGrossProfitRaw,
+            error: errorMessage(error),
+            isPoisoned: true,
+          };
+        }
+      }),
+    );
+  } else {
+    results = await Promise.all(
+      candidates.map(async (cand, index): Promise<CandidateEvaluationResult> => {
+        const aggregatorName =
+          cand.aggregator ?? cand.provider ?? `Aggregator #${index + 1}`;
+        const candFirstLegMinimumRaw = BigInt(cand.otherAmountThreshold);
+        try {
+          const candStableQuote =
+            candFirstLegMinimumRaw === stableQuote.inputRaw
+              ? stableQuote
+              : await getStableQuote(
+                  config,
+                  walletAddress,
+                  candFirstLegMinimumRaw,
+                );
+          const candGrossProfitRaw = candStableQuote.outputRaw - loanAmountRaw;
+          if (candGrossProfitRaw < effectiveMinGrossRaw) {
+            return {
+              candidate: cand,
+              aggregatorName,
+              grossProfitRaw: candGrossProfitRaw,
+              error: `gross profit ${formatRaw(candGrossProfitRaw)} ${config.loanSymbol} is below scaled minimum ${formatRaw(effectiveMinGrossRaw)} ${config.loanSymbol}`,
+              isPoisoned: false,
+            };
+          }
+          const candStableLeg =
+            candFirstLegMinimumRaw === stableQuote.inputRaw && existingStableLeg
+              ? existingStableLeg
+              : await getStableLeg(
+                  config,
+                  walletAddress,
+                  candStableQuote,
+                );
+          const swapLeg = await getSwapLeg(
+            config,
+            cand,
+            walletAddress,
+            index + 1,
+            connection,
+          );
+          const lookupTables = mergeLookupTables(
+            customLookupTables,
+            clientLookupTables,
+            swapLeg.lookupTables,
+          );
+          const swapInstructions = [
+            ...swapLeg.instructions,
+            candStableLeg.instruction,
+          ];
+          const probe = isWalletFunded
+            ? await buildWalletFundedTransaction(
+                config.keypair,
+                swapInstructions,
+                lookupTables,
+                blockhash,
+                config.probeComputeUnitLimit,
+                0,
+              )
+            : await buildFlashTransaction(
+                account!,
+                config.keypair,
+                loanBank!.address,
+                loanAmountRaw,
+                swapInstructions,
+                lookupTables,
+                blockhash,
+                config.probeComputeUnitLimit,
+                0,
+              );
+          const probeWireSize = probe.serialize().length;
+          if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
+            return {
+              candidate: cand,
+              aggregatorName,
+              grossProfitRaw: candGrossProfitRaw,
+              error: `transaction size ${probeWireSize} bytes exceeds Solana 1232-byte limit`,
+              isPoisoned: false,
+            };
+          }
+          const probeUnits = await simulateFn(connection, probe);
+          const cycle: ConservativeCycle = {
+            firstLegMinimumRaw: candFirstLegMinimumRaw,
+            secondLegMinimumRaw: candStableQuote.outputRaw,
+            grossProfitRaw: candGrossProfitRaw,
+          };
+          return {
+            candidate: cand,
+            aggregatorName,
+            grossProfitRaw: candGrossProfitRaw,
+            executable: {
+              candidate: cand,
+              aggregatorName,
+              grossProfitRaw: candGrossProfitRaw,
+              cycle,
+              swapInstructions,
+              lookupTables,
+              ignoredComputeBudgetCount:
+                swapLeg.ignoredComputeBudgetInstructionCount,
+              stableLeg: candStableLeg,
+              probe,
+              probeUnits,
+            },
+          };
+        } catch (error) {
+          return {
+            candidate: cand,
+            aggregatorName,
+            grossProfitRaw: 0n,
+            error: errorMessage(error),
+            isPoisoned: true,
+          };
+        }
+      }),
+    );
+  }
+
+  console.log(`[Atomic Prerun] Evaluated ${results.length} candidate quote(s):`);
+  for (const res of results) {
+    if (res.executable) {
+      console.log(
+        `  - ${res.aggregatorName}: PASSED (${res.executable.probeUnits.toLocaleString()} compute units, guaranteed gross +${formatRaw(res.grossProfitRaw)} ${config.loanSymbol})`,
+      );
+    } else if (res.isPoisoned) {
+      console.log(
+        `  - ${res.aggregatorName}: POISONED (${res.error})`,
+      );
+    } else {
+      console.log(
+        `  - ${res.aggregatorName}: REJECTED (${res.error})`,
+      );
+    }
+  }
+
+  const validCandidates = results
+    .map((res) => res.executable)
+    .filter((exec): exec is ExecutableCandidate => exec !== undefined);
+
+  if (!validCandidates.length) {
+    const details = results
+      .map((res) => `  - ${res.aggregatorName}: ${res.error ?? "failed"}`)
+      .join("\n");
+    throw new Error(
+      `All candidate quotes failed atomic prerun simulation or fell below the profit floor:\n${details}`,
+    );
+  }
+
+  validCandidates.sort((a, b) =>
+    b.grossProfitRaw > a.grossProfitRaw
+      ? 1
+      : b.grossProfitRaw < a.grossProfitRaw
+        ? -1
+        : 0,
+  );
+  const winning = validCandidates[0];
+  if (results.length > 1) {
+    console.log(
+      `[Atomic Prerun] Selected best executable quote: ${winning.aggregatorName} (guaranteed gross +${formatRaw(winning.grossProfitRaw)} ${config.loanSymbol})`,
+    );
+  }
+  return winning;
+}
+
 async function fetchSolUsd(config: Config): Promise<number> {
   const result = await fetchJson<JsonRecord>(
     config.solUsdUrl,
@@ -2284,7 +2596,7 @@ async function main(): Promise<void> {
   }
 
   const sized = await getCapacitySizedCycle(config, walletAddress, availableBankLiquidityRaw);
-  const { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
+  let { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
   const isTwoHop = config.dexProvider === "jupiter" &&
     isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);
   const dexName = dexProviderName(config.dexProvider);
@@ -2365,6 +2677,13 @@ async function main(): Promise<void> {
   let lookupTables: AddressLookupTableAccount[];
   let ignoredComputeBudgetCount = 0;
   let stableLeg: StableLeg;
+  let probe: VersionedTransaction;
+  let probeUnits: number;
+
+  const customLookupTables = config.customLookupTableAddresses.length
+    ? await fetchLookupTables(connection, config.customLookupTableAddresses)
+    : [];
+  const latest = await connection.getLatestBlockhash(config.commitment);
 
   if (isTwoHop && secondJupiterQuote) {
     const [firstSwap1, firstSwap2, stableLegResult] = await Promise.all([
@@ -2373,9 +2692,6 @@ async function main(): Promise<void> {
       getStableLeg(config, walletAddress, stableQuote),
     ]);
     stableLeg = stableLegResult;
-    const customLookupTables = config.customLookupTableAddresses.length
-      ? await fetchLookupTables(connection, config.customLookupTableAddresses)
-      : [];
     lookupTables = mergeLookupTables(
       customLookupTables,
       client?.addressLookupTables ?? [],
@@ -2388,59 +2704,63 @@ async function main(): Promise<void> {
     ignoredComputeBudgetCount =
       firstSwap1.ignoredComputeBudgetInstructionCount +
       firstSwap2.ignoredComputeBudgetInstructionCount;
-  } else {
-    const [firstSwap, stableLegResult] = await Promise.all([
-      getSwapLeg(config, firstQuote, walletAddress, 1, connection),
-      getStableLeg(config, walletAddress, stableQuote),
-    ]);
-    stableLeg = stableLegResult;
-    const customLookupTables = config.customLookupTableAddresses.length
-      ? await fetchLookupTables(connection, config.customLookupTableAddresses)
-      : [];
-    lookupTables = mergeLookupTables(
-      customLookupTables,
-      client?.addressLookupTables ?? [],
-      firstSwap.lookupTables,
-    );
-    swapInstructions =
-      config.swapOrder === "stable-first"
-        ? [stableLeg.instruction, ...firstSwap.instructions]
-        : [...firstSwap.instructions, stableLeg.instruction];
-    ignoredComputeBudgetCount = firstSwap.ignoredComputeBudgetInstructionCount;
-  }
 
-  const latest = await connection.getLatestBlockhash(config.commitment);
-  const probe = isWalletFunded
-    ? await buildWalletFundedTransaction(
-        config.keypair,
-        swapInstructions,
-        lookupTables,
-        latest.blockhash,
-        config.probeComputeUnitLimit,
-        0,
-      )
-    : await buildFlashTransaction(
-        account!,
-        config.keypair,
-        loanBank!.address,
-        loanAmountRaw,
-        swapInstructions,
-        lookupTables,
-        latest.blockhash,
-        config.probeComputeUnitLimit,
-        0,
+    probe = isWalletFunded
+      ? await buildWalletFundedTransaction(
+          config.keypair,
+          swapInstructions,
+          lookupTables,
+          latest.blockhash,
+          config.probeComputeUnitLimit,
+          0,
+        )
+      : await buildFlashTransaction(
+          account!,
+          config.keypair,
+          loanBank!.address,
+          loanAmountRaw,
+          swapInstructions,
+          lookupTables,
+          latest.blockhash,
+          config.probeComputeUnitLimit,
+          0,
+        );
+
+    const probeWireSize = probe.serialize().length;
+    if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
+      const hint = config.dexProvider === "jupiter"
+        ? " Lower SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS."
+        : " Try a different SOL_FLASH_ARB_MATCHA_AGGREGATORS selection.";
+      throw new Error(
+        `Atomic transaction is ${probeWireSize} bytes before simulation; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}.${hint}`,
       );
-
-  const probeWireSize = probe.serialize().length;
-  if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
-    const hint = config.dexProvider === "jupiter"
-      ? " Lower SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS."
-      : " Try a different SOL_FLASH_ARB_MATCHA_AGGREGATORS selection.";
-    throw new Error(
-      `Atomic transaction is ${probeWireSize} bytes before simulation; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}.${hint}`,
+    }
+    probeUnits = await simulate(connection, probe);
+  } else {
+    const winning = await prerunCandidateQuotes(
+      config,
+      connection,
+      walletAddress,
+      account,
+      loanBank,
+      loanAmountRaw,
+      isWalletFunded,
+      firstQuote,
+      stableQuote,
+      effectiveMinGrossRaw,
+      client?.addressLookupTables ?? [],
+      customLookupTables,
+      latest.blockhash,
     );
+    firstQuote = winning.candidate;
+    cycle = winning.cycle;
+    swapInstructions = winning.swapInstructions;
+    lookupTables = winning.lookupTables;
+    ignoredComputeBudgetCount = winning.ignoredComputeBudgetCount;
+    stableLeg = winning.stableLeg;
+    probe = winning.probe;
+    probeUnits = winning.probeUnits;
   }
-  const probeUnits = await simulate(connection, probe);
   const computeUnitLimit = finalComputeUnitLimit(
     probeUnits,
     config.computeUnitSafetyBps,

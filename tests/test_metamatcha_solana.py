@@ -136,6 +136,32 @@ class MetaMatchaSolanaTests(unittest.TestCase):
                 taker="wallet",
             )
 
+    def test_fetch_quote_returns_all_candidates_sorted_by_buy_amount(self):
+        def post(url, payload, timeout):
+            if url.endswith("/api/competitions"):
+                return {"id": "test-competition"}
+            if payload["aggregator"] == "0x":
+                return response(105)
+            if payload["aggregator"] == "OKX":
+                return response(110)
+            return response(100)
+
+        with patch.object(metamatcha, "_post_json", side_effect=post):
+            quote = metamatcha.fetch_quote(self.quote_request())
+
+        self.assertEqual(quote["aggregator"], "OKX")
+        self.assertEqual(quote["outAmount"], "110")
+        self.assertIn("candidates", quote)
+        self.assertEqual(len(quote["candidates"]), 2)
+        self.assertEqual(quote["candidates"][0]["aggregator"], "OKX")
+        self.assertEqual(quote["candidates"][0]["outAmount"], "110")
+        self.assertEqual(quote["candidates"][1]["aggregator"], "0x")
+        self.assertEqual(quote["candidates"][1]["outAmount"], "105")
+        import json
+        serialized = json.dumps(quote)
+        self.assertIn('"candidates":', serialized)
+
 
 if __name__ == "__main__":
     unittest.main()
+

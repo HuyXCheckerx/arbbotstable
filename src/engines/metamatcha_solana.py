@@ -181,12 +181,12 @@ def _simulation_succeeded(simulation: dict[str, Any]) -> bool:
     return True
 
 
-def select_best_quote(
+def select_candidate_quotes(
     responses: dict[str, dict[str, Any]],
     *,
     sell_amount: int,
     taker: str,
-) -> tuple[str, dict[str, Any], dict[str, Any]]:
+) -> list[tuple[int, str, dict[str, Any], dict[str, Any]]]:
     candidates: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
     errors: list[str] = []
     for aggregator, response in responses.items():
@@ -212,8 +212,51 @@ def select_best_quote(
     if not candidates:
         detail = "; ".join(errors) or "no aggregator returned a response"
         raise RuntimeError(f"MetaMatcha returned no simulated executable quote ({detail})")
-    _, aggregator, quote, simulation = max(candidates, key=lambda item: item[0])
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates
+
+
+def select_best_quote(
+    responses: dict[str, dict[str, Any]],
+    *,
+    sell_amount: int,
+    taker: str,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    candidates = select_candidate_quotes(responses, sell_amount=sell_amount, taker=taker)
+    _, aggregator, quote, simulation = candidates[0]
     return aggregator, quote, simulation
+
+
+def _format_quote(
+    aggregator: str,
+    quote: dict[str, Any],
+    simulation: dict[str, Any],
+    *,
+    input_mint: str,
+    output_mint: str,
+    sell_amount: int,
+    slippage_bps: int,
+) -> dict[str, Any]:
+    buy_amount = int(str(quote["buyAmount"]))
+    minimum_out = buy_amount * (10_000 - slippage_bps) // 10_000
+    sources = quote.get("sources") if isinstance(quote.get("sources"), list) else []
+    return {
+        "provider": "MetaMatcha",
+        "aggregator": aggregator,
+        "inputMint": input_mint,
+        "outputMint": output_mint,
+        "inAmount": str(sell_amount),
+        "outAmount": str(buy_amount),
+        "otherAmountThreshold": str(minimum_out),
+        "swapMode": "ExactIn",
+        "slippageBps": slippage_bps,
+        "routePlan": [{"swapInfo": {"label": f"{aggregator}: {', '.join(map(str, sources))}"}}],
+        "serializedTransaction": quote["transaction"],
+        "computeUnitLimit": quote.get("computeUnitLimit"),
+        "priorityFee": quote.get("priorityFee"),
+        "lastValidBlockHeight": quote.get("lastValidBlockHeight"),
+        "simulation": simulation,
+    }
 
 
 def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
@@ -282,7 +325,7 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
                     failures.append(f"{name}: {exc}")
 
     try:
-        aggregator, quote, simulation = select_best_quote(
+        candidates = select_candidate_quotes(
             responses, sell_amount=sell_amount, taker=taker
         )
     except RuntimeError as exc:
@@ -294,26 +337,21 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError(f"{exc}; request failures: {'; '.join(failures)}") from exc
         raise
 
-    buy_amount = int(str(quote["buyAmount"]))
-    minimum_out = buy_amount * (10_000 - slippage_bps) // 10_000
-    sources = quote.get("sources") if isinstance(quote.get("sources"), list) else []
-    return {
-        "provider": "MetaMatcha",
-        "aggregator": aggregator,
-        "inputMint": input_mint,
-        "outputMint": output_mint,
-        "inAmount": str(sell_amount),
-        "outAmount": str(buy_amount),
-        "otherAmountThreshold": str(minimum_out),
-        "swapMode": "ExactIn",
-        "slippageBps": slippage_bps,
-        "routePlan": [{"swapInfo": {"label": f"{aggregator}: {', '.join(map(str, sources))}"}}],
-        "serializedTransaction": quote["transaction"],
-        "computeUnitLimit": quote.get("computeUnitLimit"),
-        "priorityFee": quote.get("priorityFee"),
-        "lastValidBlockHeight": quote.get("lastValidBlockHeight"),
-        "simulation": simulation,
-    }
+    candidate_quotes = [
+        _format_quote(
+            c_aggregator,
+            c_quote,
+            c_sim,
+            input_mint=input_mint,
+            output_mint=output_mint,
+            sell_amount=sell_amount,
+            slippage_bps=slippage_bps,
+        )
+        for _, c_aggregator, c_quote, c_sim in candidates
+    ]
+    best_quote = dict(candidate_quotes[0])
+    best_quote["candidates"] = candidate_quotes
+    return best_quote
 
 
 def main() -> int:

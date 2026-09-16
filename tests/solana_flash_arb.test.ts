@@ -36,8 +36,18 @@ import {
   stableOutputSymbol,
   classifySignatureStatus,
   effectiveScaledMinimumProfitRaw,
+  prerunCandidateQuotes,
+  type JupiterQuote,
+  type StableLeg,
 } from "../src/engines/solana_flash_arb.js";
-import { PublicKey } from "@solana/web3.js";
+import {
+  PublicKey,
+  Keypair,
+  SystemProgram,
+  TransactionMessage,
+  VersionedTransaction,
+  type Connection,
+} from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 
 test("uses the Solana mainnet-beta genesis hash", () => {
@@ -479,5 +489,238 @@ test("proportional profit scaling calculates minimums according to principal siz
   assert.equal(
     effectiveScaledMinimumProfitRaw(base100kProfit, 120_000_000_000n, max100kLoan),
     1_000_000n,
+  );
+});
+
+function createMockMatchaQuote(
+  wallet: PublicKey,
+  aggregator: string,
+  buyAmount: bigint,
+): JupiterQuote {
+  const message = new TransactionMessage({
+    payerKey: wallet,
+    recentBlockhash: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: wallet,
+        toPubkey: PublicKey.default,
+        lamports: 100,
+      }),
+    ],
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+  const serializedTransaction = Buffer.from(tx.serialize()).toString("base64");
+
+  return {
+    provider: "MetaMatcha",
+    aggregator,
+    inputMint: USDG_MINT.toBase58(),
+    outputMint: PYUSD_MINT.toBase58(),
+    inAmount: "10000000",
+    outAmount: buyAmount.toString(),
+    otherAmountThreshold: buyAmount.toString(),
+    swapMode: "ExactIn",
+    slippageBps: 0,
+    routePlan: [{ swapInfo: { label: aggregator } }],
+    serializedTransaction,
+  };
+}
+
+test("prerunCandidateQuotes filters out poisoned quotes and selects the best passing candidate", async () => {
+  const wallet = Keypair.generate();
+  const dflow = createMockMatchaQuote(wallet.publicKey, "DFlow", 10_050_000n);
+  const zerox = createMockMatchaQuote(wallet.publicKey, "0x", 10_030_000n);
+  const jup = createMockMatchaQuote(wallet.publicKey, "Jupiter", 10_020_000n);
+
+  const firstQuote: JupiterQuote = {
+    ...dflow,
+    candidates: [dflow, zerox, jup],
+  };
+
+  const mockConnection = {
+    getAccountInfo: async () => null,
+    getMultipleAccountsInfo: async () => [],
+  } as unknown as Connection;
+
+  const mockStableLeg: StableLeg = {
+    instruction: SystemProgram.transfer({
+      fromPubkey: wallet.publicKey,
+      toPubkey: PublicKey.default,
+      lamports: 10,
+    }),
+    outputRaw: 10_000_000n,
+    executionFeeLamports: 10_000n,
+    nonce: 1n,
+    deadline: 9999999999n,
+  };
+
+  const mockConfig: any = {
+    keypair: wallet,
+    swapOrder: "stable-first",
+    dexProvider: "metamatcha",
+    loanSymbol: "PYUSD",
+    intermediateSymbol: "USDG",
+    probeComputeUnitLimit: 1_400_000,
+    maxAccounts: 24,
+    customLookupTableAddresses: [],
+  };
+
+  let dflowSimulated = false;
+  const mockSimulate = async (_conn: Connection, tx: VersionedTransaction) => {
+    if (!dflowSimulated) {
+      dflowSimulated = true;
+      throw new Error("Atomic simulation reverted: custom program error: 0x1771");
+    }
+    return 214_000;
+  };
+
+  const winning = await prerunCandidateQuotes(
+    mockConfig,
+    mockConnection,
+    wallet.publicKey,
+    undefined,
+    undefined,
+    10_000_000n,
+    true,
+    firstQuote,
+    { inputRaw: 10_000_000n, outputRaw: 10_000_000n } as any,
+    10_000n,
+    [],
+    [],
+    "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    mockSimulate,
+    mockStableLeg,
+  );
+
+  assert.equal(winning.aggregatorName, "0x");
+  assert.equal(winning.grossProfitRaw, 30_000n);
+  assert.equal(winning.probeUnits, 214_000);
+});
+
+test("prerunCandidateQuotes throws clear error when all candidate quotes are poisoned", async () => {
+  const wallet = Keypair.generate();
+  const dflow = createMockMatchaQuote(wallet.publicKey, "DFlow", 10_050_000n);
+  const zerox = createMockMatchaQuote(wallet.publicKey, "0x", 10_030_000n);
+
+  const firstQuote: JupiterQuote = {
+    ...dflow,
+    candidates: [dflow, zerox],
+  };
+
+  const mockConnection = {
+    getAccountInfo: async () => null,
+    getMultipleAccountsInfo: async () => [],
+  } as unknown as Connection;
+
+  const mockStableLeg: StableLeg = {
+    instruction: SystemProgram.transfer({
+      fromPubkey: wallet.publicKey,
+      toPubkey: PublicKey.default,
+      lamports: 10,
+    }),
+    outputRaw: 10_000_000n,
+    executionFeeLamports: 10_000n,
+    nonce: 1n,
+    deadline: 9999999999n,
+  };
+
+  const mockConfig: any = {
+    keypair: wallet,
+    swapOrder: "stable-first",
+    dexProvider: "metamatcha",
+    loanSymbol: "PYUSD",
+    intermediateSymbol: "USDG",
+    probeComputeUnitLimit: 1_400_000,
+    maxAccounts: 24,
+    customLookupTableAddresses: [],
+  };
+
+  const allPoisonedSimulate = async () => {
+    throw new Error("Atomic simulation reverted: custom program error: 0x1771");
+  };
+
+  await assert.rejects(
+    prerunCandidateQuotes(
+      mockConfig,
+      mockConnection,
+      wallet.publicKey,
+      undefined,
+      undefined,
+      10_000_000n,
+      true,
+      firstQuote,
+      { inputRaw: 10_000_000n, outputRaw: 10_000_000n } as any,
+      10_000n,
+      [],
+      [],
+      "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      allPoisonedSimulate,
+      mockStableLeg,
+    ),
+    /All candidate quotes failed atomic prerun simulation or fell below the profit floor/,
+  );
+});
+
+test("prerunCandidateQuotes rejects candidate quotes that fall below scaled minimum floor", async () => {
+  const wallet = Keypair.generate();
+  const dflow = createMockMatchaQuote(wallet.publicKey, "DFlow", 10_050_000n);
+  const zerox = createMockMatchaQuote(wallet.publicKey, "0x", 10_005_000n);
+
+  const firstQuote: JupiterQuote = {
+    ...dflow,
+    candidates: [dflow, zerox],
+  };
+
+  const mockConnection = {
+    getAccountInfo: async () => null,
+    getMultipleAccountsInfo: async () => [],
+  } as unknown as Connection;
+
+  const mockStableLeg: StableLeg = {
+    instruction: SystemProgram.transfer({
+      fromPubkey: wallet.publicKey,
+      toPubkey: PublicKey.default,
+      lamports: 10,
+    }),
+    outputRaw: 10_000_000n,
+    executionFeeLamports: 10_000n,
+    nonce: 1n,
+    deadline: 9999999999n,
+  };
+
+  const mockConfig: any = {
+    keypair: wallet,
+    swapOrder: "stable-first",
+    dexProvider: "metamatcha",
+    loanSymbol: "PYUSD",
+    intermediateSymbol: "USDG",
+    probeComputeUnitLimit: 1_400_000,
+    maxAccounts: 24,
+    customLookupTableAddresses: [],
+  };
+
+  const dflowPoisonedSimulate = async () => {
+    throw new Error("Atomic simulation reverted: custom program error: 0x1771");
+  };
+
+  await assert.rejects(
+    prerunCandidateQuotes(
+      mockConfig,
+      mockConnection,
+      wallet.publicKey,
+      undefined,
+      undefined,
+      10_000_000n,
+      true,
+      firstQuote,
+      { inputRaw: 10_000_000n, outputRaw: 10_000_000n } as any,
+      10_000n,
+      [],
+      [],
+      "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      dflowPoisonedSimulate,
+      mockStableLeg,
+    ),
+    /All candidate quotes failed atomic prerun simulation or fell below the profit floor/,
   );
 });
