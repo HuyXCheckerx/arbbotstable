@@ -191,9 +191,29 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
         cookies = []
         logger.warning("[CookieManager] Headless solve failed: %s", exc)
 
-    elapsed = round(time.perf_counter() - t0, 2)
     has_vcrcs = any(c.get("name") == "_vcrcs" for c in cookies)
     has_cf = any(c.get("name") == "cf_clearance" for c in cookies)
+
+    # Fall back to direct connection if proxy failed to acquire clearance tokens
+    if proxy_url and not (has_vcrcs or has_cf):
+        logger.warning(
+            "[CookieManager] Proxy failed to collect clearance cookies; retrying directly without proxy..."
+        )
+        direct_kwargs = dict(launch_kwargs)
+        direct_kwargs.pop("proxy", None)
+        if "--no-proxy-server" not in direct_kwargs.get("args", []):
+            direct_kwargs["args"] = list(direct_kwargs.get("args", [])) + ["--no-proxy-server"]
+        try:
+            direct_cookies = _execute_browser_solve(direct_kwargs)
+            if any(c.get("name") in ("_vcrcs", "cf_clearance") for c in direct_cookies):
+                cookies = direct_cookies
+                has_vcrcs = any(c.get("name") == "_vcrcs" for c in cookies)
+                has_cf = any(c.get("name") == "cf_clearance" for c in cookies)
+                logger.info("[CookieManager] Direct fallback solve succeeded! Clearance cookie acquired.")
+        except Exception as exc:
+            logger.warning("[CookieManager] Direct fallback solve failed: %s", exc)
+
+    elapsed = round(time.perf_counter() - t0, 2)
     logger.info(
         "[CookieManager] Collected %d cookies in %ss (_vcrcs: %s, cf_clearance: %s)",
         len(cookies),
