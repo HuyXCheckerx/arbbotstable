@@ -20,7 +20,7 @@ notepad .env
 
 # To run solana-only:
 .\venv\Scripts\python.exe sniper.py --chains solana --pairs PYUSD/USDG --live --confirm-live EXECUTE_PROFIT_SNIPER
-
+.\venv\Scripts\python.exe sniper.py --pairs PYUSD/USDG --live --confirm-live EXECUTE_PROFIT_SNIPER
 # =====================================================================
 # LINUX VPS SETUP (IF USING LINUX)
 # =====================================================================
