@@ -1,0 +1,10 @@
+# Robots.txt for VietDeFi (VND-X)
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /admin/
+Disallow: /dashboard/
+Disallow: /kyc/private/
+
+# Sitemap location
+Sitemap: https://vietdefi.vn/sitemap.xml

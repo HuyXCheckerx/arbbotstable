@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- Homepage & Core Swap -->
+  <url>
+    <loc>https://vietdefi.vn/</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <!-- 1:1 Stablecoin Swap -->
+  <url>
+    <loc>https://vietdefi.vn/swap</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <!-- VNDL Stablecoin Vault & CDP -->
+  <url>
+    <loc>https://vietdefi.vn/vndl-vault</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <!-- Crypto to VND Lending Market -->
+  <url>
+    <loc>https://vietdefi.vn/lending</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <!-- Vietnam Crypto Tax Calculator & Service -->
+  <url>
+    <loc>https://vietdefi.vn/tax-service</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <!-- Legal & Regulatory Sandbox (Resolution 05/2025/NQ-CP) -->
+  <url>
+    <loc>https://vietdefi.vn/legal-compliance</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <!-- Transaction Confirmation / Thank You Page -->
+  <url>
+    <loc>https://vietdefi.vn/thank-you</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.5</priority>
+  </url>
+</urlset>

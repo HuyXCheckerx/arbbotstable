@@ -1777,6 +1777,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         watcher.start()
 
+        # Proactively verify or purchase working residential proxy before solving cookies
+        try:
+            from scripts.manage_proxyisp import setup_sniper_proxy
+            setup_sniper_proxy(logger=logger)
+        except Exception as exc:
+            logger.warning("Failed to verify/renew sniper proxy: %s", exc)
+
         # Proactively maintain fresh Cloudflare/Kasada cookies for child quote processes
         try:
             from src.engines.matcha_cookie_manager import get_valid_cookies, start_background_rotator
