@@ -450,19 +450,25 @@ def failure_category(detail: str) -> str:
         or "pool has no remaining" in lowered
     ):
         return "capacity"
-    transient = any(
-        marker in lowered
-        for marker in (
-            "http 429",
-            "http 500",
-            "http 502",
-            "http 503",
-            "http 504",
-            "internal server error",
-            "rate limits exceeded",
-            "timed out",
-            "temporarily failed",
-            "connection reset",
+    transient = (
+        bool(re.search(r"\bhttp\s+(?:429|5\d\d)\b", lowered))
+        or any(
+            marker in lowered
+            for marker in (
+                "internal server error",
+                "rate limits exceeded",
+                "timed out",
+                "temporarily failed",
+                "connection reset",
+                "bad gateway",
+                "gateway timeout",
+                "error 520",
+                "error 521",
+                "error 522",
+                "error 523",
+                "error 524",
+                "error 525",
+            )
         )
     )
     if transient and "stable.com" in lowered:

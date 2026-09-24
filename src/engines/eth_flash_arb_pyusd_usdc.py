@@ -1005,7 +1005,7 @@ class HttpJsonClient:
                 raise ProviderRateLimitedError(response, url)
             detail = f": {excerpt}" if excerpt else ""
             message = f"{url} returned HTTP {response.status_code}{detail}"
-            if response.status_code in (502, 503, 504):
+            if response.status_code >= 500:
                 raise RetryableArbError(message)
             raise ArbError(message)
         try:

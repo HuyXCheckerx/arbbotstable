@@ -650,7 +650,7 @@ class HttpJsonClient:
             message = f"{url} returned HTTP {response.status_code}"
             if excerpt:
                 message += f": {excerpt}"
-            if response.status_code in (429, 502, 503, 504):
+            if response.status_code == 429 or response.status_code >= 500:
                 raise RetryableArbError(message)
             raise ArbError(message)
         try:

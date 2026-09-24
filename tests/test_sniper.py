@@ -627,6 +627,13 @@ class CrosschainSniperTests(unittest.TestCase):
             "transient-stable",
         )
         self.assertEqual(
+            failure_category(
+                "https://api-defi.stable.com/swap/status returned HTTP 520: "
+                '{"type":"...cloudflare...error-520/","title":"Error 520"}'
+            ),
+            "transient-stable",
+        )
+        self.assertEqual(
             failure_category("MetaMatcha HTTP 429; x-vercel-mitigated=challenge"),
             "access-blocked-matcha",
         )
