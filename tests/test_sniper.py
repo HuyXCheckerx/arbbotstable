@@ -182,6 +182,7 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertEqual(command[command.index("--loan-token") + 1], "USDG")
         self.assertEqual(command[command.index("--intermediate-token") + 1], "USDC")
         self.assertEqual(command[command.index("--swap-order") + 1], "stable-first")
+        self.assertEqual(command[command.index("--base-amount") + 1], "100000")
         self.assertEqual(command[command.index("--min-profit") + 1], "5.000001")
         self.assertEqual(
             command[command.index("--min-net-profit") + 1], "5.000001"
@@ -864,6 +865,26 @@ class CrosschainSniperTests(unittest.TestCase):
     def test_eth_max_base_fee_gwei_flag(self):
         args = parse_args(["--eth-max-base-fee-gwei", "1.5"])
         self.assertEqual(args.eth_max_base_fee_gwei, Decimal("1.5"))
+
+    def test_fetch_ethereum_base_fee_gwei_failover(self):
+        # First call fails with exception, second call succeeds
+        mock_success = Mock()
+        mock_success.read.return_value = (
+            b'{"jsonrpc":"2.0","id":1,"result":{"baseFeePerGas":"0x77359400"}}'
+        )
+        mock_success.__enter__ = Mock(return_value=mock_success)
+        mock_success.__exit__ = Mock(return_value=False)
+
+        def mock_urlopen(req, timeout=5.0):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "dead-rpc" in url:
+                raise Exception("Connection timed out")
+            return mock_success
+
+        with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+            fee = fetch_ethereum_base_fee_gwei(["http://dead-rpc.invalid", "http://live-rpc.invalid"])
+            # 0x77359400 = 2000000000 wei = 2.0 Gwei
+            self.assertEqual(fee, Decimal("2.0"))
 
 
 if __name__ == "__main__":

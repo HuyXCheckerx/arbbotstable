@@ -37,6 +37,8 @@ import {
   classifySignatureStatus,
   effectiveScaledMinimumProfitRaw,
   prerunCandidateQuotes,
+  parseSolanaRpcEndpoints,
+  wrapConnectionWithResilientRpc,
   type JupiterQuote,
   type StableLeg,
 } from "../src/engines/solana_flash_arb.js";
@@ -724,3 +726,73 @@ test("prerunCandidateQuotes rejects candidate quotes that fall below scaled mini
     /All candidate quotes failed atomic prerun simulation or fell below the profit floor/,
   );
 });
+
+test("parseSolanaRpcEndpoints deduplicates primary, fallbacks, and env variables", () => {
+  const origRpc = process.env.SOLANA_RPC_URL;
+  const origFallbacks = process.env.SOLANA_RPC_FALLBACKS;
+  try {
+    process.env.SOLANA_RPC_URL = "https://custom-1.solana.com,https://custom-2.solana.com";
+    process.env.SOLANA_RPC_FALLBACKS = "https://custom-3.solana.com,https://custom-1.solana.com";
+
+    const endpoints = parseSolanaRpcEndpoints(
+      "https://primary.solana.com",
+      ["https://extra.solana.com"],
+    );
+
+    assert.equal(endpoints[0], "https://primary.solana.com");
+    assert.ok(endpoints.includes("https://extra.solana.com"));
+    assert.ok(endpoints.includes("https://custom-1.solana.com"));
+    assert.ok(endpoints.includes("https://custom-2.solana.com"));
+    assert.ok(endpoints.includes("https://custom-3.solana.com"));
+    assert.ok(endpoints.includes("https://api.mainnet-beta.solana.com"));
+    // Ensure no duplicates
+    assert.equal(new Set(endpoints).size, endpoints.length);
+  } finally {
+    if (origRpc !== undefined) process.env.SOLANA_RPC_URL = origRpc;
+    else delete process.env.SOLANA_RPC_URL;
+    if (origFallbacks !== undefined) process.env.SOLANA_RPC_FALLBACKS = origFallbacks;
+    else delete process.env.SOLANA_RPC_FALLBACKS;
+  }
+});
+
+test("wrapConnectionWithResilientRpc falls back to backup endpoint when primary fails", async () => {
+  const mockConn: any = {
+    rpcEndpoint: "https://dead-primary-rpc.invalid",
+    _rpcRequest: async () => {
+      throw new Error("Primary connection refused");
+    },
+    _rpcBatchRequest: async () => {
+      throw new Error("Primary batch connection refused");
+    },
+  };
+
+  const wrapped = wrapConnectionWithResilientRpc(mockConn, [
+    "https://backup-mock-rpc.invalid",
+  ]);
+
+  // Intercept fetch globally or verify wrap behavior
+  const origFetch = globalThis.fetch;
+  let fetchedUrl = "";
+  (globalThis as any).fetch = async (url: string, init: any) => {
+    fetchedUrl = url;
+    return {
+      status: 200,
+      json: async () => ({
+        jsonrpc: "2.0",
+        id: "1",
+        result: { value: { blockhash: "test-hash-123", lastValidBlockHeight: 100 } },
+      }),
+    };
+  };
+
+  try {
+    const res = await (wrapped as any)._rpcRequest("getLatestBlockhash", [
+      { commitment: "confirmed" },
+    ]);
+    assert.equal(res.result.value.blockhash, "test-hash-123");
+    assert.ok(fetchedUrl.length > 0);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+

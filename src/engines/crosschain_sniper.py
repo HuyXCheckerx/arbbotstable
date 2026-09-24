@@ -274,6 +274,8 @@ def build_route_invocation(
             route.intermediate,
             "--swap-order",
             route.swap_order,
+            "--base-amount",
+            os.getenv("ETH_ARB_BASE_AMOUNT", "100000"),
             "--min-profit",
             floor,
             "--min-net-profit",
@@ -468,6 +470,8 @@ def failure_category(detail: str) -> str:
                 "error 523",
                 "error 524",
                 "error 525",
+                "could not connect",
+                "cannot connect",
             )
         )
     )
@@ -717,11 +721,40 @@ def parse_gas_fee_gwei(value: object) -> Decimal | None:
 
 
 def fetch_ethereum_base_fee_gwei(
-    rpc_url: str,
+    rpc_url: str | list[str],
     timeout: float = 5.0,
 ) -> Decimal | None:
     if not rpc_url:
         return None
+    candidates: list[str] = []
+
+    def _add(u: str) -> None:
+        u = u.strip()
+        if u and u not in candidates:
+            candidates.append(u)
+
+    if isinstance(rpc_url, str):
+        for u in rpc_url.split(","):
+            _add(u)
+    else:
+        for item in rpc_url:
+            for u in item.split(","):
+                _add(u)
+
+    env_fallbacks = os.getenv("ETH_RPC_FALLBACKS", "")
+    if env_fallbacks:
+        for u in env_fallbacks.split(","):
+            _add(u)
+
+    for fallback in [
+        "https://eth.drpc.org",
+        "https://rpc.mevblocker.io",
+        "https://eth-mainnet.public.blastapi.io",
+        "https://eth.blockrazor.xyz",
+        "https://1rpc.io/eth",
+    ]:
+        _add(fallback)
+
     try:
         import urllib.request
 
@@ -733,24 +766,29 @@ def fetch_ethereum_base_fee_gwei(
                 "id": 1,
             }
         ).encode("utf-8")
-        req = urllib.request.Request(
-            rpc_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "arbbot-sniper/1.0",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            result = body.get("result")
-            if not isinstance(result, dict):
-                return None
-            base_fee_hex = result.get("baseFeePerGas")
-            if not base_fee_hex:
-                return None
-            base_fee_wei = int(base_fee_hex, 16)
-            return Decimal(base_fee_wei) / Decimal(10**9)
+        for endpoint in candidates:
+            try:
+                req = urllib.request.Request(
+                    endpoint,
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "arbbot-sniper/1.0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                    result = body.get("result")
+                    if not isinstance(result, dict):
+                        continue
+                    base_fee_hex = result.get("baseFeePerGas")
+                    if not base_fee_hex:
+                        continue
+                    base_fee_wei = int(base_fee_hex, 16)
+                    return Decimal(base_fee_wei) / Decimal(10**9)
+            except Exception:
+                continue
+        return None
     except Exception:
         return None
 
@@ -1351,7 +1389,7 @@ def worker(
     logger: logging.Logger,
     dashboard: SniperDashboardFeed | None = None,
     eth_max_base_fee_gwei: Decimal | None = None,
-    eth_rpc_url: str = "https://ethereum-rpc.publicnode.com",
+    eth_rpc_url: str = "https://eth.drpc.org",
 ) -> None:
     route_deadlines: dict[str, float] = {}
     while not stop.is_set():
@@ -1738,16 +1776,16 @@ def main(argv: list[str] | None = None) -> int:
         len(routes),
     )
     logger.info(
-        "RULE    | Ethereum | guaranteed net >= %s per completed cycle (strict floor)",
+        "RULE    | Ethereum | guaranteed net >= %s per 100k cycle (scaled proportionally for smaller sizes)",
         amount_text(route_execution_floor(Route("ethereum", "USDC/USDG"), args.threshold_usd)),
     )
     logger.info(
-        "RULE    | Solana   | guaranteed net >= %s per completed cycle (strict floor)",
+        "RULE    | Solana   | guaranteed net >= %s per 100k cycle (scaled proportionally for smaller sizes)",
         amount_text(route_execution_floor(Route("solana", "USDC/USDG"), args.threshold_usd)),
     )
     eth_rpc_url = (
         os.getenv("ETH_RPC_URL")
-        or "https://ethereum-rpc.publicnode.com"
+        or "https://eth.drpc.org"
     )
     if args.eth_max_base_fee_gwei is not None:
         logger.info(

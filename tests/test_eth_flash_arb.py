@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 import json
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 import sys
 import tempfile
 from pathlib import Path
@@ -37,6 +37,7 @@ from eth_flash_arb import (
     raw_to_signed_amount,
     select_best_matcha_quote,
     wei_cost_usdc_raw,
+    effective_scaled_minimum_profit_raw as eth_arb_effective_scaled_minimum_profit_raw,
 )
 import eth_flash_arb_pyusd_usdc as pyusd_arb
 
@@ -641,6 +642,97 @@ class EthereumFlashArbTests(unittest.TestCase):
         self.assertEqual(plan["transactionStatus"], "dropped")
         self.assertEqual(plan["receiptConfirmation"], "not-found-nonce-unused")
 
+    def test_resolve_eth_rpc_endpoints_deduplication(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ETH_RPC_URL": "https://custom-1.eth,https://custom-2.eth",
+                "ETH_RPC_FALLBACKS": "https://custom-3.eth,https://custom-1.eth",
+            },
+            clear=False,
+        ):
+            endpoints = pyusd_arb.resolve_eth_rpc_endpoints("https://primary.eth")
+            self.assertEqual(endpoints[0], "https://primary.eth")
+            self.assertIn("https://custom-1.eth", endpoints)
+            self.assertIn("https://custom-2.eth", endpoints)
+            self.assertIn("https://custom-3.eth", endpoints)
+            self.assertIn("https://eth.drpc.org", endpoints)
+            # Ensure no duplicates
+            self.assertEqual(len(endpoints), len(set(endpoints)))
+
+    def test_get_working_web3_failover(self):
+        mock_web3_cls = MagicMock()
+        mock_dead_w3 = MagicMock()
+        mock_dead_w3.is_connected.return_value = False
+
+        mock_alive_w3 = MagicMock()
+        mock_alive_w3.is_connected.return_value = True
+
+        def side_effect(provider):
+            if provider.endpoint_uri == "https://dead-rpc.invalid":
+                return mock_dead_w3
+            return mock_alive_w3
+
+        mock_web3_cls.side_effect = side_effect
+        mock_web3_cls.HTTPProvider = lambda endpoint, request_kwargs=None: type(
+            "FakeProvider", (), {"endpoint_uri": endpoint}
+        )()
+
+        with patch.object(pyusd_arb, "require_web3", return_value=mock_web3_cls):
+            with patch.dict(
+                os.environ,
+                {
+                    "ETH_RPC_URL": "",
+                    "ETH_RPC_FALLBACKS": "https://backup-rpc.invalid",
+                },
+                clear=False,
+            ):
+                w3, working_url = pyusd_arb.get_working_web3("https://dead-rpc.invalid")
+                self.assertEqual(working_url, "https://backup-rpc.invalid")
+                self.assertIs(w3, mock_alive_w3)
+
+    def test_effective_scaled_minimum_profit_raw(self):
+        base_profit_raw = 4_000_001  # $4.000001
+        base_loan_raw = 100_000_000_000  # 100,000 tokens
+
+        for fn in (
+            pyusd_arb.effective_scaled_minimum_profit_raw,
+            eth_arb_effective_scaled_minimum_profit_raw,
+        ):
+            # Full 100k loan -> exact base minimum
+            self.assertEqual(fn(base_profit_raw, base_loan_raw, base_loan_raw), 4_000_001)
+
+            # Scaled down to ~56,850 loan
+            loan_56k = 56_850_000_000
+            self.assertEqual(
+                fn(base_profit_raw, loan_56k, base_loan_raw),
+                2_274_000,  # ~2.274000 tokens
+            )
+
+            # Scaled down to 15,000 loan
+            loan_15k = 15_000_000_000
+            self.assertEqual(
+                fn(base_profit_raw, loan_15k, base_loan_raw),
+                600_000,  # ~0.600000 tokens
+            )
+
+            # Very small loan clamps to absolute safety floor (10,000 = 0.01 tokens)
+            tiny_loan = 100_000_000  # 100 tokens
+            self.assertEqual(fn(base_profit_raw, tiny_loan, base_loan_raw), 10_000)
+
+            # Loan >= base loan returns base minimum
+            self.assertEqual(
+                fn(base_profit_raw, 120_000_000_000, base_loan_raw),
+                4_000_001,
+            )
+
+            # Base loan <= 0 returns base minimum
+            self.assertEqual(fn(base_profit_raw, 50_000_000_000, 0), 4_000_001)
+
+            # Zero or sub-safety floor base minimum does not inflate above base minimum
+            self.assertEqual(fn(0, 50_000_000_000, base_loan_raw), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

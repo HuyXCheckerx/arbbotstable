@@ -373,6 +373,24 @@ def capacity_limited_loan_amount(
     return adjusted
 
 
+def effective_scaled_minimum_profit_raw(
+    base_minimum_raw: int,
+    actual_loan_raw: int,
+    base_loan_raw: int,
+    absolute_safety_floor_raw: int = 10_000,
+) -> int:
+    """Scale minimum profit proportionally when the actual loan is below the base loan size."""
+    if base_loan_raw <= 0 or actual_loan_raw >= base_loan_raw:
+        return base_minimum_raw
+    scaled = (base_minimum_raw * actual_loan_raw) // base_loan_raw
+    floor_limit = (
+        base_minimum_raw
+        if base_minimum_raw < absolute_safety_floor_raw
+        else absolute_safety_floor_raw
+    )
+    return scaled if scaled > floor_limit else floor_limit
+
+
 def parse_binance_eth_usdc_price(payload: Any) -> Decimal:
     raw_val = None
     if isinstance(payload, dict):
@@ -842,19 +860,70 @@ class HttpJsonClient:
         return payload
 
 
+def resolve_eth_rpc_endpoints(primary_rpc: str | list[str] | None = None) -> list[str]:
+    """Return ordered list of unique Ethereum RPC URLs from args, env, and safe defaults."""
+    endpoints: list[str] = []
+
+    def _add(u: str) -> None:
+        u = u.strip()
+        if u and u not in endpoints:
+            endpoints.append(u)
+
+    if primary_rpc:
+        urls = [primary_rpc] if isinstance(primary_rpc, str) else primary_rpc
+        for item in urls:
+            for u in item.split(","):
+                _add(u)
+
+    env_primary = os.getenv("ETH_RPC_URL", "").strip()
+    if env_primary:
+        for u in env_primary.split(","):
+            _add(u)
+
+    env_fallbacks = os.getenv("ETH_RPC_FALLBACKS", "").strip()
+    if env_fallbacks:
+        for u in env_fallbacks.split(","):
+            _add(u)
+
+    safe_defaults = [
+        "https://eth.drpc.org",
+        "https://rpc.mevblocker.io",
+        "https://eth-mainnet.public.blastapi.io",
+        "https://eth.blockrazor.xyz",
+        "https://1rpc.io/eth",
+    ]
+    for u in safe_defaults:
+        _add(u)
+
+    return endpoints
+
+
+def get_working_web3(
+    rpc_url: str | list[str] | None = None,
+    rpc_timeout: float = 10.0,
+) -> tuple[Any, str]:
+    """Connect to the first responsive Ethereum Web3 RPC provider from primary/fallbacks."""
+    Web3 = require_web3()
+    candidates = resolve_eth_rpc_endpoints(rpc_url)
+
+    last_error: Exception | None = None
+    for endpoint in candidates:
+        try:
+            w3 = Web3(Web3.HTTPProvider(endpoint, request_kwargs={"timeout": rpc_timeout}))
+            if w3.is_connected():
+                return w3, endpoint
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error:
+        raise TransientRpcError(f"could not connect to any Ethereum RPC endpoint: {last_error}")
+    raise TransientRpcError("could not connect to Ethereum RPC endpoint")
+
+
 def fetch_live_gas_price(rpc_url: str | None = None) -> int | None:
     """Fetch live gas price in wei from connected Ethereum RPC or public fallback endpoints."""
-    rpc_candidates: list[str] = []
-    if rpc_url:
-        rpc_candidates.append(rpc_url)
-    env_rpc = os.getenv("ETH_RPC_URL")
-    if env_rpc and env_rpc not in rpc_candidates:
-        rpc_candidates.append(env_rpc)
-    rpc_candidates.extend([
-        "https://ethereum-rpc.publicnode.com",
-        "https://rpc.mevblocker.io",
-        "https://1rpc.io/eth",
-    ])
+    rpc_candidates = resolve_eth_rpc_endpoints(rpc_url)
 
     payload = json.dumps({
         "jsonrpc": "2.0",
@@ -1088,7 +1157,7 @@ def require_executor_loan_support(
     if loan_token.lower() == USDC.lower():
         return
     Web3 = require_web3()
-    web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
+    web3, _ = get_working_web3(rpc_url, rpc_timeout)
     try:
         if web3.eth.chain_id != CHAIN_ID:
             raise ArbError("Ethereum mainnet is required")
@@ -1124,7 +1193,7 @@ def prepare_transaction(
     max_fee_gwei: Decimal | None,
 ) -> tuple[Any, dict[str, Any], int, int]:
     Web3 = require_web3()
-    web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": rpc_timeout}))
+    web3, _ = get_working_web3(rpc_url, rpc_timeout)
     try:
         rpc_chain_id = web3.eth.chain_id
     except Exception as exc:
@@ -1251,8 +1320,13 @@ def parser() -> argparse.ArgumentParser:
         "--amount",
         "--amount-usdc",
         dest="amount",
-        default=setting("ETH_ARB_AMOUNT", setting("ETH_ARB_AMOUNT_USDC", "50000")),
+        default=setting("ETH_ARB_AMOUNT", setting("ETH_ARB_AMOUNT_USDC", "100000")),
         help="maximum loan amount; automatically reduced to Stable's pool capacity",
+    )
+    result.add_argument(
+        "--base-amount",
+        default=setting("ETH_ARB_BASE_AMOUNT", "100000"),
+        help="nominal base loan size used to proportionally scale minimum profit floors for smaller trade sizes",
     )
     result.add_argument(
         "--loan-token",
@@ -1375,6 +1449,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     requested_loan_amount = amount_to_raw(args.amount)
     loan_amount = requested_loan_amount
+    base_loan_amount = amount_to_raw(args.base_amount)
     min_profit = amount_to_raw(args.min_profit, allow_zero=True)
     min_net_profit = amount_to_raw(args.min_net_profit, allow_zero=True)
     loan_symbol = args.loan_token
@@ -1562,18 +1637,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     gross_profit = stable_quote.amount_out - loan_amount
+    effective_min_profit = effective_scaled_minimum_profit_raw(
+        min_profit,
+        loan_amount,
+        base_loan_amount,
+    )
+    effective_min_net_profit = effective_scaled_minimum_profit_raw(
+        min_net_profit,
+        loan_amount,
+        base_loan_amount,
+    )
     print("\n--- QUOTE BREAKDOWN ---", file=sys.stderr)
     print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
     print(f"Leg 1 (Matcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {INTERMEDIATE_SYMBOL}", file=sys.stderr)
     print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {INTERMEDIATE_SYMBOL} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
     print(f"Gross Profit:            {raw_to_signed_amount(gross_profit)} {loan_symbol}", file=sys.stderr)
+    if loan_amount < base_loan_amount:
+        print(
+            f"Scaled Minimum Profit:   {raw_to_amount(effective_min_profit)} {loan_symbol} "
+            f"(scaled proportionally from {raw_to_amount(min_profit)} {loan_symbol} base for "
+            f"{raw_to_amount(loan_amount)}/{raw_to_amount(base_loan_amount)} principal)",
+            file=sys.stderr,
+        )
     print("-----------------------\n", file=sys.stderr)
 
-    if gross_profit < min_profit:
+    if gross_profit < effective_min_profit:
         raise ArbError(
             "quoted route is below the on-chain profit floor: "
             f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
-            f"{raw_to_amount(min_profit)} {loan_symbol}"
+            f"{raw_to_amount(effective_min_profit)} {loan_symbol}"
         )
     stable_order = stable_client.create_order(
         args.executor,
@@ -1592,7 +1684,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         loan_token,
         matcha,
         stable_order,
-        min_profit,
+        effective_min_profit,
         args.gas_limit_multiplier,
         args.max_fee_gwei,
     )
@@ -1667,7 +1759,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "deadline": stable_order.deadline,
         },
         "grossProfit": raw_to_amount(gross_profit),
-        "minimumProfit": raw_to_amount(min_profit),
+        "minimumProfit": raw_to_amount(effective_min_profit),
+        "baseMinimumProfit": raw_to_amount(min_profit),
+        "baseLoanAmount": raw_to_amount(base_loan_amount),
+        "effectiveMinimumNetProfit": raw_to_amount(effective_min_net_profit),
+        "baseMinimumNetProfit": raw_to_amount(min_net_profit),
         "estimatedGas": estimated_gas,
         "gasLimit": gas_limit,
         "maxFeePerGasWei": max_fee_per_gas,
@@ -1679,11 +1775,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     if args.send:
-        if predicted_net < min_net_profit:
+        if predicted_net < effective_min_net_profit:
             raise ArbError(
                 "route is below the maximum-gas net-profit floor: "
                 f"{raw_to_signed_amount(predicted_net or 0)} {loan_symbol} < "
-                f"{raw_to_amount(min_net_profit)} {loan_symbol}"
+                f"{raw_to_amount(effective_min_net_profit)} {loan_symbol}"
             )
         signed = web3.eth.account.sign_transaction(transaction, private_key)
         transaction_hash = web3.eth.send_raw_transaction(signed.raw_transaction)

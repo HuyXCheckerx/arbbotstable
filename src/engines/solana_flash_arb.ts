@@ -209,6 +209,7 @@ export interface ConservativeCycle {
 
 interface Config {
   rpcUrl: string;
+  rpcFallbacks: string[];
   keypair: Keypair;
   dexProvider: "metamatcha" | "jupiter";
   matchaApiBase: string;
@@ -590,8 +591,20 @@ function readConfig(cli: CliOptions): Config {
         configuredDirectRoutes,
       )
     : { maxAccounts: configuredMaxAccounts, onlyDirectRoutes: configuredDirectRoutes };
+  const rawRpc = (process.env.SOLANA_RPC_URL || "").trim();
+  const rawFallbacks = (process.env.SOLANA_RPC_FALLBACKS || "").trim();
+  const allRpcCandidates = [
+    ...rawRpc.split(",").map((s) => s.trim()),
+    ...rawFallbacks.split(",").map((s) => s.trim()),
+  ].filter(Boolean);
+  const primaryRpc = allRpcCandidates[0];
+  if (!primaryRpc) {
+    throw new Error("Missing required environment variable: SOLANA_RPC_URL");
+  }
+  const rpcFallbacks = allRpcCandidates.slice(1);
   return {
-    rpcUrl: requiredEnv("SOLANA_RPC_URL"),
+    rpcUrl: primaryRpc,
+    rpcFallbacks,
     keypair: loadKeypair(requiredEnv("SOLANA_PRIVATE_KEY")),
     dexProvider,
     matchaApiBase: (
@@ -2453,49 +2466,156 @@ async function createMarginfiAccount(
   );
 }
 
-function wrapConnectionWithResilientBatchRequest(connection: Connection): Connection {
-  const fallbackUrls = [
-    connection.rpcEndpoint,
-    "https://solana-rpc.publicnode.com",
-    "https://api.mainnet-beta.solana.com",
-  ].filter((u, i, arr) => arr.indexOf(u) === i);
+export function parseSolanaRpcEndpoints(
+  primaryRpc?: string,
+  extraFallbacks?: string[],
+): string[] {
+  const envFallbacks = (process.env.SOLANA_RPC_FALLBACKS || "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+  const envUrls = (process.env.SOLANA_RPC_URL || "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
 
-  (connection as any)._rpcBatchRequest = async (requests: any[]) => {
+  const safePublicFallbacks = [
+    "https://api.mainnet-beta.solana.com",
+    "https://api.mainnet.solana.com",
+    "https://solana.publicnode.com",
+  ];
+
+  const candidates: string[] = [];
+  if (primaryRpc) {
+    for (const u of primaryRpc.split(",").map((s) => s.trim())) {
+      if (u && !candidates.includes(u)) candidates.push(u);
+    }
+  }
+  if (extraFallbacks) {
+    for (const u of extraFallbacks) {
+      const trimmed = u.trim();
+      if (trimmed && !candidates.includes(trimmed)) candidates.push(trimmed);
+    }
+  }
+  for (const u of envFallbacks) {
+    if (!candidates.includes(u)) candidates.push(u);
+  }
+  for (const u of envUrls) {
+    if (!candidates.includes(u)) candidates.push(u);
+  }
+  for (const u of safePublicFallbacks) {
+    if (!candidates.includes(u)) candidates.push(u);
+  }
+  return candidates;
+}
+
+export function wrapConnectionWithResilientRpc(
+  connection: Connection,
+  configuredFallbacks: string[] = [],
+): Connection {
+  const fallbackUrls = parseSolanaRpcEndpoints(
+    connection.rpcEndpoint,
+    configuredFallbacks,
+  );
+
+  const originalRpcRequest = (connection as any)._rpcRequest?.bind(connection);
+  (connection as any)._rpcRequest = async (methodName: string, args: any[]) => {
     let lastError: any;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < fallbackUrls.length * 2; attempt += 1) {
       const url = fallbackUrls[attempt % fallbackUrls.length];
       try {
-        const results = await Promise.all(
-          requests.map(async (req) => {
-            const body = {
-              jsonrpc: "2.0",
-              id: Math.floor(Math.random() * 1e9),
-              method: req.methodName,
-              params: req.args,
-            };
-            const res = await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            });
-            if (res.status === 429) {
-              throw new Error(`HTTP 429 rate limit on ${url}`);
-            }
-            return await res.json();
-          }),
-        );
-        if (Array.isArray(results) && results.length === requests.length) {
-          return results;
+        const body = {
+          jsonrpc: "2.0",
+          id: `${attempt + 1}`,
+          method: methodName,
+          params: args,
+        };
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              ),
+            },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+          if (res.status === 429 || res.status >= 500) {
+            throw new Error(`HTTP ${res.status} on ${url}`);
+          }
+          const data = await res.json();
+          return data;
+        } finally {
+          clearTimeout(timer);
         }
       } catch (err) {
         lastError = err;
       }
-      await new Promise((r) => setTimeout(r, (attempt + 1) * 300));
+      await new Promise((r) => setTimeout(r, 100));
     }
-    throw lastError || new Error("Failed to fetch account infos after retries");
+    if (originalRpcRequest) {
+      return await originalRpcRequest(methodName, args);
+    }
+    throw lastError || new Error(`RPC request ${methodName} failed across all endpoints`);
   };
+
+  (connection as any)._rpcBatchRequest = async (requests: any[]) => {
+    let lastError: any;
+    for (let attempt = 0; attempt < fallbackUrls.length * 2; attempt += 1) {
+      const url = fallbackUrls[attempt % fallbackUrls.length];
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        try {
+          const results = await Promise.all(
+            requests.map(async (req) => {
+              const body = {
+                jsonrpc: "2.0",
+                id: Math.floor(Math.random() * 1e9),
+                method: req.methodName,
+                params: req.args,
+              };
+              const res = await fetch(url, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                  ),
+                },
+                body: JSON.stringify(body),
+                signal: controller.signal,
+              });
+              if (res.status === 429 || res.status >= 500) {
+                throw new Error(`HTTP ${res.status} on ${url}`);
+              }
+              return await res.json();
+            }),
+          );
+          if (Array.isArray(results) && results.length === requests.length) {
+            return results;
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (err) {
+        lastError = err;
+      }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    throw lastError || new Error("Failed to fetch batch requests after retries");
+  };
+
   return connection;
 }
+
+export const wrapConnectionWithResilientBatchRequest = wrapConnectionWithResilientRpc;
 
 async function main(): Promise<void> {
   const cli = parseCli(process.argv.slice(2));
@@ -2505,8 +2625,9 @@ async function main(): Promise<void> {
       "Solend flash loans are not implemented by this engine; use --provider marginfi or auto",
     );
   }
-  const connection = wrapConnectionWithResilientBatchRequest(
+  const connection = wrapConnectionWithResilientRpc(
     new Connection(config.rpcUrl, config.commitment),
+    config.rpcFallbacks,
   );
   const walletAddress = config.keypair.publicKey;
 
