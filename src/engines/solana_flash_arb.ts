@@ -2617,6 +2617,76 @@ export function wrapConnectionWithResilientRpc(
 
 export const wrapConnectionWithResilientBatchRequest = wrapConnectionWithResilientRpc;
 
+export const JITO_BLOCK_ENGINES = [
+  "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles",
+];
+
+export const JITO_TIP_ACCOUNTS = [
+  "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+  "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+  "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+  "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+  "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+  "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+  "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+  "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+];
+
+export async function broadcastJitoOrFallback(
+  connection: Connection,
+  transaction: VersionedTransaction,
+  config: Config,
+): Promise<{ signature: string; method: string }> {
+  const enableJito = (process.env.SOL_ENABLE_JITO || "true").trim().toLowerCase() !== "false";
+  const jitoEngineUrl = process.env.SOL_JITO_ENGINE_URL || JITO_BLOCK_ENGINES[0];
+
+  if (enableJito) {
+    try {
+      const serialized = bs58.encode(transaction.serialize());
+      const payload = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "sendBundle",
+        params: [[serialized]],
+      });
+
+      const response = await fetch(jitoEngineUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+      });
+
+      if (response.ok) {
+        const body = (await response.json()) as any;
+        if (body.result) {
+          const sig = bs58.encode(transaction.signatures[0]);
+          console.log(`[Jito] Bundle successfully submitted to Block Engine: ${body.result}`);
+          return { signature: sig, method: "jito" };
+        }
+        if (body.error) {
+          console.warn(`[Jito] Bundle rejected: ${JSON.stringify(body.error)}`);
+        }
+      } else {
+        console.warn(`[Jito] HTTP ${response.status} from Block Engine`);
+      }
+    } catch (err: any) {
+      console.warn(`[Jito] Bundle submission failed (${err?.message}); falling back to standard RPC...`);
+    }
+  }
+
+  // Fallback to existing standard RPCs
+  console.log(`[Privacy RPC] Falling back to standard Solana RPC (${config.rpcUrl})...`);
+  const signature = await connection.sendRawTransaction(transaction.serialize(), {
+    skipPreflight: true,
+    preflightCommitment: config.commitment,
+  });
+  return { signature, method: "standard-rpc" };
+}
+
 async function main(): Promise<void> {
   const cli = parseCli(process.argv.slice(2));
   const config = readConfig(cli);
@@ -3010,12 +3080,15 @@ async function main(): Promise<void> {
   }
 
   await assertMainnet(connection);
-  const signature = await connection.sendRawTransaction(transaction.serialize(), {
-    skipPreflight: true,
-    preflightCommitment: config.commitment,
-  });
+  const broadcastResult = await broadcastJitoOrFallback(
+    connection,
+    transaction,
+    config,
+  );
+  const signature = broadcastResult.signature;
   plan.transactionSignature = signature;
   plan.transactionStatus = "submitted";
+  plan.broadcastMethod = broadcastResult.method;
   writePlan(config.outputPath, plan);
   console.log(`Submitted: https://solscan.io/tx/${signature}`);
   try {

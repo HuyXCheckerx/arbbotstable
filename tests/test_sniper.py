@@ -39,12 +39,14 @@ from crosschain_sniper import (
     readable_failure,
     retry_after_seconds,
     route_execution_floor,
+    run_ethereum_route_direct,
     run_route,
     selected_routes,
     strict_execution_floor,
     subprocess_output_text,
     unresolved_submission,
     worker,
+    is_subprocess_mocked,
 )
 
 
@@ -885,6 +887,86 @@ class CrosschainSniperTests(unittest.TestCase):
             fee = fetch_ethereum_base_fee_gwei(["http://dead-rpc.invalid", "http://live-rpc.invalid"])
             # 0x77359400 = 2000000000 wei = 2.0 Gwei
             self.assertEqual(fee, Decimal("2.0"))
+
+    def test_is_subprocess_mocked_detection(self):
+        self.assertFalse(is_subprocess_mocked())
+        with patch("crosschain_sniper.subprocess.run"):
+            self.assertTrue(is_subprocess_mocked())
+        self.assertFalse(is_subprocess_mocked())
+
+    def test_run_ethereum_route_direct_eligible(self):
+        route = Route("ethereum", "USDC/USDG", "stable-first")
+        mock_plan = {
+            "mode": "dry-run",
+            "pair": "USDC/USDG",
+            "grossProfit": "12.500000",
+            "predictedNetProfit": "8.000000",
+            "transactionStatus": "dry-run",
+        }
+        with patch("src.engines.eth_flash_arb_pyusd_usdc.run", return_value=mock_plan), patch(
+            "src.engines.eth_flash_arb_pyusd_usdc.write_plan"
+        ):
+            outcome = run_ethereum_route_direct(
+                route,
+                live=False,
+                execution_floor=Decimal("4.000001"),
+                timeout_seconds=30.0,
+            )
+            self.assertEqual(outcome.category, "eligible")
+            self.assertEqual(outcome.gross_profit, "12.5")
+            self.assertEqual(outcome.net_profit, "8")
+            self.assertIn("guaranteed net 8.000000 USDC", outcome.detail)
+
+    def test_run_ethereum_route_direct_unprofitable(self):
+        from src.engines.eth_flash_arb_pyusd_usdc import ArbError
+        route = Route("ethereum", "USDC/USDG", "stable-first")
+        error_msg = "route is below the maximum-gas net-profit floor: -2.000000 USDC < 4.000001 USDC"
+        with patch("src.engines.eth_flash_arb_pyusd_usdc.run", side_effect=ArbError(error_msg)):
+            outcome = run_ethereum_route_direct(
+                route,
+                live=False,
+                execution_floor=Decimal("4.000001"),
+                timeout_seconds=30.0,
+            )
+            self.assertEqual(outcome.category, "unprofitable")
+            self.assertIn("-2.000000 USDC", outcome.detail)
+
+    def test_parallel_route_scanning_evaluates_all_eligible_routes(self):
+        routes = [
+            Route("ethereum", "USDC/USDG", "stable-first"),
+            Route("ethereum", "USDC/PYUSD", "stable-first"),
+        ]
+        policy = CooldownPolicy(30, 300, 3600, 300, 300, 30, 60)
+        backoff = AdaptiveBackoff()
+        dashboard = Mock()
+        logger = Mock()
+
+        mock_outcome = Outcome(
+            False,
+            "dry run simulation passed",
+            "eligible",
+            gross_profit="10",
+            net_profit="5",
+        )
+        with patch("crosschain_sniper.run_route", return_value=mock_outcome) as mock_run:
+            worker(
+                "ethereum",
+                routes,
+                live=False,
+                base_threshold=Decimal("4"),
+                interval_seconds=1.0,
+                cooldown_seconds=15.0,
+                timeout_seconds=30.0,
+                cooldown_policy=policy,
+                backoff=backoff,
+                once=True,
+                stop=threading.Event(),
+                logger=logger,
+                dashboard=dashboard,
+                parallel_scanning=True,
+            )
+            self.assertEqual(mock_run.call_count, 2)
+            self.assertEqual(dashboard.record_result.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -224,24 +224,133 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
     return cookies
 
 
+_background_solver: BackgroundCookieSolver | None = None
+_solver_lock = threading.Lock()
+
+
+class BackgroundCookieSolver(threading.Thread):
+    """Dedicated background solver daemon that handles Playwright clearance solving without blocking trading threads."""
+
+    def __init__(self, interval: int = ROTATE_INTERVAL_SECONDS, target_url: str = DEFAULT_URL) -> None:
+        super().__init__(daemon=True, name="MatchaBackgroundCookieSolver")
+        self.interval = interval
+        self.target_url = target_url
+        self._solve_requested = threading.Event()
+        self._stop_event = threading.Event()
+        self._last_solve_time = 0.0
+
+    def trigger_solve(self) -> None:
+        """Asynchronously signal the background solver to acquire fresh clearance cookies."""
+        self._solve_requested.set()
+
+    def stop(self) -> None:
+        """Signal the solver daemon to stop cleanly."""
+        self._stop_event.set()
+        self._solve_requested.set()
+
+    def run(self) -> None:
+        logger.info("[CookieSolver] Background solver daemon started (refresh interval: %ds)", self.interval)
+        # Check initial cache status
+        try:
+            cached = _read_cache(CACHE_FILE, self.interval)
+            if cached is None:
+                self._solve_requested.set()
+        except Exception as exc:
+            logger.debug("[CookieSolver] Initial cache check error: %s", exc)
+
+        while not self._stop_event.is_set():
+            # Wait for solve request or scheduled interval timeout
+            triggered = self._solve_requested.wait(timeout=max(30.0, float(self.interval - 300)))
+            if self._stop_event.is_set():
+                break
+
+            self._solve_requested.clear()
+            now = time.monotonic()
+            # Debounce rapid solve triggers (at least 15s between headless browser solves)
+            if now - self._last_solve_time < 15.0 and not triggered:
+                continue
+
+            try:
+                logger.info("[CookieSolver] Background Playwright clearance solve starting...")
+                trigger_proxy_rotation()
+                with FileLock(str(LOCK_FILE), timeout=60):
+                    cookies = _solve_challenge(self.target_url)
+                    _write_cache(CACHE_FILE, cookies)
+                self._last_solve_time = time.monotonic()
+                logger.info("[CookieSolver] Background clearance solve complete. Cache updated.")
+            except Exception as exc:
+                logger.warning("[CookieSolver] Background clearance solve error: %s", exc)
+                time.sleep(10.0)
+
+
+def trigger_background_solve() -> None:
+    """Non-blocking signal for background solver to fetch fresh cookies."""
+    global _background_solver
+    with _solver_lock:
+        if _background_solver is None or not _background_solver.is_alive():
+            start_background_cookie_solver()
+        if _background_solver is not None:
+            _background_solver.trigger_solve()
+
+
+def start_background_cookie_solver(
+    interval: int = ROTATE_INTERVAL_SECONDS,
+    target_url: str = DEFAULT_URL,
+) -> BackgroundCookieSolver:
+    """Starts the global background cookie solver daemon if not already running."""
+    global _background_solver
+    with _solver_lock:
+        if _background_solver is not None and _background_solver.is_alive():
+            return _background_solver
+        _background_solver = BackgroundCookieSolver(interval=interval, target_url=target_url)
+        _background_solver.start()
+        return _background_solver
+
+
+def stop_background_cookie_solver() -> None:
+    """Stops the global background cookie solver daemon."""
+    global _background_solver
+    with _solver_lock:
+        if _background_solver is not None:
+            _background_solver.stop()
+            _background_solver = None
+
+
+# Alias for backward compatibility
+start_background_rotator = start_background_cookie_solver
+
+
 def get_valid_cookies(
     force_refresh: bool = False,
     target_url: str = DEFAULT_URL,
     ttl: int = ROTATE_INTERVAL_SECONDS,
+    non_blocking: bool = True,
 ) -> list[dict[str, Any]]:
-    """Returns valid MetaMatcha cookies from cache or solves via headless browser."""
-    if not force_refresh:
-        cached = _read_cache(CACHE_FILE, ttl)
-        if cached is not None:
-            return cached
+    """Returns valid MetaMatcha cookies from cache, triggering background solver when stale without blocking trading."""
+    cached = _read_cache(CACHE_FILE, ttl)
+    if cached is not None and not force_refresh:
+        return cached
 
-    # Inter-process lock to prevent multiple worker processes from launching browsers concurrently
+    # If stale or force refresh requested, signal background solver
+    trigger_background_solve()
+
+    # In non-blocking mode (default), return whatever cached cookies exist immediately
+    if non_blocking and cached is not None:
+        return cached
+
+    # If no cached cookies exist at all and non_blocking is True, attempt quick fallback or short wait
+    if non_blocking:
+        # Give background solver or existing file a brief 0.5s check
+        cached_fallback = _read_cache(CACHE_FILE, ttl * 5)
+        if cached_fallback:
+            return cached_fallback
+        return []
+
+    # Explicit blocking solve requested
     with FileLock(str(LOCK_FILE), timeout=60):
-        if not force_refresh:
-            cached = _read_cache(CACHE_FILE, ttl)
-            if cached is not None:
-                return cached
-
+        cached = _read_cache(CACHE_FILE, ttl)
+        if cached is not None and not force_refresh:
+            return cached
         cookies = _solve_challenge(target_url)
         _write_cache(CACHE_FILE, cookies)
         return cookies
@@ -252,9 +361,14 @@ def inject_matcha_cookies(
     force_refresh: bool = False,
     target_url: str = DEFAULT_URL,
     chain_env_key: str | None = None,
+    non_blocking: bool = True,
 ) -> list[dict[str, Any]]:
-    """Injects fresh or cached cookies into a requests / curl_cffi Session."""
-    cookies = get_valid_cookies(force_refresh=force_refresh, target_url=target_url)
+    """Injects fresh or cached cookies into a requests / curl_cffi Session without blocking trading loops."""
+    cookies = get_valid_cookies(
+        force_refresh=force_refresh,
+        target_url=target_url,
+        non_blocking=non_blocking,
+    )
     cookie_pairs: list[str] = []
     for c in cookies:
         name = c.get("name")
@@ -291,39 +405,3 @@ def inject_matcha_cookies(
 
     return cookies
 
-
-_rotator_thread: threading.Thread | None = None
-_rotator_lock = threading.Lock()
-
-
-def start_background_rotator(interval: int = ROTATE_INTERVAL_SECONDS) -> threading.Thread:
-    """Starts a global background daemon thread to rotate cookies every `interval` seconds."""
-    global _rotator_thread
-    with _rotator_lock:
-        if _rotator_thread is not None and _rotator_thread.is_alive():
-            return _rotator_thread
-
-        def _loop():
-            # Initial ensure
-            try:
-                get_valid_cookies()
-            except Exception as exc:
-                logger.warning("[CookieManager] Initial cookie ensure failed: %s", exc)
-
-            while True:
-                time.sleep(max(60, interval - 60))
-                try:
-                    logger.info("[CookieManager] Background rotation triggered...")
-                    trigger_proxy_rotation()
-                    with FileLock(str(LOCK_FILE), timeout=60):
-                        cookies = _solve_challenge(DEFAULT_URL)
-                        _write_cache(CACHE_FILE, cookies)
-                except Exception as exc:
-                    logger.warning("[CookieManager] Background rotation failed: %s", exc)
-
-        _rotator_thread = threading.Thread(
-            target=_loop, daemon=True, name="MatchaCookieRotator"
-        )
-        _rotator_thread.start()
-        logger.info("[CookieManager] Background rotation worker active (interval: %ds)", interval)
-        return _rotator_thread

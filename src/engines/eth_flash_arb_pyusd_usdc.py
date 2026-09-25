@@ -26,9 +26,9 @@ import uuid
 logger = logging.getLogger("eth_flash_arb_pyusd_usdc")
 
 try:
-    from .provider_http import access_block_detail, is_browser_challenge, proxy_gate_lock, rate_limit_detail, retry_after_seconds
+    from .provider_http import access_block_detail, is_browser_challenge, proxy_gate_lock, rate_limit_detail, retry_after_seconds, safe_endpoint
 except ImportError:  # Direct script execution.
-    from provider_http import access_block_detail, is_browser_challenge, proxy_gate_lock, rate_limit_detail, retry_after_seconds
+    from provider_http import access_block_detail, is_browser_challenge, proxy_gate_lock, rate_limit_detail, retry_after_seconds, safe_endpoint
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -85,18 +85,21 @@ LOAN_TOKENS = {
     "PYUSD": PYUSD,
     "USDG": USDG,
 }
-FLASH_PROVIDER_IDS = {"morpho": 0, "uniswap-v4": 1, "aave-v3": 2}
+BALANCER_V2_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+FLASH_PROVIDER_IDS = {"morpho": 0, "uniswap-v4": 1, "aave-v3": 2, "balancer-v2": 3}
 FLASH_PROVIDER_ADDRESSES = {
     "morpho": MORPHO,
     "uniswap-v4": UNISWAP_V4_POOL_MANAGER,
     "aave-v3": AAVE_V3_POOL,
+    "balancer-v2": BALANCER_V2_VAULT,
 }
 FLASH_PROVIDER_LABELS = {
     "morpho": "Morpho",
     "uniswap-v4": "Uniswap v4",
     "aave-v3": "Aave v3",
+    "balancer-v2": "Balancer v2",
 }
-AUTO_FLASH_PROVIDER_ORDER = ("morpho", "aave-v3")
+AUTO_FLASH_PROVIDER_ORDER = ("morpho", "uniswap-v4", "balancer-v2")
 MAX_CAPACITY_SIZING_ATTEMPTS = 5
 
 EXECUTOR_ABI = [
@@ -1419,6 +1422,109 @@ def transaction_is_absent_and_nonce_unused(
     return latest_nonce <= nonce and pending_nonce <= nonce
 
 
+def broadcast_flashbots_or_fallback(
+    web3: Any,
+    signed_tx: Any,
+    private_key: str,
+    rpc_url: str,
+    receipt_timeout: float = 120.0,
+) -> tuple[Any, str]:
+    """Submit via Python Flashbots implementation (Protect RPC & Relay bundle) for MEV privacy.
+
+    If Flashbots fails or is unreachable, falls back to standard RPCs without removing them.
+    """
+    import urllib.request
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+    from web3 import Web3
+
+    raw_tx = signed_tx.raw_transaction
+    raw_tx_hex = "0x" + raw_tx.hex() if not raw_tx.hex().startswith("0x") else raw_tx.hex()
+    tx_hash = signed_tx.hash
+
+    flashbots_rpc = os.getenv("ETH_FLASHBOTS_RPC", "https://rpc.flashbots.net/fast").strip()
+    flashbots_relay = os.getenv("ETH_FLASHBOTS_RELAY", "https://relay.flashbots.net").strip()
+    enable_flashbots = os.getenv("ETH_ENABLE_FLASHBOTS", "true").strip().lower() != "false"
+
+    if enable_flashbots and flashbots_rpc:
+        try:
+            req_body = json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_sendRawTransaction",
+                "params": [raw_tx_hex],
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                flashbots_rpc,
+                data=req_body,
+                headers={"Content-Type": "application/json", "User-Agent": "arbbot-flashbots/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=12.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "result" in data:
+                    logger.info("[Flashbots] Submitted privately via Flashbots Protect: %s", data["result"])
+                    return tx_hash, "flashbots-protect"
+                if "error" in data:
+                    logger.warning("[Flashbots] Flashbots Protect returned error: %s", data["error"])
+        except Exception as exc:
+            logger.warning("[Flashbots] Flashbots Protect submission error: %s", exc)
+
+    if enable_flashbots and flashbots_relay:
+        try:
+            block_number = web3.eth.block_number
+            bundle_body = json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_sendBundle",
+                "params": [{
+                    "txs": [raw_tx_hex],
+                    "blockNumber": hex(block_number + 1),
+                }],
+            })
+            body_hash = Web3.keccak(text=bundle_body)
+            msg = encode_defunct(body_hash)
+            signer = Account.from_key(private_key)
+            sig = signer.sign_message(msg).signature.hex()
+            fb_sig = f"{signer.address}:0x{sig.removeprefix('0x')}"
+
+            req = urllib.request.Request(
+                flashbots_relay,
+                data=bundle_body.encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Flashbots-Signature": fb_sig,
+                    "User-Agent": "arbbot-flashbots/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=12.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "result" in data:
+                    logger.info("[Flashbots] Submitted bundle via Flashbots Relay: %s", data["result"])
+                    return tx_hash, "flashbots-relay"
+                if "error" in data:
+                    logger.warning("[Flashbots] Flashbots Relay returned error: %s", data["error"])
+        except Exception as exc:
+            logger.warning("[Flashbots] Flashbots Relay bundle error: %s", exc)
+
+    # Fallback to existing standard RPCs without removing them
+    logger.info("[Privacy RPC] Falling back to standard RPC (%s)...", safe_endpoint(rpc_url))
+    try:
+        sent_hash = web3.eth.send_raw_transaction(raw_tx)
+        return sent_hash, "standard-rpc"
+    except Exception as exc:
+        logger.warning("[Primary RPC] Failed broadcast: %s; trying configured fallbacks...", exc)
+        fallbacks = [u.strip() for u in os.getenv("ETH_RPC_FALLBACKS", "").split(",") if u.strip()]
+        for fb_url in fallbacks:
+            try:
+                fb_w3 = Web3(Web3.HTTPProvider(fb_url, request_kwargs={"timeout": 15}))
+                sent_hash = fb_w3.eth.send_raw_transaction(raw_tx)
+                logger.info("[Fallback RPC] Submitted via %s: %s", safe_endpoint(fb_url), sent_hash.hex())
+                return sent_hash, f"fallback-rpc:{safe_endpoint(fb_url)}"
+            except Exception as fb_exc:
+                logger.debug("Fallback RPC %s failed: %s", safe_endpoint(fb_url), fb_exc)
+        raise exc
+
+
 def record_transaction_receipt(
     plan: dict[str, Any],
     web3: Any,
@@ -1510,7 +1616,14 @@ def select_flash_provider(
         raise ArbError(f"unsupported flash provider: {requested}")
     candidates = AUTO_FLASH_PROVIDER_ORDER if requested == "auto" else (requested,)
     premiums = premium_bps_by_provider or {}
-    for key in candidates:
+
+    # Strictly exclude and remove any provider that charges >0% fee
+    zero_fee_candidates = [
+        key for key in candidates
+        if premiums.get(key, 0) == 0
+    ]
+
+    for key in zero_fee_candidates:
         available = available_by_provider.get(key, 0)
         if available >= loan_amount:
             return FlashLiquidity(
@@ -1519,17 +1632,24 @@ def select_flash_provider(
                 label=FLASH_PROVIDER_LABELS[key],
                 address=FLASH_PROVIDER_ADDRESSES[key],
                 available=available,
-                premium_bps=premiums.get(key, 0),
+                premium_bps=0,
             )
+
+    # If user explicitly requested a provider that charges >0% fee, remove and reject it
+    if requested != "auto" and premiums.get(requested, 0) > 0:
+        raise ArbError(
+            f"flash provider {FLASH_PROVIDER_LABELS.get(requested, requested)} has a fee of "
+            f"{premiums[requested]} bps (>0%); only 0% fee flash loan providers are allowed"
+        )
 
     details = ", ".join(
         f"{FLASH_PROVIDER_LABELS[key]} {raw_to_amount(available_by_provider.get(key, 0))}"
-        for key in candidates
+        for key in zero_fee_candidates
     )
     if requested == "auto":
         raise ArbError(
-            f"no flash provider has {raw_to_amount(loan_amount)} {loan_symbol}; "
-            f"available: {details} {loan_symbol}"
+            f"no zero-fee flash provider has {raw_to_amount(loan_amount)} {loan_symbol}; "
+            f"available: {details if details else 'none'} {loan_symbol}"
         )
     raise ArbError(
         f"{FLASH_PROVIDER_LABELS[requested]} flash liquidity is "
@@ -1612,12 +1732,20 @@ def resolve_flash_provider(
                     ],
                 )
                 premiums[key] = int(pool.functions.FLASHLOAN_PREMIUM_TOTAL().call())
+            elif key == "balancer-v2":
+                available[key] = int(
+                    token.functions.balanceOf(
+                        web3.to_checksum_address(BALANCER_V2_VAULT)
+                    ).call()
+                )
+                premiums[key] = 0
             else:
                 available[key] = int(
                     token.functions.balanceOf(
                         web3.to_checksum_address(FLASH_PROVIDER_ADDRESSES[key])
                     ).call()
                 )
+                premiums[key] = 0
     except Exception as exc:
         raise ArbError(f"failed to read flash-loan liquidity: {exc}") from exc
     return select_flash_provider(
@@ -2531,7 +2659,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.send:
         signed = web3.eth.account.sign_transaction(transaction, private_key)
-        transaction_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+        transaction_hash, method = broadcast_flashbots_or_fallback(
+            web3=web3,
+            signed_tx=signed,
+            private_key=private_key,
+            rpc_url=args.rpc_url,
+            receipt_timeout=args.receipt_timeout,
+        )
+        plan["broadcastMethod"] = method
         record_transaction_receipt(
             plan,
             web3,

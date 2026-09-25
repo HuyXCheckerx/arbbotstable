@@ -28,6 +28,9 @@ import {
   parseDecimalToRawFloor,
   parseUiAmountToRaw,
   parseCli,
+  broadcastJitoOrFallback,
+  JITO_BLOCK_ENGINES,
+  JITO_TIP_ACCOUNTS,
   resolveIntermediateMint,
   resolveLoanMint,
   shouldFallbackToJupiterLite,
@@ -795,4 +798,57 @@ test("wrapConnectionWithResilientRpc falls back to backup endpoint when primary 
     globalThis.fetch = origFetch;
   }
 });
+
+test("JITO_BLOCK_ENGINES and JITO_TIP_ACCOUNTS have valid addresses and endpoints", () => {
+  assert.ok(JITO_BLOCK_ENGINES.length >= 1);
+  assert.ok(JITO_TIP_ACCOUNTS.length >= 8);
+  for (const addr of JITO_TIP_ACCOUNTS) {
+    assert.doesNotThrow(() => new PublicKey(addr));
+  }
+});
+
+test("broadcastJitoOrFallback falls back to standard RPC when Jito fails", async () => {
+  const wallet = Keypair.generate();
+  const message = new TransactionMessage({
+    payerKey: wallet.publicKey,
+    recentBlockhash: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: wallet.publicKey,
+        toPubkey: PublicKey.default,
+        lamports: 100,
+      }),
+    ],
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+  tx.sign([wallet]);
+
+  let rpcSendCalled = false;
+  const mockConn = {
+    sendRawTransaction: async () => {
+      rpcSendCalled = true;
+      return "mock-rpc-sig-123";
+    },
+  } as unknown as Connection;
+
+  const mockConfig: any = {
+    rpcUrl: "https://mock-rpc.invalid",
+    commitment: "confirmed",
+  };
+
+  const origFetch = globalThis.fetch;
+  (globalThis as any).fetch = async () => {
+    throw new Error("Jito block engine unreachable");
+  };
+
+  try {
+    const result = await broadcastJitoOrFallback(mockConn, tx, mockConfig);
+    assert.equal(result.signature, "mock-rpc-sig-123");
+    assert.equal(result.method, "standard-rpc");
+    assert.ok(rpcSendCalled);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 

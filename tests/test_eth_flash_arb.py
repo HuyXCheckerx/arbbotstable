@@ -240,22 +240,34 @@ class EthereumFlashArbTests(unittest.TestCase):
         self.assertEqual(args.receipt_timeout, 45.0)
         self.assertEqual(args.quote_provider, "matcha")
 
-    def test_flash_provider_auto_falls_back_to_aave_v3_for_usdg(self):
+    def test_flash_provider_auto_removes_providers_with_fee_and_falls_back_to_zero_fee_alternative(self):
+        # Aave v3 has 5 bps fee (>0%) so it must be completely excluded
+        with self.assertRaisesRegex(pyusd_arb.ArbError, r"no zero-fee flash provider has 100000 USDG"):
+            pyusd_arb.select_flash_provider(
+                "auto",
+                "USDG",
+                100_000_000_000,
+                {
+                    "morpho": 1_283_000,
+                    "aave-v3": 4_084_658_664_804,
+                },
+                {"aave-v3": 5},
+            )
+
+        # Zero-fee alternative (uniswap-v4 with 0 fee) is selected when it has liquidity
         provider = pyusd_arb.select_flash_provider(
             "auto",
             "USDG",
             100_000_000_000,
             {
                 "morpho": 1_283_000,
-                "aave-v3": 4_084_658_664_804,
+                "uniswap-v4": 4_084_658_664_804,
+                "aave-v3": 10_000_000_000_000,
             },
-            {"aave-v3": 5},
+            {"uniswap-v4": 0, "aave-v3": 5},
         )
-
-        self.assertEqual(provider.key, "aave-v3")
-        self.assertEqual(provider.provider_id, 2)
-        self.assertEqual(provider.available, 4_084_658_664_804)
-        self.assertEqual(provider.premium_bps, 5)
+        self.assertEqual(provider.key, "uniswap-v4")
+        self.assertEqual(provider.premium_bps, 0)
 
     def test_flash_provider_auto_prefers_morpho_when_it_has_liquidity(self):
         provider = pyusd_arb.select_flash_provider(
@@ -731,6 +743,48 @@ class EthereumFlashArbTests(unittest.TestCase):
 
             # Zero or sub-safety floor base minimum does not inflate above base minimum
             self.assertEqual(fn(0, 50_000_000_000, base_loan_raw), 0)
+
+    def test_broadcast_flashbots_success(self):
+        fake_tx = Mock()
+        fake_tx.raw_transaction = b"\x12\x34\x56"
+        fake_tx.hash = "0xhash123"
+        fake_web3 = Mock()
+        fake_web3.eth.block_number = 123456
+
+        mock_resp = Mock()
+        mock_resp.read.return_value = json.dumps({"jsonrpc": "2.0", "result": "0xhash123"}).encode()
+        mock_resp.__enter__ = Mock(return_value=mock_resp)
+        mock_resp.__exit__ = Mock(return_value=None)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            tx_hash, method = pyusd_arb.broadcast_flashbots_or_fallback(
+                fake_web3,
+                fake_tx,
+                "0x" + "1" * 64,
+                "https://eth.drpc.org",
+            )
+        self.assertEqual(tx_hash, "0xhash123")
+        self.assertEqual(method, "flashbots-protect")
+
+    def test_broadcast_flashbots_fallback_to_standard_rpc(self):
+        fake_tx = Mock()
+        fake_tx.raw_transaction = b"\x12\x34\x56"
+        fake_tx.hash = "0xhash123"
+        fake_web3 = Mock()
+        fake_web3.eth.send_raw_transaction.return_value = b"\xaa\xbb"
+
+        # Flashbots raises exception -> falls back to standard web3 RPC
+        with patch("urllib.request.urlopen", side_effect=Exception("Flashbots offline")):
+            tx_hash, method = pyusd_arb.broadcast_flashbots_or_fallback(
+                fake_web3,
+                fake_tx,
+                "0x" + "1" * 64,
+                "https://eth.drpc.org",
+            )
+        self.assertEqual(tx_hash, b"\xaa\xbb")
+        self.assertEqual(method, "standard-rpc")
+        fake_web3.eth.send_raw_transaction.assert_called_once_with(b"\x12\x34\x56")
+
 
 
 if __name__ == "__main__":
