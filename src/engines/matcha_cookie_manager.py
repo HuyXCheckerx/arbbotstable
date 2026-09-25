@@ -225,7 +225,7 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
 
 
 _background_solver: BackgroundCookieSolver | None = None
-_solver_lock = threading.Lock()
+_solver_lock = threading.RLock()
 
 
 class BackgroundCookieSolver(threading.Thread):
