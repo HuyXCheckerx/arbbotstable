@@ -32,6 +32,7 @@ from crosschain_sniper import (
     execution_reference,
     fetch_ethereum_base_fee_gwei,
     jupiter_market_key,
+    dex_market_key,
     parse_args,
     parse_gas_fee_gwei,
     process_is_running,
@@ -968,6 +969,24 @@ class CrosschainSniperTests(unittest.TestCase):
             self.assertEqual(mock_run.call_count, 2)
             self.assertEqual(dashboard.record_result.call_count, 2)
 
+    def test_unsupported_loan_token_classified_as_no_route(self):
+        detail = "executor 0x6FA26637Db03519B520A44056fc4D93858Ba5833 does not support loan token 0xe343167631d89B6Ffc58B88d6b7fB0228795491D"
+        self.assertEqual(failure_category(detail), "no-route")
+        self.assertEqual(retry_after_seconds(detail), 86400.0)
+        route = Route("ethereum", "USDC/USDG")
+        readable = readable_failure(route, detail, "no-route")
+        self.assertIn("Ethereum executor does not support USDC/USDG", readable)
+
+    def test_dex_market_key_scoped_by_chain(self):
+        eth_route = Route("ethereum", "USDC/USDG")
+        sol_route = Route("solana", "USDC/USDG")
+        eth_key = dex_market_key(eth_route)
+        sol_key = dex_market_key(sol_route)
+        self.assertEqual(eth_key, "metamatcha:ethereum:USDG/USDC")
+        self.assertEqual(sol_key, "metamatcha:solana:USDG/USDC")
+        self.assertNotEqual(eth_key, sol_key)
+
 
 if __name__ == "__main__":
     unittest.main()
+

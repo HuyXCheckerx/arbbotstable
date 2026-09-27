@@ -412,6 +412,9 @@ def is_vercel_challenge(detail: str) -> bool:
 
 def retry_after_seconds(detail: str) -> float | None:
     """Read normalized provider wait hints before shortening the engine error."""
+    lowered = detail.lower()
+    if "does not support loan token" in lowered or "unsupported loan token" in lowered:
+        return 86400.0
     waits: list[float] = []
     for match in re.finditer(r"\bretry-after=([^\s;]+)s\b", detail, re.IGNORECASE):
         try:
@@ -444,6 +447,8 @@ def failure_category(detail: str) -> str:
         or "no executable matcha liquidity" in lowered
         or "solana 1232-byte size limit" in lowered
         or "exceeds solana 1232-byte size limit" in lowered
+        or "does not support loan token" in lowered
+        or "unsupported loan token" in lowered
     ):
         return "no-route"
     if "capacity kept changing" in lowered:
@@ -501,7 +506,7 @@ def jupiter_market_key(route: Route) -> str:
 
 def dex_market_key(route: Route) -> str:
     venue = "jupiter" if route.dex_name == "Jupiter" else "metamatcha"
-    return f"{venue}:{route.dex_from}/{route.dex_to}"
+    return f"{venue}:{route.chain}:{route.dex_from}/{route.dex_to}"
 
 
 def dex_provider_key(route: Route) -> str:
@@ -558,6 +563,8 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
                 f"{route.dex_name} found a {dex_leg} route, but the full "
                 "atomic transaction is too large for Solana"
             )
+        if "does not support loan token" in lowered or "unsupported loan token" in lowered:
+            return f"{route.chain.title()} executor does not support {route.loan}/{route.intermediate}"
         return f"{route.dex_name} has no executable {dex_leg} route right now"
     if category == "transient-stable":
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
@@ -1656,16 +1663,18 @@ def _handle_route_outcome(
 
     if outcome.category == "no-route":
         dependency = dex_market_key(route)
-        backoff.block(dependency, cooldown_policy.no_route_seconds)
+        delay = outcome.retry_after_seconds or cooldown_policy.no_route_seconds
+        backoff.block(dependency, delay)
+        route_deadlines[route.key] = time.monotonic() + delay
         logger.info(
             "PAUSE   | %-17s | %.0fs | return market unavailable",
             dependency_label(dependency),
-            cooldown_policy.no_route_seconds,
+            delay,
         )
         if dashboard:
             dashboard.record_cooldown(
                 route,
-                cooldown_policy.no_route_seconds,
+                delay,
                 "Return market is unavailable",
             )
     elif outcome.category == "access-blocked-matcha":
@@ -2132,7 +2141,19 @@ def main(argv: list[str] | None = None) -> int:
 
         threads = []
         for chain in args.chains:
-            chain_routes = [route for route in routes if route.chain == chain]
+            env_pairs = (
+                os.getenv(f"{chain.upper()}_ROUTE_PAIRS")
+                or (os.getenv("ETH_ROUTE_PAIRS") if chain == "ethereum" else None)
+                or (os.getenv("SOL_ROUTE_PAIRS") if chain == "solana" else None)
+            )
+            if env_pairs:
+                allowed_pairs = {p.strip().upper() for p in env_pairs.split(",") if p.strip()}
+                chain_routes = [
+                    route for route in routes
+                    if route.chain == chain and route.pair.upper() in allowed_pairs
+                ]
+            else:
+                chain_routes = [route for route in routes if route.chain == chain]
             thread = threading.Thread(
                 target=worker,
                 name=f"sniper-{chain}",

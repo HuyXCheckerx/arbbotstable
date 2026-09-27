@@ -2035,7 +2035,7 @@ def parser() -> argparse.ArgumentParser:
             or setting("ETH_ARB_PYUSD_USDC_EXECUTOR")
             or setting("ETH_EXECUTOR_ADDRESS")
             or setting("ETH_ARB_EXECUTOR")
-            or "0x6FA26637Db03519B520A44056fc4D93858Ba5833"
+            or "0x983A983C9Fb2A34227E1eDd1Ef3FEa850a37d26F"
         ),
         help="deployed MorphoMatchaStableArbUsdc contract address",
     )
