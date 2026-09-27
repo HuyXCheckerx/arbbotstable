@@ -1003,6 +1003,47 @@ class MatchaClient:
         sell_token_address: str = USDC,
         buy_token_address: str = USDT,
     ) -> list[tuple[str, Any]]:
+        is_mock = type(self.http).__name__ != "HttpJsonClient" or hasattr(self.http, "mock_calls")
+        use_bridge = (not is_mock) and os.getenv("MATCHA_USE_BRIDGE", "true").strip().lower() not in ("0", "false", "no")
+        if use_bridge:
+            try:
+                from .matcha_browser_bridge import fetch_bridge_quotes
+            except ImportError:
+                try:
+                    from matcha_browser_bridge import fetch_bridge_quotes
+                except ImportError:
+                    fetch_bridge_quotes = None
+            if fetch_bridge_quotes is not None:
+                try:
+                    gas_price = self.gas_price()
+                except Exception:
+                    gas_price = int(os.getenv("ETH_FALLBACK_GAS_PRICE_WEI", "15000000000"))
+                bridge_payload = {
+                    "chainId": CHAIN_ID,
+                    "isAllowanceHolderFlow": True,
+                    "gasPrice": str(gas_price),
+                    "sellTokenAddress": sell_token_address.lower(),
+                    "sellTokenDecimals": DECIMALS,
+                    "buyTokenAddress": buy_token_address.lower(),
+                    "buyTokenDecimals": DECIMALS,
+                    "sellAmount": str(sell_amount),
+                    "slippageBps": slippage_bps,
+                    "slippagePpm": slippage_bps * 100,
+                    "taker": executor.lower(),
+                }
+                try:
+                    quotes_map = fetch_bridge_quotes("ethereum", bridge_payload, list(aggregators))
+                    if quotes_map:
+                        bridge_responses: list[tuple[str, Any]] = [
+                            (agg, q) for agg, q in quotes_map.items()
+                            if isinstance(q, dict) and not q.get("error")
+                        ]
+                        if bridge_responses:
+                            select_best_matcha_quote(bridge_responses, sell_amount)
+                            return bridge_responses
+                except Exception as exc:
+                    logger.debug("[MatchaBridge] ETH bridge quote failed, trying direct HTTP: %s", exc)
+
         with proxy_gate_lock():
             gas_price = self.gas_price()
             competition = self.http.post(

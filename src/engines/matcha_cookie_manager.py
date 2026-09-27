@@ -170,14 +170,15 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
                 has_clearance = "_vcrcs" in cookie_map or "cf_clearance" in cookie_map
                 title = (page.title() or "").lower()
 
-                if has_clearance:
+                is_checkpoint = any(marker in title for marker in ("checkpoint", "just a moment", "challenge"))
+                if has_clearance and not is_checkpoint:
                     logger.info(
                         "[CookieManager] Vercel clearance cookie acquired at %ds",
                         poll_sec + 1,
                     )
                     cleared = True
                     break
-                elif "checkpoint" not in title and "just a moment" not in title and len(title) > 0 and poll_sec >= 3:
+                elif not is_checkpoint and len(title) > 0 and poll_sec >= 3:
                     cleared = True
                     break
 

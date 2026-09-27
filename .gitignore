@@ -16,6 +16,7 @@ recovery_state.json.lock
 pnl.txt
 logs/
 .matcha_cookies*
+.matcha_bridge*
 
 # Local dependencies and Python artifacts.
 .local/

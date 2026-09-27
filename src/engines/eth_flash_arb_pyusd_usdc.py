@@ -740,6 +740,16 @@ def select_best_matcha_quote(
     valid: list[MatchaQuote] = []
     errors: list[str] = []
     for aggregator, response in responses:
+        if isinstance(response, MatchaQuote):
+            # Already validated by a direct aggregator client.
+            if response.sell_amount != expected_sell_amount:
+                errors.append(
+                    f"{aggregator}: sell amount changed from {expected_sell_amount} "
+                    f"to {response.sell_amount}"
+                )
+            else:
+                valid.append(response)
+            continue
         try:
             valid.append(parse_matcha_quote(aggregator, response, expected_sell_amount))
         except ArbError as exc:
@@ -1145,11 +1155,14 @@ class MatchaClient:
         *,
         quote_provider: str = "matcha",
         rpc_url: str | None = None,
+        operator: str | None = None,
     ):
         self.http = http
         self.base_url = base_url.rstrip("/")
         self.quote_provider = quote_provider
         self.rpc_url = rpc_url
+        self.operator = operator
+        self._direct_client: Any = None
         self.headers = {
             "origin": "https://meta.matcha.xyz",
             "referer": "https://meta.matcha.xyz/ethereum",
@@ -1185,6 +1198,46 @@ class MatchaClient:
         sell_token_address: str = PYUSD,
         buy_token_address: str = USDC,
     ) -> list[tuple[str, Any]]:
+        is_mock = type(self.http).__name__ != "HttpJsonClient" or hasattr(self.http, "mock_calls")
+        use_bridge = (not is_mock) and os.getenv("MATCHA_USE_BRIDGE", "true").strip().lower() not in ("0", "false", "no")
+        if use_bridge:
+            try:
+                from .matcha_browser_bridge import fetch_bridge_quotes
+            except ImportError:
+                try:
+                    from matcha_browser_bridge import fetch_bridge_quotes
+                except ImportError:
+                    fetch_bridge_quotes = None
+            if fetch_bridge_quotes is not None:
+                try:
+                    gas_price = self.gas_price()
+                except Exception:
+                    gas_price = int(os.getenv("ETH_FALLBACK_GAS_PRICE_WEI", "15000000000"))
+                bridge_payload = {
+                    "chainId": CHAIN_ID,
+                    "isAllowanceHolderFlow": True,
+                    "gasPrice": str(gas_price),
+                    "sellTokenAddress": sell_token_address.lower(),
+                    "sellTokenDecimals": DECIMALS,
+                    "buyTokenAddress": buy_token_address.lower(),
+                    "buyTokenDecimals": DECIMALS,
+                    "sellAmount": str(sell_amount),
+                    "slippageBps": slippage_bps,
+                    "slippagePpm": slippage_bps * 100,
+                    "taker": executor.lower(),
+                }
+                try:
+                    quotes_map = fetch_bridge_quotes("ethereum", bridge_payload, list(aggregators))
+                    if quotes_map:
+                        bridge_responses: list[tuple[str, Any]] = [
+                            (agg, q) for agg, q in quotes_map.items()
+                            if isinstance(q, dict) and not q.get("error")
+                        ]
+                        if bridge_responses:
+                            return bridge_responses
+                except Exception as exc:
+                    logger.debug("[MatchaBridge] ETH bridge quote failed, trying direct HTTP: %s", exc)
+
         with proxy_gate_lock():
             gas_price = self.gas_price()
             competition = self.http.post(
@@ -1249,6 +1302,41 @@ class MatchaClient:
                 raise max(rate_limits, key=lambda error: error.retry_after_seconds or 0) from exc
         return responses
 
+    def _direct_quotes(
+        self,
+        executor: str,
+        sell_amount: int,
+        slippage_bps: int,
+        sell_token_address: str,
+        buy_token_address: str,
+    ) -> list[tuple[str, Any]]:
+        """Public aggregator APIs (KyberSwap, Velora, 1inch, 0x); no MetaMatcha."""
+        try:
+            from .direct_aggregators import DirectAggregatorClient
+        except ImportError:
+            from direct_aggregators import DirectAggregatorClient
+        if self._direct_client is None or self._direct_client.executor != executor:
+            self._direct_client = DirectAggregatorClient(
+                executor=executor,
+                operator=self.operator,
+                api_modules={
+                    "ArbError": ArbError,
+                    "MatchaQuote": MatchaQuote,
+                    "ProviderRateLimitedError": ProviderRateLimitedError,
+                    "RetryableArbError": RetryableArbError,
+                    "is_address": is_address,
+                    "is_hex_data": is_hex_data,
+                    "parse_integer": parse_integer,
+                },
+            )
+        quotes = self._direct_client.quotes(
+            sell_amount,
+            slippage_bps,
+            sell_token_address=sell_token_address,
+            buy_token_address=buy_token_address,
+        )
+        return [(quote.aggregator, quote) for quote in quotes]
+
     def quotes(
         self,
         executor: str,
@@ -1258,6 +1346,14 @@ class MatchaClient:
         sell_token_address: str = PYUSD,
         buy_token_address: str = USDC,
     ) -> list[tuple[str, Any]]:
+        if self.quote_provider == "direct":
+            return self._direct_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+            )
         return self._matcha_quotes(
             executor,
             sell_amount,
@@ -2064,7 +2160,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--quote-provider",
-        choices=("matcha", "auto"),
+        choices=("matcha", "auto", "direct"),
         default=setting("ETH_ARB_QUOTE_PROVIDER", "matcha"),
         help="Ethereum DEX quote source: meta.matcha.xyz",
     )
@@ -2204,6 +2300,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.matcha_base_url,
         quote_provider=args.quote_provider,
         rpc_url=args.rpc_url,
+        operator=operator,
     )
     stable_client = StableClient(direct_http, args.stable_base_url)
 
@@ -2310,7 +2407,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
         print(f"Leg 1 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {loan_symbol} -> {raw_to_amount(stable_quote.amount_out)} {intermediate_symbol}", file=sys.stderr)
-        print(f"Leg 2 (MetaMatcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {intermediate_symbol} -> {raw_to_amount(matcha.buy_amount)} {loan_symbol}", file=sys.stderr)
+        print(f"Leg 2 ({'Direct' if args.quote_provider == 'direct' else 'MetaMatcha'} - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {intermediate_symbol} -> {raw_to_amount(matcha.buy_amount)} {loan_symbol}", file=sys.stderr)
         if flash_loan_fee:
             print(
                 f"Flash Loan Fee:          {raw_to_amount(flash_loan_fee)} "
@@ -2472,7 +2569,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             file=sys.stderr,
         )
         print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
-        print(f"Leg 1 (MetaMatcha - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
+        print(f"Leg 1 ({'Direct' if args.quote_provider == 'direct' else 'MetaMatcha'} - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
         print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
         if flash_loan_fee:
             print(

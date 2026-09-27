@@ -88,7 +88,8 @@ class Route:
         if self.chain == "solana":
             provider = os.environ.get("SOL_FLASH_ARB_DEX_PROVIDER", "metamatcha")
             return "Jupiter" if provider.strip().lower() == "jupiter" else "MetaMatcha"
-        return "MetaMatcha"
+        provider = os.environ.get("ETH_ARB_QUOTE_PROVIDER", "matcha")
+        return "Direct" if provider.strip().lower() == "direct" else "MetaMatcha"
 
     @property
     def display(self) -> str:
