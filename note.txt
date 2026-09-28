@@ -1,1 +1,0 @@
-eth_flash_arb.py --loan-token "PYUSD" --send --confirm-mainnet EXECUTE_ATOMIC_ARB
