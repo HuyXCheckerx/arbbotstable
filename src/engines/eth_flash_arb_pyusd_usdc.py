@@ -1236,7 +1236,11 @@ class MatchaClient:
                         if bridge_responses:
                             return bridge_responses
                 except Exception as exc:
-                    logger.debug("[MatchaBridge] ETH bridge quote failed, trying direct HTTP: %s", exc)
+                    err_msg = str(exc)
+                    logger.debug("[MatchaBridge] ETH bridge quote failed: %s", exc)
+                    if any(x in err_msg.lower() for x in ("forbidden", "403", "checkpoint", "challenge", "429")):
+                        raise ProviderAccessBlockedError(f"MetaMatcha access denied (HTTP 403): {err_msg}") from exc
+                    raise
 
         with proxy_gate_lock():
             gas_price = self.gas_price()

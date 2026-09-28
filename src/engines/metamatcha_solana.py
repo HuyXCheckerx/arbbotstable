@@ -345,6 +345,7 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
                 if any(x in err_msg.lower() for x in ("forbidden", "403", "checkpoint", "challenge", "429")):
                     raise ProviderAccessBlockedError(f"MetaMatcha access denied (HTTP 403): {err_msg}") from exc
                 raise
+    proxy_url = os.getenv("MATCHA_PROXY", "").strip()
     with proxy_gate_lock():
         competition = _post_json(
             f"{base_url}/api/competitions", competition_payload, timeout_seconds
