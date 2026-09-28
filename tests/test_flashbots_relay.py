@@ -1,9 +1,13 @@
 import json
+import os
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -22,6 +26,7 @@ from flashbots_relay import (
     send_to_builders,
     serialize_body,
 )
+from src.engines import eth_flash_arb_pyusd_usdc as engine
 
 KEY = "0x" + "11" * 32
 
@@ -145,6 +150,103 @@ class TestFlashbotsRelay(unittest.TestCase):
     def test_new_auth_key_valid(self):
         k = new_auth_key()
         self.assertTrue(Account.from_key(k).address.startswith("0x"))
+
+    def test_production_broadcaster_authenticates_exact_body_at_relay(self):
+        web3 = Mock()
+        web3.eth.block_number = 123
+        signed = SimpleNamespace(raw_transaction=b"\x01\x02", hash=b"\x11" * 32)
+        settings = {
+            "ETH_ENABLE_FLASHBOTS": "true",
+            "ETH_FLASHBOTS_RPC": "",
+            "ETH_FLASHBOTS_RELAY": self.server_url,
+            "ETH_ALLOW_PUBLIC_FALLBACK": "false",
+            "FLASHBOTS_AUTH_KEY": KEY,
+        }
+        with patch.dict(os.environ, settings):
+            tx_hash, method = engine.broadcast_flashbots_or_fallback(
+                web3, signed, "unused-operator-key", "https://unused.invalid"
+            )
+        self.assertEqual((tx_hash, method), (signed.hash, "flashbots-relay"))
+        self.assertEqual(_Handler.log, [("eth_sendBundle", True, {"txs": ["0x0102"], "blockNumber": "0x7c"})])
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_private_failure_does_not_send_to_public_rpc_by_default(self):
+        web3 = Mock()
+        web3.eth.block_number = 123
+        signed = SimpleNamespace(raw_transaction=b"\x01", hash=b"\x11" * 32)
+        _Handler.mode = "rpcerr"
+        settings = {
+            "ETH_ENABLE_FLASHBOTS": "true",
+            "ETH_FLASHBOTS_RPC": "",
+            "ETH_FLASHBOTS_RELAY": self.server_url,
+            "FLASHBOTS_AUTH_KEY": KEY,
+        }
+        with patch.dict(os.environ, settings):
+            os.environ.pop("ETH_ALLOW_PUBLIC_FALLBACK", None)
+            with self.assertRaisesRegex(engine.ArbError, "public fallback is disabled"):
+                engine.broadcast_flashbots_or_fallback(web3, signed, "unused", "https://unused.invalid")
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_invalid_protect_acknowledgement_is_not_accepted(self):
+        signed = SimpleNamespace(raw_transaction=b"\x01", hash=b"\x11" * 32)
+        for payload in ({"result": None}, {"result": "0x" + "22" * 32}):
+            with self.subTest(payload=payload):
+                response = Mock()
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=None)
+                response.read.return_value = json.dumps(payload).encode()
+                settings = {"ETH_ENABLE_FLASHBOTS": "true", "ETH_FLASHBOTS_RPC": "https://unused.invalid", "ETH_FLASHBOTS_RELAY": "", "ETH_ALLOW_PUBLIC_FALLBACK": "false"}
+                with patch.dict(os.environ, settings), patch("urllib.request.urlopen", return_value=response):
+                    with self.assertRaises(engine.ArbError):
+                        engine.broadcast_flashbots_or_fallback(Mock(), signed, "unused", "https://unused.invalid")
+
+    def test_private_transaction_is_not_dropped_based_on_public_rpc_absence(self):
+        web3 = Mock()
+        web3.eth.wait_for_transaction_receipt.side_effect = TimeoutError("not visible")
+        plan = {"broadcastMethod": "flashbots-protect"}
+        with patch.object(engine, "transaction_is_absent_and_nonce_unused") as absent:
+            engine.record_transaction_receipt(plan, web3, b"\x11" * 32, 1)
+        absent.assert_not_called()
+        self.assertEqual(plan["transactionStatus"], "submitted")
+
+    def test_lost_broadcast_response_preserves_hash_before_and_after_send(self):
+        signed = SimpleNamespace(raw_transaction=b"\x01", hash=b"\x11" * 32)
+        web3 = Mock()
+        web3.eth.account.sign_transaction.return_value = signed
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "route.json"
+            plan = {}
+
+            def lost_response(**kwargs):
+                stored = json.loads(output.read_text())
+                self.assertEqual(stored["transactionHash"], "0x" + "11" * 32)
+                raise TimeoutError("response lost")
+
+            with patch.dict(os.environ, {"ETH_ENABLE_FLASHBOTS": "true"}), patch.object(engine, "broadcast_flashbots_or_fallback", side_effect=lost_response):
+                engine.submit_transaction_plan(plan, web3, {}, "unused", "https://unused.invalid", 1, str(output))
+            stored = json.loads(output.read_text())
+            self.assertEqual(stored["transactionStatus"], "submitted")
+            self.assertEqual(stored["broadcastMethod"], "flashbots-unacknowledged")
+            self.assertEqual(stored["broadcastError"], "response lost")
+            archive = output.parent / "transactions" / f"{stored['transactionHash']}.json"
+            self.assertEqual(json.loads(archive.read_text()), stored)
+            engine.write_plan(str(output), {"mode": "dry-run"})
+            self.assertEqual(json.loads(archive.read_text()), stored)
+
+    def test_confirmed_submission_archives_transport_and_receipt(self):
+        signed = SimpleNamespace(raw_transaction=b"\x01", hash=b"\x11" * 32)
+        web3 = Mock()
+        web3.eth.account.sign_transaction.return_value = signed
+        web3.eth.wait_for_transaction_receipt.return_value = {"status": 1, "blockNumber": 123, "gasUsed": 21000, "effectiveGasPrice": 1}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "route.json"
+            plan = {}
+            with patch.object(engine, "broadcast_flashbots_or_fallback", return_value=(signed.hash, "flashbots-protect")):
+                engine.submit_transaction_plan(plan, web3, {}, "unused", "https://unused.invalid", 1, str(output))
+            archive = output.parent / "transactions" / f"{plan['transactionHash']}.json"
+            stored = json.loads(archive.read_text())
+            self.assertEqual(stored["transactionStatus"], "confirmed")
+            self.assertEqual(stored["broadcastMethod"], "flashbots-protect")
 
 
 if __name__ == "__main__":

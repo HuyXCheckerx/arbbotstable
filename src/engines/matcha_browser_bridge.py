@@ -382,133 +382,151 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                 state.is_running = False
                 return
 
-            context = browser.new_context(viewport={"width": 1280, "height": 800})
-
-            page_eth = context.new_page()
-            Stealth().apply_stealth_sync(page_eth)
-
-            page_sol = context.new_page()
-            Stealth().apply_stealth_sync(page_sol)
-
-        logger.info("[MatchaBridge] Warming Ethereum tab...")
-        try:
-            page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            logger.debug("[MatchaBridge] ETH initial navigation notice: %s", e)
-
-        logger.info("[MatchaBridge] Warming Solana tab...")
-        try:
-            page_sol.goto("https://meta.matcha.xyz/solana", wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            logger.debug("[MatchaBridge] SOL initial navigation notice: %s", e)
-
-        # Clearance loop
-        for poll_idx in range(40):
-            time.sleep(1)
-            t_eth = ""
-            t_sol = ""
             try:
-                t_eth = (page_eth.title() or "").lower()
-                t_sol = (page_sol.title() or "").lower()
-            except Exception:
-                pass
+                context = browser.new_context(viewport={"width": 1280, "height": 800})
 
-            eth_ok = "checkpoint" not in t_eth and len(t_eth) > 0
-            sol_ok = "checkpoint" not in t_sol and len(t_sol) > 0
+                page_eth = context.new_page()
+                Stealth().apply_stealth_sync(page_eth)
 
-            if eth_ok and sol_ok and poll_idx >= 2:
-                logger.info("[MatchaBridge] Both tabs cleared! (ETH: %s, SOL: %s)", t_eth, t_sol)
-                time.sleep(2.0)  # Allow Kasada runtime to settle
-                state.ready_eth.set()
-                state.ready_sol.set()
-                break
+                page_sol = context.new_page()
+                Stealth().apply_stealth_sync(page_sol)
 
-        last_health_check = time.monotonic()
-        while state.is_running:
-            try:
-                task = state.queue.get(timeout=1.0)
-            except Exception:
-                # Periodic keep-alive
-                if time.monotonic() - last_health_check > 120.0:
-                    last_health_check = time.monotonic()
+                logger.info("[MatchaBridge] Warming Ethereum tab...")
+                try:
+                    page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
+                except Exception as e:
+                    logger.debug("[MatchaBridge] ETH initial navigation notice: %s", e)
+
+                logger.info("[MatchaBridge] Warming Solana tab...")
+                try:
+                    page_sol.goto("https://meta.matcha.xyz/solana", wait_until="domcontentloaded", timeout=45000)
+                except Exception as e:
+                    logger.debug("[MatchaBridge] SOL initial navigation notice: %s", e)
+
+                # Clearance loop
+                for poll_idx in range(40):
+                    time.sleep(1)
+                    t_eth = ""
+                    t_sol = ""
                     try:
-                        t_e = (page_eth.title() or "").lower()
-                        if "checkpoint" in t_e:
-                            logger.info("[MatchaBridge] ETH checkpoint detected during check, reloading...")
-                            page_eth.reload(wait_until="domcontentloaded")
+                        t_eth = (page_eth.title() or "").lower()
+                        t_sol = (page_sol.title() or "").lower()
                     except Exception:
                         pass
-                continue
 
-            chain, payload, aggregators, event, result_box = task
-            page = page_eth if chain == "ethereum" else page_sol
+                    eth_ok = "checkpoint" not in t_eth and len(t_eth) > 0
+                    sol_ok = "checkpoint" not in t_sol and len(t_sol) > 0
 
-            try:
-                t0 = time.perf_counter()
-                res = page.evaluate(
-                    """async (args) => {
-                        const { chain, payload, aggregators } = args;
-                        const taker = payload.taker ? (chain === 'ethereum' ? payload.taker.toLowerCase() : payload.taker) : '';
-                        const headers = { 'content-type': 'application/json', 'x-fetch-native': '1' };
-                        if (chain === 'ethereum' && taker) {
-                            headers['x-taker'] = taker;
-                        }
+                    if eth_ok and sol_ok and poll_idx >= 2:
+                        logger.info("[MatchaBridge] Both tabs cleared! (ETH: %s, SOL: %s)", t_eth, t_sol)
+                        time.sleep(2.0)  # Allow Kasada runtime to settle
+                        state.ready_eth.set()
+                        state.ready_sol.set()
+                        break
 
-                        if (chain === 'ethereum') {
-                            try { await fetch('https://meta.matcha.xyz/api/gas?chainId=1'); } catch(e) {}
-                        }
-                        
-                        let compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
-                            method: 'POST',
-                            headers,
-                            body: JSON.stringify(payload)
-                        });
-                        let comp = await compRes.json();
-                        let compId = comp.id || comp.competitionId;
-                        if (!compId) {
-                            return { error: comp };
-                        }
-                        
-                        const quotes = {};
-                        await Promise.all(aggregators.map(async (agg) => {
-                            try {
-                                const qRes = await fetch(`https://meta.matcha.xyz/api/quotes?aggregator=${agg}`, {
+                last_health_check = time.monotonic()
+                while state.is_running:
+                    try:
+                        task = state.queue.get(timeout=1.0)
+                    except Exception:
+                        # Periodic keep-alive
+                        if time.monotonic() - last_health_check > 120.0:
+                            last_health_check = time.monotonic()
+                            try:
+                                t_e = (page_eth.title() or "").lower()
+                                if "checkpoint" in t_e:
+                                    logger.info("[MatchaBridge] ETH checkpoint detected during check, reloading...")
+                                    page_eth.reload(wait_until="domcontentloaded")
+                            except Exception:
+                                pass
+                        continue
+
+                    chain, payload, aggregators, event, result_box = task
+                    page = page_eth if chain == "ethereum" else page_sol
+
+                    try:
+                        t0 = time.perf_counter()
+                        res = page.evaluate(
+                            """async (args) => {
+                                const { chain, payload, aggregators } = args;
+                                const taker = payload.taker ? (chain === 'ethereum' ? payload.taker.toLowerCase() : payload.taker) : '';
+                                const headers = { 'content-type': 'application/json', 'x-fetch-native': '1' };
+                                if (chain === 'ethereum' && taker) {
+                                    headers['x-taker'] = taker;
+                                }
+
+                                if (chain === 'ethereum') {
+                                    try { await fetch('https://meta.matcha.xyz/api/gas?chainId=1'); } catch(e) {}
+                                }
+
+                                let compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
                                     method: 'POST',
                                     headers,
-                                    body: JSON.stringify({ competitionId: compId, aggregator: agg })
+                                    body: JSON.stringify(payload)
                                 });
-                                quotes[agg] = await qRes.json();
-                            } catch (e) {
-                                quotes[agg] = { error: String(e) };
-                            }
-                        }));
-                        return { competitionId: compId, quotes };
-                    }""",
-                    {"chain": chain, "payload": payload, "aggregators": aggregators},
-                )
+                                let comp = await compRes.json();
+                                let compId = comp.id || comp.competitionId;
+                                if (!compId) {
+                                    return { error: comp };
+                                }
 
-                # Auto-heal if challenged
-                if isinstance(res, dict) and "error" in res:
-                    err_str = str(res.get("error", "")).lower()
-                    if any(x in err_str for x in ("checkpoint", "403", "429", "challenge")):
-                        logger.warning("[MatchaBridge] %s tab hit checkpoint (%s). Auto-reloading...", chain, err_str[:80])
-                        try:
-                            page.reload(wait_until="domcontentloaded", timeout=25000)
-                            time.sleep(2.0)
-                        except Exception:
-                            pass
+                                const quotes = {};
+                                await Promise.all(aggregators.map(async (agg) => {
+                                    try {
+                                        const qRes = await fetch(`https://meta.matcha.xyz/api/quotes?aggregator=${agg}`, {
+                                            method: 'POST',
+                                            headers,
+                                            body: JSON.stringify({ competitionId: compId, aggregator: agg })
+                                        });
+                                        quotes[agg] = await qRes.json();
+                                    } catch (e) {
+                                        quotes[agg] = { error: String(e) };
+                                    }
+                                }));
+                                return { competitionId: compId, quotes };
+                            }""",
+                            {"chain": chain, "payload": payload, "aggregators": aggregators},
+                        )
 
-                elapsed = time.perf_counter() - t0
-                logger.info("[MatchaBridge] Quote [%s] fetched in %.1fms (aggregators: %s)", chain, elapsed * 1000, aggregators)
-                result_box["result"] = res
-            except Exception as exc:
-                logger.error("[MatchaBridge] Evaluate error on [%s]: %s", chain, exc)
-                result_box["error"] = str(exc)
+                        # Auto-heal if challenged
+                        if isinstance(res, dict) and "error" in res:
+                            err_str = str(res.get("error", "")).lower()
+                            if any(x in err_str for x in ("checkpoint", "403", "429", "challenge")):
+                                logger.warning("[MatchaBridge] %s tab hit checkpoint (%s). Auto-reloading...", chain, err_str[:80])
+                                try:
+                                    page.reload(wait_until="domcontentloaded", timeout=25000)
+                                    time.sleep(2.0)
+                                except Exception:
+                                    pass
+
+                        elapsed = time.perf_counter() - t0
+                        logger.info("[MatchaBridge] Quote [%s] fetched in %.1fms (aggregators: %s)", chain, elapsed * 1000, aggregators)
+                        result_box["result"] = res
+                    except Exception as exc:
+                        logger.error("[MatchaBridge] Evaluate error on [%s]: %s", chain, exc)
+                        result_box["error"] = str(exc)
+                    finally:
+                        event.set()
+                        state.queue.task_done()
             finally:
-                event.set()
-                state.queue.task_done()
+                browser.close()
+    except Exception as exc:
+        state.fatal_error = f"Browser worker failed: {exc}"
+        logger.exception("[MatchaBridge] %s", state.fatal_error)
+    finally:
+        state.is_running = False
+        state.ready_eth.clear()
+        state.ready_sol.clear()
+        from queue import Empty
 
-        browser.close()
+        while True:
+            try:
+                _, _, _, event, result_box = state.queue.get_nowait()
+            except Empty:
+                break
+            result_box["error"] = state.fatal_error or "Browser worker stopped"
+            event.set()
+            state.queue.task_done()
 
 
 def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:

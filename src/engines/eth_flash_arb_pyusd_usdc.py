@@ -1543,10 +1543,22 @@ def write_plan(path: str | None, plan: dict[str, Any]) -> None:
         return
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(plan, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    payload = json.dumps(plan, indent=2, sort_keys=True) + "\n"
+    paths = [output_path]
+    tx_hash = str(plan.get("transactionHash", ""))
+    if len(tx_hash) == 66 and is_hex_data(tx_hash):
+        paths.append(output_path.parent / "transactions" / f"{tx_hash}.json")
+    for destination in paths:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def transaction_is_absent_and_nonce_unused(
@@ -1591,22 +1603,27 @@ def broadcast_flashbots_or_fallback(
     rpc_url: str,
     receipt_timeout: float = 120.0,
 ) -> tuple[Any, str]:
-    """Submit via Python Flashbots implementation (Protect RPC & Relay bundle) for MEV privacy.
-
-    If Flashbots fails or is unreachable, falls back to standard RPCs without removing them.
-    """
+    """Submit privately; public fallback requires ETH_ALLOW_PUBLIC_FALLBACK=true."""
     import urllib.request
-    from eth_account import Account
-    from eth_account.messages import encode_defunct
     from web3 import Web3
+    try:
+        from .flashbots_relay import flashbots_signature_header, new_auth_key, serialize_body
+    except ImportError:  # Direct script execution.
+        from flashbots_relay import flashbots_signature_header, new_auth_key, serialize_body
 
     raw_tx = signed_tx.raw_transaction
     raw_tx_hex = "0x" + raw_tx.hex() if not raw_tx.hex().startswith("0x") else raw_tx.hex()
     tx_hash = signed_tx.hash
+    hash_text = tx_hash if isinstance(tx_hash, str) else "0x" + bytes(tx_hash).hex()
 
     flashbots_rpc = os.getenv("ETH_FLASHBOTS_RPC", "https://rpc.flashbots.net/fast").strip()
     flashbots_relay = os.getenv("ETH_FLASHBOTS_RELAY", "https://relay.flashbots.net").strip()
-    enable_flashbots = os.getenv("ETH_ENABLE_FLASHBOTS", "true").strip().lower() != "false"
+    enable_flashbots = os.getenv("ETH_ENABLE_FLASHBOTS", "true").strip().lower() not in (
+        "false", "0", "no",
+    )
+    allow_public_fallback = os.getenv("ETH_ALLOW_PUBLIC_FALLBACK", "false").strip().lower() in (
+        "true", "1", "yes",
+    )
 
     if enable_flashbots and flashbots_rpc:
         try:
@@ -1623,18 +1640,20 @@ def broadcast_flashbots_or_fallback(
             )
             with urllib.request.urlopen(req, timeout=12.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                if "result" in data:
+                if not data.get("error") and str(data.get("result", "")).lower() == hash_text.lower():
                     logger.info("[Flashbots] Submitted privately via Flashbots Protect: %s", data["result"])
                     return tx_hash, "flashbots-protect"
                 if "error" in data:
                     logger.warning("[Flashbots] Flashbots Protect returned error: %s", data["error"])
+                else:
+                    logger.warning("[Flashbots] Protect did not acknowledge the signed transaction hash")
         except Exception as exc:
             logger.warning("[Flashbots] Flashbots Protect submission error: %s", exc)
 
     if enable_flashbots and flashbots_relay:
         try:
             block_number = web3.eth.block_number
-            bundle_body = json.dumps({
+            bundle_body = serialize_body({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "eth_sendBundle",
@@ -1643,15 +1662,12 @@ def broadcast_flashbots_or_fallback(
                     "blockNumber": hex(block_number + 1),
                 }],
             })
-            body_hash = Web3.keccak(text=bundle_body)
-            msg = encode_defunct(body_hash)
-            signer = Account.from_key(private_key)
-            sig = signer.sign_message(msg).signature.hex()
-            fb_sig = f"{signer.address}:0x{sig.removeprefix('0x')}"
+            auth_key = os.getenv("FLASHBOTS_AUTH_KEY", "").strip() or new_auth_key()
+            fb_sig = flashbots_signature_header(bundle_body, auth_key)
 
             req = urllib.request.Request(
                 flashbots_relay,
-                data=bundle_body.encode("utf-8"),
+                data=bundle_body,
                 headers={
                     "Content-Type": "application/json",
                     "X-Flashbots-Signature": fb_sig,
@@ -1660,15 +1676,24 @@ def broadcast_flashbots_or_fallback(
             )
             with urllib.request.urlopen(req, timeout=12.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                if "result" in data:
+                result = data.get("result")
+                if not data.get("error") and isinstance(result, dict) and result.get("bundleHash"):
                     logger.info("[Flashbots] Submitted bundle via Flashbots Relay: %s", data["result"])
                     return tx_hash, "flashbots-relay"
                 if "error" in data:
                     logger.warning("[Flashbots] Flashbots Relay returned error: %s", data["error"])
+                else:
+                    logger.warning("[Flashbots] Relay did not return a bundle hash")
         except Exception as exc:
             logger.warning("[Flashbots] Flashbots Relay bundle error: %s", exc)
 
-    # Fallback to existing standard RPCs without removing them
+    if enable_flashbots and not allow_public_fallback:
+        raise ArbError(
+            "Flashbots submission was not acknowledged; public fallback is disabled. "
+            "The signed transaction may still be pending privately; reconcile its hash before retrying."
+        )
+
+    # Public submission is explicitly selected or explicitly permitted as fallback.
     logger.info("[Privacy RPC] Falling back to standard RPC (%s)...", safe_endpoint(rpc_url))
     try:
         sent_hash = web3.eth.send_raw_transaction(raw_tx)
@@ -1716,7 +1741,10 @@ def record_transaction_receipt(
             if type(exc).__name__ == "TimeExhausted"
             else "rpc-error"
         )
-        if transaction_is_absent_and_nonce_unused(plan, web3, transaction_hash):
+        if (
+            not str(plan.get("broadcastMethod", "")).startswith("flashbots")
+            and transaction_is_absent_and_nonce_unused(plan, web3, transaction_hash)
+        ):
             plan["transactionStatus"] = "dropped"
             plan["receiptConfirmation"] = "not-found-nonce-unused"
         write_plan(output_path, plan)
@@ -1731,6 +1759,47 @@ def record_transaction_receipt(
         "effectiveGasPrice": int(receipt.get("effectiveGasPrice", 0)),
     }
     write_plan(output_path, plan)
+
+
+def submit_transaction_plan(
+    plan: dict[str, Any],
+    web3: Any,
+    transaction: dict[str, Any],
+    private_key: str,
+    rpc_url: str,
+    receipt_timeout: float,
+    output_path: str | None,
+) -> None:
+    """Persist local transaction identity before sending, including uncertain delivery."""
+    signed = web3.eth.account.sign_transaction(transaction, private_key)
+    plan["transactionHash"] = "0x" + bytes(signed.hash).hex()
+    plan["transactionStatus"] = "submitted"
+    plan["broadcastMethod"] = (
+        "flashbots-unacknowledged"
+        if os.getenv("ETH_ENABLE_FLASHBOTS", "true").strip().lower() not in ("false", "0", "no")
+        else "standard-rpc-unacknowledged"
+    )
+    write_plan(output_path, plan)
+    try:
+        transaction_hash, method = broadcast_flashbots_or_fallback(
+            web3=web3,
+            signed_tx=signed,
+            private_key=private_key,
+            rpc_url=rpc_url,
+            receipt_timeout=receipt_timeout,
+        )
+    except Exception as exc:
+        plan["broadcastError"] = str(exc)
+        write_plan(output_path, plan)
+        return
+    plan["broadcastMethod"] = method
+    record_transaction_receipt(
+        plan,
+        web3,
+        transaction_hash,
+        receipt_timeout,
+        output_path,
+    )
 
 
 def require_web3() -> Any:
@@ -2834,21 +2903,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"{raw_to_amount(effective_min_net_profit)} {loan_symbol}"
         )
     if args.send:
-        signed = web3.eth.account.sign_transaction(transaction, private_key)
-        transaction_hash, method = broadcast_flashbots_or_fallback(
-            web3=web3,
-            signed_tx=signed,
-            private_key=private_key,
-            rpc_url=args.rpc_url,
-            receipt_timeout=args.receipt_timeout,
-        )
-        plan["broadcastMethod"] = method
-        record_transaction_receipt(
-            plan,
-            web3,
-            transaction_hash,
-            args.receipt_timeout,
-            args.output,
+        submit_transaction_plan(
+            plan, web3, transaction, private_key, args.rpc_url,
+            args.receipt_timeout, args.output,
         )
 
     return plan

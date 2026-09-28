@@ -756,7 +756,7 @@ class EthereumFlashArbTests(unittest.TestCase):
         mock_resp.__enter__ = Mock(return_value=mock_resp)
         mock_resp.__exit__ = Mock(return_value=None)
 
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch.dict(os.environ, {"ETH_ENABLE_FLASHBOTS": "true"}), patch("urllib.request.urlopen", return_value=mock_resp):
             tx_hash, method = pyusd_arb.broadcast_flashbots_or_fallback(
                 fake_web3,
                 fake_tx,
@@ -774,7 +774,8 @@ class EthereumFlashArbTests(unittest.TestCase):
         fake_web3.eth.send_raw_transaction.return_value = b"\xaa\xbb"
 
         # Flashbots raises exception -> falls back to standard web3 RPC
-        with patch("urllib.request.urlopen", side_effect=Exception("Flashbots offline")):
+        fake_web3.eth.block_number = 123456
+        with patch.dict(os.environ, {"ETH_ENABLE_FLASHBOTS": "true", "ETH_ALLOW_PUBLIC_FALLBACK": "true"}), patch("urllib.request.urlopen", side_effect=Exception("Flashbots offline")):
             tx_hash, method = pyusd_arb.broadcast_flashbots_or_fallback(
                 fake_web3,
                 fake_tx,
@@ -789,4 +790,3 @@ class EthereumFlashArbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

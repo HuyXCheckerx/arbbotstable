@@ -1168,7 +1168,7 @@ def run_ethereum_route_direct(
         if tx_status == "confirmed" and tx_link:
             return Outcome(
                 True,
-                f"confirmed in {elapsed:.1f}s: {tx_link}",
+                f"confirmed in {elapsed:.1f}s via {plan.get('broadcastMethod', 'unknown')}: {tx_link}",
                 "confirmed",
                 gross_profit=gross_profit,
                 net_profit=net_profit,

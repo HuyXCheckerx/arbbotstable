@@ -20,6 +20,29 @@ liquidity. The older
 `eth_flash_arb.py` USDT route remains available as a separate legacy prototype;
 it is not part of the 24-variant sniper rotation.
 
+## Flashbots submission and records
+
+The current engine tries Flashbots Protect first, then the authenticated Flashbots
+bundle relay. Relay authentication uses the shared implementation in
+`src/engines/flashbots_relay.py`. Set `FLASHBOTS_AUTH_KEY` to an unfunded reputation
+key to keep a stable relay identity; an ephemeral key is generated if it is unset.
+The operator's funded key is not used for relay authentication.
+
+Public-RPC fallback is disabled by default. Set `ETH_ALLOW_PUBLIC_FALLBACK=true`
+only if sending the signed arbitrage transaction to the public mempool is intended.
+Setting `ETH_ENABLE_FLASHBOTS=false` explicitly selects ordinary RPC submission.
+An unacknowledged private submission remains unresolved; public-node absence is
+not treated as proof that Flashbots dropped it.
+
+When an output path is configured, the engine atomically saves the locally known
+transaction hash before broadcast and retains a per-hash record under
+`transactions/` beside the route plan. For the sniper these records are under
+`logs/sniper-plans/transactions/`. `broadcastMethod` identifies the acknowledged
+transport (`flashbots-protect`, `flashbots-relay`, or an explicitly permitted RPC)
+and `transactionStatus` separately records receipt confirmation. The sniper's
+confirmed-result log now includes the transport. Acknowledgement is not proof of
+inclusion or proof that no other party also submitted the transaction.
+
 ## Files
 
 - `contracts/MorphoMatchaStableArbUsdc.sol` is the current on-chain atomic executor.
