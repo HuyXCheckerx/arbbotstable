@@ -1681,6 +1681,16 @@ def _handle_route_outcome(
                 "Return market is unavailable",
             )
     elif outcome.category == "access-blocked-matcha":
+        if route.chain == "ethereum":
+            try:
+                from src.engines.proxy_executor import is_taker_blocked, rotate_blocked_proxy_and_restart
+                from src.config.contracts import get_current_executor
+                current_exec = get_current_executor()
+                if is_taker_blocked(current_exec, outcome.detail):
+                    rotate_blocked_proxy_and_restart(logger, current_exec)
+            except Exception as exc:
+                logger.warning("[ProxyExecutor] Taker block evaluation error: %s", exc)
+
         dependency = f"metamatcha:{route.chain}"
         backoff.block(dependency, cooldown_policy.provider_access_seconds)
         logger.info(
