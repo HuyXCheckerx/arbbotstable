@@ -1275,6 +1275,13 @@ def run_route(
     )
     started = time.monotonic()
     started_wall = time.time()
+    creationflags = 0
+    startupinfo = None
+    if sys.platform == "win32":
+        creationflags = subprocess.CREATE_NO_WINDOW
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
     try:
         result = subprocess.run(
             invocation.command,
@@ -1286,6 +1293,8 @@ def run_route(
             errors="replace",
             timeout=timeout_seconds,
             check=False,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
         )
     except subprocess.TimeoutExpired as exc:
         captured = "\n".join(
