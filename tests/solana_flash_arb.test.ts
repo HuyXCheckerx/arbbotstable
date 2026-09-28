@@ -45,6 +45,11 @@ import {
   prerunCandidateQuotes,
   parseSolanaRpcEndpoints,
   wrapConnectionWithResilientRpc,
+  getKaminoReserveInfo,
+  kaminoFlashLoanFeeRaw,
+  isMarginfiBorrowError,
+  buildKaminoFlashTransaction,
+  KAMINO_PROGRAM_ID,
   type JupiterQuote,
   type StableLeg,
 } from "../src/engines/solana_flash_arb.js";
@@ -381,6 +386,13 @@ test("validates CLI route and provider choices", () => {
   assert.equal(options.provider, "marginfi");
   assert.equal(options.dexProvider, "metamatcha");
   assert.equal(options.lookupTable, "BoTWvDa5rCYuoseapp9X2puDQZavWTjeva384e4b619S");
+
+  const optionsKamino = parseCli(["--provider", "kamino"]);
+  assert.equal(optionsKamino.provider, "kamino");
+
+  const optionsAuto = parseCli(["--provider", "auto"]);
+  assert.equal(optionsAuto.provider, "auto");
+
   assert.throws(() => parseCli(["--swap-order", "sideways"]), /must be/);
   assert.throws(() => parseCli(["--provider", "solana"]), /must be/);
   assert.throws(() => parseCli(["--dex-provider", "raydium"]), /must be/);
@@ -928,6 +940,180 @@ test("getDFlowQuote formats quote response correctly", async () => {
     globalThis.fetch = origFetch;
   }
 });
+
+test("resolves Kamino reserves and accurate zero-fee structure for PYUSD and USDG", () => {
+  const pyusdInfo = getKaminoReserveInfo(PYUSD_MINT);
+  assert.equal(pyusdInfo.feeBps, 0);
+  assert.equal(pyusdInfo.reserve.toBase58(), "2gc9Dm1eB6UgVYFBUN9bWks6Kes9PbWSaPaa9DqyvEiN");
+  assert.equal(pyusdInfo.tokenProgram.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58());
+
+  const usdgInfo = getKaminoReserveInfo(USDG_MINT);
+  assert.equal(usdgInfo.feeBps, 0);
+  assert.equal(usdgInfo.reserve.toBase58(), "ESCkPWKHmgNE7Msf77n9yzqJd5kQVWWGy3o5Mgxhvavp");
+  assert.equal(usdgInfo.tokenProgram.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58());
+
+  const usdcInfo = getKaminoReserveInfo(USDC_MINT);
+  assert.equal(usdcInfo.feeBps, 0.1);
+
+  assert.equal(kaminoFlashLoanFeeRaw(10_000_000_000n, PYUSD_MINT), 0n);
+  assert.equal(kaminoFlashLoanFeeRaw(10_000_000_000n, USDG_MINT), 0n);
+  // 100,000 USDC -> 0.1 bps fee = 1 USDC (1,000,000 raw)
+  assert.equal(kaminoFlashLoanFeeRaw(100_000_000_000n, USDC_MINT), 1_000_000n);
+});
+
+test("isMarginfiBorrowError recognizes AnchorError 6026 and Marginfi failure logs", () => {
+  assert.ok(isMarginfiBorrowError(new Error("AnchorError 6026: IllegalUtilizationRatio")));
+  assert.ok(isMarginfiBorrowError(new Error("custom program error: 0x178a")));
+  assert.ok(isMarginfiBorrowError(new Error("Program MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA failed")));
+  assert.ok(isMarginfiBorrowError(new Error("LendingAccountBorrow failed")));
+  assert.equal(isMarginfiBorrowError(new Error("custom program error: 0x1771")), false);
+});
+
+test("buildKaminoFlashTransaction constructs valid atomic borrow and repay instructions", async () => {
+  const wallet = Keypair.generate();
+  const dummySwapIx = {
+    programId: STABLE_PROGRAM_ID,
+    keys: [
+      { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
+    ],
+    data: Buffer.alloc(10),
+  };
+  const blockhash = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+
+  const tx = await buildKaminoFlashTransaction(
+    wallet,
+    PYUSD_MINT,
+    50_000_000_000n,
+    [dummySwapIx as any],
+    [],
+    blockhash,
+    300_000,
+    1_000,
+  );
+
+  assert.ok(tx);
+  assert.equal(tx.signatures.length, 1);
+  const msg = tx.message;
+  // 2 compute budget ixs + 1 borrow ix + 1 dummy swap + 1 repay ix = 5 instructions
+  assert.equal(msg.compiledInstructions.length, 5);
+
+  // Borrow instruction is at index 2
+  const borrowIx = msg.compiledInstructions[2];
+  const borrowProgramPk = msg.staticAccountKeys[borrowIx.programIdIndex];
+  assert.equal(borrowProgramPk.toBase58(), KAMINO_PROGRAM_ID.toBase58());
+
+  // Repay instruction is at index 4
+  const repayIx = msg.compiledInstructions[4];
+  const repayProgramPk = msg.staticAccountKeys[repayIx.programIdIndex];
+  assert.equal(repayProgramPk.toBase58(), KAMINO_PROGRAM_ID.toBase58());
+
+  // Repay instruction data last byte is borrowInstructionIndex = 2
+  const repayData = Buffer.from(repayIx.data);
+  assert.equal(repayData.readUInt8(16), 2);
+});
+
+test("prerunCandidateQuotes automatically falls back from Marginfi to Kamino when Marginfi borrow fails", async () => {
+  const wallet = Keypair.generate();
+  const mockConfig: any = {
+    provider: "auto",
+    loanSymbol: "PYUSD",
+    loanMint: PYUSD_MINT,
+    swapOrder: "stable-first",
+    dexProvider: "metamatcha",
+    probeComputeUnitLimit: 300000,
+    keypair: wallet,
+  };
+
+  const zerox = createMockMatchaQuote(wallet.publicKey, "0x", 10_030_000n);
+  const firstQuote: JupiterQuote = {
+    ...zerox,
+    candidates: [zerox],
+  };
+
+  const mockConnection = {
+    getAccountInfo: async () => null,
+    getMultipleAccountsInfo: async () => [],
+  } as unknown as Connection;
+
+  const mockStableLeg: StableLeg = {
+    instruction: SystemProgram.transfer({
+      fromPubkey: wallet.publicKey,
+      toPubkey: PublicKey.default,
+      lamports: 10,
+    }),
+    outputRaw: 10_000_000n,
+    executionFeeLamports: 10_000n,
+    nonce: 1n,
+    deadline: 9999999999n,
+  };
+
+  let callCount = 0;
+  const mockSimulate = async (
+    _conn: any,
+    transaction: VersionedTransaction,
+  ): Promise<number> => {
+    callCount += 1;
+    const hasKamino = transaction.message.staticAccountKeys.some((k) =>
+      k.equals(KAMINO_PROGRAM_ID),
+    );
+    if (!hasKamino) {
+      throw new Error(
+        "Marginfi USDG bank utilization is >100% on Solana (AnchorError 6026: IllegalUtilizationRatio); borrows are disabled on-chain",
+      );
+    }
+    return 185_000;
+  };
+
+  const winning = await prerunCandidateQuotes(
+    mockConfig,
+    mockConnection,
+    wallet.publicKey,
+    {
+      address: Keypair.generate().publicKey,
+      group: Keypair.generate().publicKey,
+      makeBorrowIx: async () => ({ instructions: [] }),
+      makeRepayIx: async () => ({ instructions: [] }),
+      getClient: () => ({
+        program: {
+          programId: new PublicKey("MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA"),
+          methods: {
+            lendingAccountStartFlashloan: () => ({
+              accounts: () => ({
+                accountsPartial: () => ({
+                  instruction: async () =>
+                    SystemProgram.transfer({
+                      fromPubkey: wallet.publicKey,
+                      toPubkey: PublicKey.default,
+                      lamports: 1,
+                    }),
+                }),
+              }),
+            }),
+          },
+        },
+        bankMap: new Map(),
+      }),
+    } as any,
+    { address: Keypair.generate().publicKey } as any,
+    10_000_000n,
+    false, // flash loan funded
+    firstQuote,
+    { inputRaw: 10_000_000n, outputRaw: 10_000_000n } as any,
+    10_000n,
+    [],
+    [],
+    "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    mockSimulate,
+    mockStableLeg,
+    "marginfi", // started with Marginfi as first option!
+  );
+
+  assert.equal(winning.aggregatorName, "0x");
+  assert.equal(winning.activeFlashProvider, "kamino");
+  assert.equal(winning.probeUnits, 185_000);
+  assert.ok(callCount >= 2, "Expected at least one Marginfi attempt followed by Kamino attempt");
+});
+
 
 
 

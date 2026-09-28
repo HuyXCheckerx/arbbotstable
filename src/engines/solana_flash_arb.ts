@@ -84,6 +84,109 @@ export const MAINNET_GENESIS_HASH =
 export const STABLE_PROGRAM_ID = new PublicKey(
   "2zz7bEA4TzSJFvvGBgdVAdFBpAfkZHK3fCFBQk63MiBG",
 );
+export const KAMINO_PROGRAM_ID = new PublicKey(
+  "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD",
+);
+export const KAMINO_MAIN_MARKET = new PublicKey(
+  "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF",
+);
+export const KAMINO_MAIN_MARKET_AUTHORITY = new PublicKey(
+  "9DrvZvyWh1HuAoZxvYWMvkf2XCzryCpGgHqrMjyDWpmo",
+);
+export const SYSVAR_INSTRUCTIONS = new PublicKey(
+  "Sysvar1nstructions1111111111111111111111111",
+);
+
+export interface KaminoReserveInfo {
+  reserve: PublicKey;
+  supplyVault: PublicKey;
+  feeVault: PublicKey;
+  tokenProgram: PublicKey;
+  feeBps: number;
+}
+
+export const KAMINO_RESERVES: Record<string, KaminoReserveInfo> = {
+  [PYUSD_MINT.toBase58()]: {
+    reserve: new PublicKey("2gc9Dm1eB6UgVYFBUN9bWks6Kes9PbWSaPaa9DqyvEiN"),
+    supplyVault: new PublicKey("Gm2itCNPBpBSSrgCA194pmErjwHAFVpvBBFvpdTF5LuJ"),
+    feeVault: new PublicKey("BcLJRx7GbyX2Jj8RFpYDnEE47Tm36wSskLnm7ALarEC1"),
+    tokenProgram: TOKEN_2022_PROGRAM_ID,
+    feeBps: 0,
+  },
+  [USDG_MINT.toBase58()]: {
+    reserve: new PublicKey("ESCkPWKHmgNE7Msf77n9yzqJd5kQVWWGy3o5Mgxhvavp"),
+    supplyVault: new PublicKey("DGBo8HmL7pBWBZLGePjHQ73JKRE37HVZ7ZbjA2FYUZHZ"),
+    feeVault: new PublicKey("39M8hy7EUypjxsHqsZQmNQqXGpknCwoCXzF7r8WMBbAs"),
+    tokenProgram: TOKEN_2022_PROGRAM_ID,
+    feeBps: 0,
+  },
+  [USDC_MINT.toBase58()]: {
+    reserve: new PublicKey("D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59"),
+    supplyVault: new PublicKey("Bgq7trRgVMeq33yt235zM2onQ4bRDBsY5EWiTetF4qw6"),
+    feeVault: new PublicKey("BbDUrk1bVtSixgQsPLBJFZEF7mwGstnD5joA1WzYvYFX"),
+    tokenProgram: TOKEN_PROGRAM_ID,
+    feeBps: 0.1,
+  },
+  [USDT_MINT.toBase58()]: {
+    reserve: new PublicKey("H3t6qZ1JkguCNTi9uzVKqQ7dvt2cum4XiXWom6Gn5e5S"),
+    supplyVault: new PublicKey("2Eff8Udy2G2gzNcf2619AnTx3xM4renEv4QrHKjS1o9N"),
+    feeVault: new PublicKey("ARCZqsnUpvPffquPjZR3sxpvScLQdbfZ5BGf3SZvyij7"),
+    tokenProgram: TOKEN_PROGRAM_ID,
+    feeBps: 0.1,
+  },
+};
+
+export function getKaminoReserveInfo(mint: PublicKey): KaminoReserveInfo {
+  const info = KAMINO_RESERVES[mint.toBase58()];
+  if (!info) {
+    throw new Error(
+      `No known Kamino reserve configured for mint ${mint.toBase58()}`,
+    );
+  }
+  return info;
+}
+
+export function kaminoFlashLoanFeeRaw(
+  loanAmountRaw: bigint,
+  loanMint: PublicKey,
+): bigint {
+  const info = getKaminoReserveInfo(loanMint);
+  if (info.feeBps <= 0) return 0n;
+  const feeBasisPointsScaled = BigInt(Math.round(info.feeBps * 10_000));
+  return (loanAmountRaw * feeBasisPointsScaled) / 100_000_000n;
+}
+
+export function isMarginfiBorrowError(error: unknown): boolean {
+  const msg = errorMessage(error);
+  return (
+    msg.includes("6026") ||
+    msg.includes("0x178a") ||
+    msg.includes("IllegalUtilizationRatio") ||
+    msg.includes("LendingAccountBorrow") ||
+    msg.includes("lending_account_borrow") ||
+    msg.includes("MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA") ||
+    msg.includes("Marginfi") ||
+    msg.includes("marginfi") ||
+    msg.includes("makeBorrowIx")
+  );
+}
+
+export async function getKaminoAvailableLiquidity(
+  connection: Connection,
+  mint: PublicKey,
+): Promise<bigint> {
+  const info = getKaminoReserveInfo(mint);
+  try {
+    const bal = await connection.getTokenAccountBalance(info.supplyVault);
+    const amount = BigInt(bal.value.amount);
+    return (amount * 95n) / 100n;
+  } catch (err) {
+    throw new Error(
+      `Failed to fetch Kamino supply vault balance for ${mint.toBase58()}: ${errorMessage(err)}`,
+    );
+  }
+}
+
 const TOKEN_DECIMALS = 6;
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const MAX_WIRE_TRANSACTION_BYTES = 1232;
@@ -246,7 +349,7 @@ interface Config {
   solUsdBufferBps: number;
   outputPath: string;
   commitment: Commitment;
-  provider: "marginfi" | "solend" | "auto";
+  provider: "marginfi" | "kamino" | "solend" | "auto";
   swapOrder: "dex-first" | "stable-first";
   customLookupTableAddresses: PublicKey[];
 }
@@ -256,7 +359,7 @@ export interface CliOptions {
   send: boolean;
   createMarginfiAccount: boolean;
   setupSubAtas?: boolean;
-  provider?: "marginfi" | "solend" | "auto";
+  provider?: "marginfi" | "kamino" | "solend" | "auto";
   dexProvider?: "metamatcha" | "dflow" | "jupiter";
   swapOrder?: "dex-first" | "stable-first";
   lookupTable?: string;
@@ -621,7 +724,7 @@ function readConfig(cli: CliOptions): Config {
     configuredChoice(
       "SOL_FLASH_ARB_PROVIDER",
       "auto",
-      ["marginfi", "solend", "auto"] as const,
+      ["marginfi", "kamino", "solend", "auto"] as const,
     );
   const swapOrder =
     cli.swapOrder ??
@@ -790,8 +893,8 @@ export function parseCli(argv: string[]): CliOptions {
     else if (arg === "--setup-sub-atas") options.setupSubAtas = true;
     else if (arg === "--provider") {
       const p = argv[++index]?.toLowerCase();
-      if (p !== "marginfi" && p !== "solend" && p !== "auto") {
-        throw new Error("--provider must be marginfi, solend, or auto");
+      if (p !== "marginfi" && p !== "kamino" && p !== "solend" && p !== "auto") {
+        throw new Error("--provider must be marginfi, kamino, solend, or auto");
       }
       options.provider = p;
     }
@@ -2191,6 +2294,164 @@ async function buildFlashTransaction(
   }
 }
 
+export async function buildKaminoFlashTransaction(
+  keypair: Keypair,
+  loanMint: PublicKey,
+  loanAmountRaw: bigint,
+  swapInstructions: TransactionInstruction[],
+  lookupTables: AddressLookupTableAccount[],
+  blockhash: string,
+  computeUnitLimit: number,
+  computeUnitPriceMicroLamports: number,
+  additionalSigners: Keypair[] = [],
+): Promise<VersionedTransaction> {
+  const reserveInfo = getKaminoReserveInfo(loanMint);
+  const userAta = getAssociatedTokenAddressSync(
+    loanMint,
+    keypair.publicKey,
+    false,
+    reserveInfo.tokenProgram,
+  );
+
+  const borrowData = Buffer.alloc(16);
+  Buffer.from([135, 231, 52, 167, 7, 52, 212, 193]).copy(borrowData, 0);
+  borrowData.writeBigUInt64LE(loanAmountRaw, 8);
+
+  const borrowIx = new TransactionInstruction({
+    programId: KAMINO_PROGRAM_ID,
+    data: borrowData,
+    keys: [
+      { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+      { pubkey: KAMINO_MAIN_MARKET_AUTHORITY, isSigner: false, isWritable: false },
+      { pubkey: KAMINO_MAIN_MARKET, isSigner: false, isWritable: false },
+      { pubkey: reserveInfo.reserve, isSigner: false, isWritable: true },
+      { pubkey: loanMint, isSigner: false, isWritable: false },
+      { pubkey: reserveInfo.supplyVault, isSigner: false, isWritable: true },
+      { pubkey: userAta, isSigner: false, isWritable: true },
+      { pubkey: reserveInfo.feeVault, isSigner: false, isWritable: true },
+      { pubkey: KAMINO_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: KAMINO_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
+      { pubkey: reserveInfo.tokenProgram, isSigner: false, isWritable: false },
+    ],
+  });
+
+  const computeBudgetIxs: TransactionInstruction[] = [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
+    ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: computeUnitPriceMicroLamports,
+    }),
+  ];
+
+  const borrowIxIndex = computeBudgetIxs.length;
+  const kaminoFee = kaminoFlashLoanFeeRaw(loanAmountRaw, loanMint);
+  const repayAmountRaw = loanAmountRaw + kaminoFee;
+
+  const repayData = Buffer.alloc(17);
+  Buffer.from([185, 117, 0, 203, 96, 245, 180, 186]).copy(repayData, 0);
+  repayData.writeBigUInt64LE(repayAmountRaw, 8);
+  repayData.writeUInt8(borrowIxIndex, 16);
+
+  const repayIx = new TransactionInstruction({
+    programId: KAMINO_PROGRAM_ID,
+    data: repayData,
+    keys: [
+      { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+      { pubkey: KAMINO_MAIN_MARKET_AUTHORITY, isSigner: false, isWritable: false },
+      { pubkey: KAMINO_MAIN_MARKET, isSigner: false, isWritable: false },
+      { pubkey: reserveInfo.reserve, isSigner: false, isWritable: true },
+      { pubkey: loanMint, isSigner: false, isWritable: false },
+      { pubkey: reserveInfo.supplyVault, isSigner: false, isWritable: true },
+      { pubkey: userAta, isSigner: false, isWritable: true },
+      { pubkey: reserveInfo.feeVault, isSigner: false, isWritable: true },
+      { pubkey: KAMINO_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: KAMINO_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
+      { pubkey: reserveInfo.tokenProgram, isSigner: false, isWritable: false },
+    ],
+  });
+
+  const instructions: TransactionInstruction[] = [
+    ...computeBudgetIxs,
+    borrowIx,
+    ...swapInstructions,
+    repayIx,
+  ];
+
+  try {
+    const message = new TransactionMessage({
+      payerKey: keypair.publicKey,
+      recentBlockhash: blockhash,
+      instructions,
+    }).compileToV0Message(lookupTables);
+
+    const transaction = new VersionedTransaction(message);
+    const requiredSigners = message.staticAccountKeys.slice(
+      0,
+      message.header.numRequiredSignatures,
+    );
+    const signers = [keypair, ...additionalSigners].filter((s) =>
+      requiredSigners.some((req) => req.equals(s.publicKey)),
+    );
+    transaction.sign(signers);
+    return transaction;
+  } catch (err: unknown) {
+    const msg = errorMessage(err);
+    if (msg.includes("encoding overruns")) {
+      throw new Error(
+        "Atomic transaction exceeds Solana 1232-byte size limit (encoding overruns Uint8Array)",
+      );
+    }
+    throw err;
+  }
+}
+
+export async function buildFlashLoanTransaction(
+  provider: "marginfi" | "kamino",
+  account: MarginfiAccountWrapper | undefined,
+  keypair: Keypair,
+  loanMint: PublicKey,
+  bankAddress: PublicKey | undefined,
+  loanAmountRaw: bigint,
+  swapInstructions: TransactionInstruction[],
+  lookupTables: AddressLookupTableAccount[],
+  blockhash: string,
+  computeUnitLimit: number,
+  computeUnitPriceMicroLamports: number,
+  additionalSigners: Keypair[] = [],
+): Promise<VersionedTransaction> {
+  if (provider === "kamino") {
+    return buildKaminoFlashTransaction(
+      keypair,
+      loanMint,
+      loanAmountRaw,
+      swapInstructions,
+      lookupTables,
+      blockhash,
+      computeUnitLimit,
+      computeUnitPriceMicroLamports,
+      additionalSigners,
+    );
+  }
+  if (!account || !bankAddress) {
+    throw new Error(
+      "Marginfi account and bank address are required for Marginfi flash loans",
+    );
+  }
+  return buildFlashTransaction(
+    account,
+    keypair,
+    bankAddress,
+    loanAmountRaw,
+    swapInstructions,
+    lookupTables,
+    blockhash,
+    computeUnitLimit,
+    computeUnitPriceMicroLamports,
+    additionalSigners,
+  );
+}
+
 export async function buildWalletFundedTransaction(
   keypair: Keypair,
   instructions: TransactionInstruction[],
@@ -2263,6 +2524,7 @@ export interface ExecutableCandidate {
   stableLeg: StableLeg;
   probe: VersionedTransaction;
   probeUnits: number;
+  activeFlashProvider?: "marginfi" | "kamino";
 }
 
 export interface CandidateEvaluationResult {
@@ -2293,6 +2555,7 @@ export async function prerunCandidateQuotes(
     transaction: VersionedTransaction,
   ) => Promise<number> = simulate,
   existingStableLeg?: StableLeg,
+  flashProvider: "marginfi" | "kamino" = config.provider === "kamino" ? "kamino" : "marginfi",
 ): Promise<ExecutableCandidate> {
   const candidates: JupiterQuote[] = firstQuote.candidates?.length
     ? firstQuote.candidates
@@ -2337,7 +2600,7 @@ export async function prerunCandidateQuotes(
             ...swapLeg.instructions,
           ];
           const additionalSigners = config.subKeypair ? [config.subKeypair] : [];
-          const probe = isWalletFunded
+          let probe = isWalletFunded
             ? await buildWalletFundedTransaction(
                 config.keypair,
                 swapInstructions,
@@ -2347,10 +2610,12 @@ export async function prerunCandidateQuotes(
                 0,
                 additionalSigners,
               )
-            : await buildFlashTransaction(
-                account!,
+            : await buildFlashLoanTransaction(
+                flashProvider,
+                account,
                 config.keypair,
-                loanBank!.address,
+                config.loanMint,
+                loanBank?.address,
                 loanAmountRaw,
                 swapInstructions,
                 lookupTables,
@@ -2359,7 +2624,7 @@ export async function prerunCandidateQuotes(
                 0,
                 additionalSigners,
               );
-          const probeWireSize = probe.serialize().length;
+          let probeWireSize = probe.serialize().length;
           if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
             return {
               candidate: cand,
@@ -2369,7 +2634,51 @@ export async function prerunCandidateQuotes(
               isPoisoned: false,
             };
           }
-          const probeUnits = await simulateFn(connection, probe);
+          let probeUnits: number;
+          let candidateProvider = flashProvider;
+          try {
+            probeUnits = await simulateFn(connection, probe);
+          } catch (simError) {
+            if (
+              !isWalletFunded &&
+              flashProvider === "marginfi" &&
+              config.provider === "auto" &&
+              isMarginfiBorrowError(simError)
+            ) {
+              console.log(
+                `  - ${aggregatorName}: Marginfi candidate simulation failed (${errorMessage(simError)}). Retrying candidate immediately with Kamino Lending fallback...`,
+              );
+              const kaminoProbe = await buildFlashLoanTransaction(
+                "kamino",
+                account,
+                config.keypair,
+                config.loanMint,
+                loanBank?.address,
+                loanAmountRaw,
+                swapInstructions,
+                lookupTables,
+                blockhash,
+                config.probeComputeUnitLimit,
+                0,
+                additionalSigners,
+              );
+              const kaminoWireSize = kaminoProbe.serialize().length;
+              if (kaminoWireSize > MAX_WIRE_TRANSACTION_BYTES) {
+                return {
+                  candidate: cand,
+                  aggregatorName,
+                  grossProfitRaw: candGrossProfitRaw,
+                  error: `transaction size ${kaminoWireSize} bytes exceeds Solana 1232-byte limit (Kamino fallback)`,
+                  isPoisoned: false,
+                };
+              }
+              probeUnits = await simulateFn(connection, kaminoProbe);
+              probe = kaminoProbe;
+              candidateProvider = "kamino";
+            } else {
+              throw simError;
+            }
+          }
           const cycle: ConservativeCycle = {
             firstLegMinimumRaw: stableQuote.outputRaw,
             secondLegMinimumRaw: candOutputRaw,
@@ -2391,6 +2700,7 @@ export async function prerunCandidateQuotes(
               stableLeg,
               probe,
               probeUnits,
+              activeFlashProvider: candidateProvider,
             },
           };
         } catch (error) {
@@ -2405,6 +2715,10 @@ export async function prerunCandidateQuotes(
       }),
     );
   } else {
+    const stableLegCache = new Map<string, StableLeg>();
+    if (existingStableLeg) {
+      stableLegCache.set(`${stableQuote.inputRaw}_${stableQuote.outputRaw}`, existingStableLeg);
+    }
     results = await Promise.all(
       candidates.map(async (cand, index): Promise<CandidateEvaluationResult> => {
         const aggregatorName =
@@ -2429,14 +2743,16 @@ export async function prerunCandidateQuotes(
               isPoisoned: false,
             };
           }
-          const candStableLeg =
-            candFirstLegMinimumRaw === stableQuote.inputRaw && existingStableLeg
-              ? existingStableLeg
-              : await getStableLeg(
-                  config,
-                  walletAddress,
-                  candStableQuote,
-                );
+          const cacheKey = `${candStableQuote.inputRaw}_${candStableQuote.outputRaw}`;
+          let candStableLeg = stableLegCache.get(cacheKey);
+          if (!candStableLeg) {
+            candStableLeg = await getStableLeg(
+              config,
+              walletAddress,
+              candStableQuote,
+            );
+            stableLegCache.set(cacheKey, candStableLeg);
+          }
           const swapLeg = await getSwapLeg(
             config,
             cand,
@@ -2454,7 +2770,7 @@ export async function prerunCandidateQuotes(
             candStableLeg.instruction,
           ];
           const additionalSigners = config.subKeypair ? [config.subKeypair] : [];
-          const probe = isWalletFunded
+          let probe = isWalletFunded
             ? await buildWalletFundedTransaction(
                 config.keypair,
                 swapInstructions,
@@ -2464,10 +2780,12 @@ export async function prerunCandidateQuotes(
                 0,
                 additionalSigners,
               )
-            : await buildFlashTransaction(
-                account!,
+            : await buildFlashLoanTransaction(
+                flashProvider,
+                account,
                 config.keypair,
-                loanBank!.address,
+                config.loanMint,
+                loanBank?.address,
                 loanAmountRaw,
                 swapInstructions,
                 lookupTables,
@@ -2476,7 +2794,7 @@ export async function prerunCandidateQuotes(
                 0,
                 additionalSigners,
               );
-          const probeWireSize = probe.serialize().length;
+          let probeWireSize = probe.serialize().length;
           if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
             return {
               candidate: cand,
@@ -2486,7 +2804,51 @@ export async function prerunCandidateQuotes(
               isPoisoned: false,
             };
           }
-          const probeUnits = await simulateFn(connection, probe);
+          let probeUnits: number;
+          let candidateProvider = flashProvider;
+          try {
+            probeUnits = await simulateFn(connection, probe);
+          } catch (simError) {
+            if (
+              !isWalletFunded &&
+              flashProvider === "marginfi" &&
+              config.provider === "auto" &&
+              isMarginfiBorrowError(simError)
+            ) {
+              console.log(
+                `  - ${aggregatorName}: Marginfi candidate simulation failed (${errorMessage(simError)}). Retrying candidate immediately with Kamino Lending fallback...`,
+              );
+              const kaminoProbe = await buildFlashLoanTransaction(
+                "kamino",
+                account,
+                config.keypair,
+                config.loanMint,
+                loanBank?.address,
+                loanAmountRaw,
+                swapInstructions,
+                lookupTables,
+                blockhash,
+                config.probeComputeUnitLimit,
+                0,
+                additionalSigners,
+              );
+              const kaminoWireSize = kaminoProbe.serialize().length;
+              if (kaminoWireSize > MAX_WIRE_TRANSACTION_BYTES) {
+                return {
+                  candidate: cand,
+                  aggregatorName,
+                  grossProfitRaw: candGrossProfitRaw,
+                  error: `transaction size ${kaminoWireSize} bytes exceeds Solana 1232-byte limit (Kamino fallback)`,
+                  isPoisoned: false,
+                };
+              }
+              probeUnits = await simulateFn(connection, kaminoProbe);
+              probe = kaminoProbe;
+              candidateProvider = "kamino";
+            } else {
+              throw simError;
+            }
+          }
           const cycle: ConservativeCycle = {
             firstLegMinimumRaw: candFirstLegMinimumRaw,
             secondLegMinimumRaw: candStableQuote.outputRaw,
@@ -2508,6 +2870,7 @@ export async function prerunCandidateQuotes(
               stableLeg: candStableLeg,
               probe,
               probeUnits,
+              activeFlashProvider: candidateProvider,
             },
           };
         } catch (error) {
@@ -2545,6 +2908,35 @@ export async function prerunCandidateQuotes(
     .filter((exec): exec is ExecutableCandidate => exec !== undefined);
 
   if (!validCandidates.length) {
+    if (
+      !isWalletFunded &&
+      flashProvider === "marginfi" &&
+      config.provider === "auto" &&
+      results.some((res) => isMarginfiBorrowError(res.error))
+    ) {
+      console.log(
+        "[Atomic Prerun Fallback] Marginfi candidate simulation failed (utilization or borrow restricted on-chain). Retrying with Kamino Lending fallback...",
+      );
+      return prerunCandidateQuotes(
+        config,
+        connection,
+        walletAddress,
+        account,
+        loanBank,
+        loanAmountRaw,
+        isWalletFunded,
+        firstQuote,
+        stableQuote,
+        effectiveMinGrossRaw,
+        clientLookupTables,
+        customLookupTables,
+        blockhash,
+        simulateFn,
+        existingStableLeg,
+        "kamino",
+      );
+    }
+
     const details = results
       .map((res) => `  - ${res.aggregatorName}: ${res.error ?? "failed"}`)
       .join("\n");
@@ -2951,7 +3343,7 @@ async function main(): Promise<void> {
   const config = readConfig(cli);
   if (config.provider === "solend") {
     throw new Error(
-      "Solend flash loans are not implemented by this engine; use --provider marginfi or auto",
+      "Solend flash loans are not implemented by this engine; use --provider marginfi, kamino, or auto",
     );
   }
   const connection = wrapConnectionWithResilientRpc(
@@ -2982,6 +3374,7 @@ async function main(): Promise<void> {
     `Maximum flash-loan principal: ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol}`,
   );
 
+  let activeProvider: "marginfi" | "kamino" = "marginfi";
   let availableBankLiquidityRaw: bigint | undefined;
   let client: Project0Client | undefined;
   let account: MarginfiAccountWrapper | undefined;
@@ -3022,35 +3415,101 @@ async function main(): Promise<void> {
       console.log(
         `Wallet capital available: ${formatRaw(walletBalanceRaw)} ${config.loanSymbol} (Executing wallet-funded 2-hop route, 0 flash loan overhead)`,
       );
-    } else {
-      client = await Project0Client.initialize(
+    } else if (config.provider === "kamino") {
+      activeProvider = "kamino";
+      availableBankLiquidityRaw = await getKaminoAvailableLiquidity(
         connection,
-        getConfig("production"),
+        config.loanMint,
       );
-      account = await selectMarginfiAccount(
-        client,
-        walletAddress,
-        config.marginfiAccount,
-      );
-      const loanBanks = client.getBanksByMint(config.loanMint, AssetTag.DEFAULT);
-      if (loanBanks.length !== 1) {
-        throw new Error(
-          `Expected exactly one standard Marginfi ${config.loanSymbol} bank; found ${loanBanks.length}`,
+      const reserveInfo = getKaminoReserveInfo(config.loanMint);
+      console.log(`Flash loan provider: Kamino Lending (explicitly configured)`);
+      console.log(`Kamino ${config.loanSymbol} reserve: ${reserveInfo.reserve.toBase58()}`);
+      if (availableBankLiquidityRaw) {
+        console.log(
+          `Kamino liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`,
         );
       }
-      loanBank = loanBanks[0];
-      assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
+    } else {
+      // Marginfi must always be the first option!
+      console.log(`[Flash Loan] Inspecting Marginfi as primary flash loan provider...`);
+      let isMarginfiHealthy = false;
+      let marginfiUnavailableReason = "";
       try {
-        const vaultBalance = await connection.getTokenAccountBalance(loanBank.liquidityVault);
+        client = await Project0Client.initialize(
+          connection,
+          getConfig("production"),
+        );
+        account = await selectMarginfiAccount(
+          client,
+          walletAddress,
+          config.marginfiAccount,
+        );
+        const loanBanks = client.getBanksByMint(config.loanMint, AssetTag.DEFAULT);
+        if (loanBanks.length !== 1) {
+          throw new Error(
+            `Expected exactly one standard Marginfi ${config.loanSymbol} bank; found ${loanBanks.length}`,
+          );
+        }
+        loanBank = loanBanks[0];
+        assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
+
+        const vaultBalance = await connection.getTokenAccountBalance(
+          loanBank.liquidityVault,
+        );
         const vaultRaw = BigInt(vaultBalance.value.amount);
-        availableBankLiquidityRaw = (vaultRaw * 95n) / 100n;
-      } catch {
-        availableBankLiquidityRaw = undefined;
+        const headroom = (vaultRaw * 95n) / 100n;
+
+        // Check on-chain bank utilization to ensure borrow won't fail with AnchorError 6026: IllegalUtilizationRatio
+        const assets = loanBank.getTotalAssetQuantity();
+        const liabilities = loanBank.getTotalLiabilityQuantity();
+        const utilization = loanBank.computeUtilizationRate();
+        const isOverUtilized =
+          liabilities.gte(assets) ||
+          utilization.gte(0.98) ||
+          loanBank.totalLiabilityShares.gte(loanBank.totalAssetShares);
+
+        if (isOverUtilized) {
+          const utilPct = utilization.toNumber() * 100;
+          marginfiUnavailableReason = `Marginfi ${config.loanSymbol} bank utilization is ${utilPct.toFixed(2)}% (AnchorError 6026: IllegalUtilizationRatio; borrows disabled on-chain)`;
+        } else if (headroom < 1_000_000n) {
+          marginfiUnavailableReason = `Marginfi ${config.loanSymbol} liquid pool headroom is exhausted (${formatRaw(headroom)} ${config.loanSymbol})`;
+        } else {
+          isMarginfiHealthy = true;
+          activeProvider = "marginfi";
+          availableBankLiquidityRaw = headroom;
+          console.log(`Marginfi account: ${account.address.toBase58()}`);
+          console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
+          console.log(
+            `Marginfi liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`,
+          );
+        }
+      } catch (err) {
+        marginfiUnavailableReason = errorMessage(err);
       }
-      console.log(`Marginfi account: ${account.address.toBase58()}`);
-      console.log(`Marginfi ${config.loanSymbol} bank: ${loanBank.address.toBase58()}`);
-      if (availableBankLiquidityRaw) {
-        console.log(`Marginfi liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`);
+
+      if (!isMarginfiHealthy) {
+        if (config.provider === "marginfi") {
+          throw new Error(
+            `Marginfi flash loan is unavailable: ${marginfiUnavailableReason}`,
+          );
+        }
+        console.log(`[Flash Loan] Marginfi check: ${marginfiUnavailableReason}`);
+        console.log(
+          `[Flash Loan Fallback] Marginfi is unavailable; falling back to Kamino Lending as secondary provider.`,
+        );
+        activeProvider = "kamino";
+        availableBankLiquidityRaw = await getKaminoAvailableLiquidity(
+          connection,
+          config.loanMint,
+        );
+        const reserveInfo = getKaminoReserveInfo(config.loanMint);
+        console.log(`Flash loan provider: Kamino Lending (fallback)`);
+        console.log(`Kamino ${config.loanSymbol} reserve: ${reserveInfo.reserve.toBase58()}`);
+        if (availableBankLiquidityRaw) {
+          console.log(
+            `Kamino liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`,
+          );
+        }
       }
     }
   }
@@ -3129,7 +3588,7 @@ async function main(): Promise<void> {
     console.log("Quote-only mode: no transaction was built, signed, or sent.");
     return;
   }
-  if (!isWalletFunded && (!client || !account || !loanBank)) {
+  if (!isWalletFunded && activeProvider === "marginfi" && (!client || !account || !loanBank)) {
     throw new Error("Marginfi client or account not initialized");
   }
 
@@ -3176,10 +3635,12 @@ async function main(): Promise<void> {
           0,
           additionalSigners,
         )
-      : await buildFlashTransaction(
-          account!,
+      : await buildFlashLoanTransaction(
+          activeProvider,
+          account,
           config.keypair,
-          loanBank!.address,
+          config.loanMint,
+          loanBank?.address,
           loanAmountRaw,
           swapInstructions,
           lookupTables,
@@ -3198,7 +3659,38 @@ async function main(): Promise<void> {
         `Atomic transaction is ${probeWireSize} bytes before simulation; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}.${hint}`,
       );
     }
-    probeUnits = await simulate(connection, probe);
+    try {
+      probeUnits = await simulate(connection, probe);
+    } catch (err) {
+      if (
+        !isWalletFunded &&
+        activeProvider === "marginfi" &&
+        config.provider === "auto" &&
+        isMarginfiBorrowError(err)
+      ) {
+        console.log(
+          `[2-Hop Simulation Fallback] Marginfi simulation failed (${errorMessage(err)}). Retrying with Kamino Lending fallback...`,
+        );
+        activeProvider = "kamino";
+        probe = await buildFlashLoanTransaction(
+          activeProvider,
+          account,
+          config.keypair,
+          config.loanMint,
+          loanBank?.address,
+          loanAmountRaw,
+          swapInstructions,
+          lookupTables,
+          latest.blockhash,
+          config.probeComputeUnitLimit,
+          0,
+          additionalSigners,
+        );
+        probeUnits = await simulate(connection, probe);
+      } else {
+        throw err;
+      }
+    }
   } else {
     const winning = await prerunCandidateQuotes(
       config,
@@ -3214,7 +3706,13 @@ async function main(): Promise<void> {
       client?.addressLookupTables ?? [],
       customLookupTables,
       latest.blockhash,
+      simulate,
+      undefined,
+      activeProvider,
     );
+    if (winning.activeFlashProvider) {
+      activeProvider = winning.activeFlashProvider;
+    }
     firstQuote = winning.candidate;
     cycle = winning.cycle;
     swapInstructions = winning.swapInstructions;
@@ -3230,7 +3728,7 @@ async function main(): Promise<void> {
     config.probeComputeUnitLimit,
   );
   const additionalSigners = config.subKeypair ? [config.subKeypair] : [];
-  const transaction = isWalletFunded
+  let transaction = isWalletFunded
     ? await buildWalletFundedTransaction(
         config.keypair,
         swapInstructions,
@@ -3240,10 +3738,12 @@ async function main(): Promise<void> {
         config.computeUnitPriceMicroLamports,
         additionalSigners,
       )
-    : await buildFlashTransaction(
-        account!,
+    : await buildFlashLoanTransaction(
+        activeProvider,
+        account,
         config.keypair,
-        loanBank!.address,
+        config.loanMint,
+        loanBank?.address,
         loanAmountRaw,
         swapInstructions,
         lookupTables,
@@ -3261,7 +3761,39 @@ async function main(): Promise<void> {
       `Atomic transaction is ${wireSize} bytes; Solana maximum is ${MAX_WIRE_TRANSACTION_BYTES}.${hint}`,
     );
   }
-  const finalUnits = await simulate(connection, transaction);
+  let finalUnits: number;
+  try {
+    finalUnits = await simulate(connection, transaction);
+  } catch (err) {
+    if (
+      !isWalletFunded &&
+      activeProvider === "marginfi" &&
+      config.provider === "auto" &&
+      isMarginfiBorrowError(err)
+    ) {
+      console.log(
+        `[Final Simulation Fallback] Marginfi transaction simulation failed (${errorMessage(err)}). Retrying with Kamino Lending fallback...`,
+      );
+      activeProvider = "kamino";
+      transaction = await buildFlashLoanTransaction(
+        activeProvider,
+        account,
+        config.keypair,
+        config.loanMint,
+        loanBank?.address,
+        loanAmountRaw,
+        swapInstructions,
+        lookupTables,
+        latest.blockhash,
+        computeUnitLimit,
+        config.computeUnitPriceMicroLamports,
+        additionalSigners,
+      );
+      finalUnits = await simulate(connection, transaction);
+    } else {
+      throw err;
+    }
+  }
   const feeResponse = await connection.getFeeForMessage(
     transaction.message,
     config.commitment,
@@ -3275,7 +3807,10 @@ async function main(): Promise<void> {
     solUsd,
     config.solUsdBufferBps,
   );
-  const netProfitRaw = cycle.grossProfitRaw - executionCostRaw;
+  const kaminoFeeRaw = (!isWalletFunded && activeProvider === "kamino")
+    ? kaminoFlashLoanFeeRaw(loanAmountRaw, config.loanMint)
+    : 0n;
+  const netProfitRaw = cycle.grossProfitRaw - executionCostRaw - kaminoFeeRaw;
 
   console.log(`Simulation: passed (${finalUnits.toLocaleString()} compute units)`);
   console.log(`Transaction size: ${wireSize}/${MAX_WIRE_TRANSACTION_BYTES} bytes`);
@@ -3285,6 +3820,9 @@ async function main(): Promise<void> {
   );
   console.log(`SOL/USD: $${solUsd.toFixed(4)}`);
   console.log(`Buffered execution cost: ${formatRaw(executionCostRaw)} ${config.loanSymbol}`);
+  if (kaminoFeeRaw > 0n) {
+    console.log(`Kamino flash loan fee: ${formatRaw(kaminoFeeRaw)} ${config.loanSymbol}`);
+  }
   console.log(`Guaranteed net result: ${formatRaw(netProfitRaw)} ${config.loanSymbol}`);
 
   const stableFromSymbol = stableInputSymbol(
@@ -3300,7 +3838,11 @@ async function main(): Promise<void> {
   const plan: JsonRecord = {
     createdAt: new Date().toISOString(),
     wallet: walletAddress.toBase58(),
-    marginfiAccount: account?.address.toBase58() ?? null,
+    flashLoanProvider: isWalletFunded ? "wallet" : activeProvider,
+    marginfiAccount: (!isWalletFunded && activeProvider === "marginfi") ? account?.address.toBase58() ?? null : null,
+    marginfiBank: (!isWalletFunded && activeProvider === "marginfi") ? loanBank?.address.toBase58() ?? null : null,
+    kaminoReserve: (!isWalletFunded && activeProvider === "kamino") ? getKaminoReserveInfo(config.loanMint).reserve.toBase58() : null,
+    kaminoFlashLoanFeeRaw: kaminoFeeRaw.toString(),
     pair: `${config.loanSymbol}/${config.intermediateSymbol}`,
     stablePair: `${stableFromSymbol}/${stableToSymbol}`,
     dexPair: config.swapOrder === "dex-first"
@@ -3311,7 +3853,6 @@ async function main(): Promise<void> {
     swapOrder: config.swapOrder,
     loanSymbol: config.loanSymbol,
     intermediateSymbol: config.intermediateSymbol,
-    marginfiBank: loanBank?.address.toBase58() ?? null,
     configuredMaximumPrincipalRaw: config.maximumLoanAmountRaw.toString(),
     principalRaw: loanAmountRaw.toString(),
     capacityAdjusted: sized.capacityAdjusted,
