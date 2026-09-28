@@ -86,8 +86,12 @@ class Route:
     @property
     def dex_name(self) -> str:
         if self.chain == "solana":
-            provider = os.environ.get("SOL_FLASH_ARB_DEX_PROVIDER", "metamatcha")
-            return "Jupiter" if provider.strip().lower() == "jupiter" else "MetaMatcha"
+            provider = os.environ.get("SOL_FLASH_ARB_DEX_PROVIDER", "metamatcha").strip().lower()
+            if provider == "jupiter":
+                return "Jupiter"
+            if provider == "dflow":
+                return "DFlow"
+            return "MetaMatcha"
         provider = os.environ.get("ETH_ARB_QUOTE_PROVIDER", "matcha")
         return "Direct" if provider.strip().lower() == "direct" else "MetaMatcha"
 

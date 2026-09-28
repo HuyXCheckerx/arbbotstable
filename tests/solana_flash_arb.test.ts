@@ -16,9 +16,12 @@ import {
   capacityLimitedLoanAmount,
   capacityLimitedStableFirstLoanAmount,
   conservativeCycle,
+  deriveSubAccountKeypair,
+  dexProviderName,
   fetchJson,
   finalComputeUnitLimit,
   formatRaw,
+  getDFlowQuote,
   getMetaMatchaQuote,
   intermediateTokenProgram,
   isBlockheightExpiry,
@@ -850,5 +853,81 @@ test("broadcastJitoOrFallback falls back to standard RPC when Jito fails", async
     globalThis.fetch = origFetch;
   }
 });
+
+test("deriveSubAccountKeypair produces deterministic sub-taker keypair from master", () => {
+  const master = Keypair.generate();
+  const sub1 = deriveSubAccountKeypair(master, 1);
+  const sub1Again = deriveSubAccountKeypair(master, 1);
+  const sub2 = deriveSubAccountKeypair(master, 2);
+
+  assert.equal(sub1.publicKey.toBase58(), sub1Again.publicKey.toBase58());
+  assert.notEqual(sub1.publicKey.toBase58(), master.publicKey.toBase58());
+  assert.notEqual(sub1.publicKey.toBase58(), sub2.publicKey.toBase58());
+  assert.equal(sub1.secretKey.length, 64);
+});
+
+test("dexProviderName maps provider keys to display names", () => {
+  assert.equal(dexProviderName("metamatcha"), "MetaMatcha");
+  assert.equal(dexProviderName("dflow"), "DFlow");
+  assert.equal(dexProviderName("jupiter"), "Jupiter");
+});
+
+test("parseCli supports --dex-provider dflow, metamatcha, and jupiter", () => {
+  const optsDflow = parseCli(["--dex-provider", "dflow"]);
+  assert.equal(optsDflow.dexProvider, "dflow");
+
+  const optsMatcha = parseCli(["--dex-provider", "metamatcha"]);
+  assert.equal(optsMatcha.dexProvider, "metamatcha");
+
+  const optsJup = parseCli(["--dex-provider", "jupiter"]);
+  assert.equal(optsJup.dexProvider, "jupiter");
+
+  assert.throws(
+    () => parseCli(["--dex-provider", "unknown"]),
+    /--dex-provider must be metamatcha, dflow, or jupiter/,
+  );
+});
+
+test("getDFlowQuote formats quote response correctly", async () => {
+  const mockConfig: any = {
+    dflowApiBase: "https://dev-quote-api.dflow.net",
+    httpAttempts: 1,
+    httpTimeoutMs: 5000,
+  };
+  const origFetch = globalThis.fetch;
+  (globalThis as any).fetch = async (url: string) => {
+    assert.ok(url.includes("/quote?"));
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () =>
+        JSON.stringify({
+          inputMint: PYUSD_MINT.toBase58(),
+          outputMint: USDG_MINT.toBase58(),
+          inAmount: "10000000000",
+          outAmount: "10001759865",
+          otherAmountThreshold: "10001759865",
+          routePlan: [{ swapInfo: { ammKey: "amm1" }, percent: 100 }],
+        }),
+    };
+  };
+
+  try {
+    const quote = await getDFlowQuote(
+      mockConfig,
+      PYUSD_MINT,
+      USDG_MINT,
+      10000000000n,
+    );
+    assert.equal(quote.provider, "DFlow");
+    assert.equal(quote.inAmount, "10000000000");
+    assert.equal(quote.outAmount, "10001759865");
+    assert.equal(quote.otherAmountThreshold, "10001759865");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 
 

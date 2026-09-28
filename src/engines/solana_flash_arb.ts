@@ -61,6 +61,8 @@ import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentInstruction,
+  createTransferCheckedInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import bs58 from "bs58";
@@ -106,7 +108,7 @@ export interface JupiterQuote {
   routePlan: unknown[];
   contextSlot?: number;
   timeTaken?: number;
-  provider?: "MetaMatcha" | "Jupiter";
+  provider?: "MetaMatcha" | "DFlow" | "Jupiter";
   aggregator?: string;
   serializedTransaction?: string;
   candidates?: JupiterQuote[];
@@ -211,7 +213,9 @@ interface Config {
   rpcUrl: string;
   rpcFallbacks: string[];
   keypair: Keypair;
-  dexProvider: "metamatcha" | "jupiter";
+  subKeypair?: Keypair;
+  dexProvider: "metamatcha" | "dflow" | "jupiter";
+  dflowApiBase: string;
   matchaApiBase: string;
   matchaAggregators: string[];
   matchaPython: string;
@@ -251,8 +255,9 @@ export interface CliOptions {
   quoteOnly: boolean;
   send: boolean;
   createMarginfiAccount: boolean;
+  setupSubAtas?: boolean;
   provider?: "marginfi" | "solend" | "auto";
-  dexProvider?: "metamatcha" | "jupiter";
+  dexProvider?: "metamatcha" | "dflow" | "jupiter";
   swapOrder?: "dex-first" | "stable-first";
   lookupTable?: string;
   confirmation?: string;
@@ -537,6 +542,65 @@ function loadKeypair(secret: string): Keypair {
   throw new Error(`SOLANA_PRIVATE_KEY decoded to ${bytes.length} bytes; expected 32 or 64`);
 }
 
+export function deriveSubAccountKeypair(masterKeypair: Keypair, index = 1): Keypair {
+  const seed = createHash("sha256")
+    .update(masterKeypair.secretKey)
+    .update(Buffer.from(`matcha_sub_taker_v${index}`))
+    .digest();
+  return Keypair.fromSeed(new Uint8Array(seed));
+}
+
+export async function ensureSubAccountAtas(
+  connection: Connection,
+  masterKeypair: Keypair,
+  subKeypair: Keypair,
+): Promise<void> {
+  const mints = [
+    { mint: USDC_MINT, program: intermediateTokenProgram(USDC_MINT), name: "USDC" },
+    { mint: PYUSD_MINT, program: intermediateTokenProgram(PYUSD_MINT), name: "PYUSD" },
+    { mint: USDG_MINT, program: intermediateTokenProgram(USDG_MINT), name: "USDG" },
+  ];
+  const missingIxs: TransactionInstruction[] = [];
+  for (const { mint, program, name } of mints) {
+    const ata = getAssociatedTokenAddressSync(mint, subKeypair.publicKey, false, program);
+    const info = await connection.getAccountInfo(ata);
+    if (!info) {
+      console.log(`Preparing sub-account ATA for ${name} (${ata.toBase58()})...`);
+      missingIxs.push(
+        createAssociatedTokenAccountIdempotentInstruction(
+          masterKeypair.publicKey,
+          ata,
+          subKeypair.publicKey,
+          mint,
+          program,
+        ),
+      );
+    }
+  }
+  if (!missingIxs.length) {
+    console.log("All sub-account ATAs already initialized.");
+    return;
+  }
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const msg = new TransactionMessage({
+    payerKey: masterKeypair.publicKey,
+    recentBlockhash: latest.blockhash,
+    instructions: missingIxs,
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(msg);
+  tx.sign([masterKeypair]);
+  const sig = await connection.sendTransaction(tx);
+  await connection.confirmTransaction(
+    {
+      signature: sig,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    },
+    "confirmed",
+  );
+  console.log(`Sub-account ATAs initialized successfully! Signature: ${sig}`);
+}
+
 function readConfig(cli: CliOptions): Config {
   const accountValue = process.env.SOL_FLASH_ARB_MARGINFI_ACCOUNT?.trim();
   const apiKeys = (process.env.JUP_API_KEYS || process.env.JUP_API_KEY || "")
@@ -571,7 +635,7 @@ function readConfig(cli: CliOptions): Config {
     configuredChoice(
       "SOL_FLASH_ARB_DEX_PROVIDER",
       "metamatcha",
-      ["metamatcha", "jupiter"] as const,
+      ["metamatcha", "dflow", "jupiter"] as const,
     );
   const capacitySymbol = stableInputSymbol(
     swapOrder,
@@ -602,11 +666,19 @@ function readConfig(cli: CliOptions): Config {
     throw new Error("Missing required environment variable: SOLANA_RPC_URL");
   }
   const rpcFallbacks = allRpcCandidates.slice(1);
+  const keypair = loadKeypair(requiredEnv("SOLANA_PRIVATE_KEY"));
+  const subTakerIndex = envInt("SOL_FLASH_ARB_SUB_TAKER_INDEX", 1, 1);
+  const useSubTaker = process.env.SOL_FLASH_ARB_USE_SUB_TAKER !== "false";
+  const subKeypair = useSubTaker ? deriveSubAccountKeypair(keypair, subTakerIndex) : undefined;
   return {
     rpcUrl: primaryRpc,
     rpcFallbacks,
-    keypair: loadKeypair(requiredEnv("SOLANA_PRIVATE_KEY")),
+    keypair,
+    subKeypair,
     dexProvider,
+    dflowApiBase: (
+      process.env.SOL_FLASH_ARB_DFLOW_BASE_URL || "https://dev-quote-api.dflow.net"
+    ).replace(/\/$/, ""),
     matchaApiBase: (
       process.env.SOL_FLASH_ARB_MATCHA_BASE_URL || "https://meta.matcha.xyz"
     ).replace(/\/$/, ""),
@@ -715,6 +787,7 @@ export function parseCli(argv: string[]): CliOptions {
     if (arg === "--quote-only") options.quoteOnly = true;
     else if (arg === "--send") options.send = true;
     else if (arg === "--create-marginfi-account") options.createMarginfiAccount = true;
+    else if (arg === "--setup-sub-atas") options.setupSubAtas = true;
     else if (arg === "--provider") {
       const p = argv[++index]?.toLowerCase();
       if (p !== "marginfi" && p !== "solend" && p !== "auto") {
@@ -724,8 +797,8 @@ export function parseCli(argv: string[]): CliOptions {
     }
     else if (arg === "--dex-provider") {
       const p = argv[++index]?.toLowerCase();
-      if (p !== "metamatcha" && p !== "jupiter") {
-        throw new Error("--dex-provider must be metamatcha or jupiter");
+      if (p !== "metamatcha" && p !== "dflow" && p !== "jupiter") {
+        throw new Error("--dex-provider must be metamatcha, dflow, or jupiter");
       }
       options.dexProvider = p;
     }
@@ -1209,9 +1282,11 @@ export function buildJupiterQuoteParameters(
 }
 
 export function dexProviderName(
-  provider: "metamatcha" | "jupiter",
-): "MetaMatcha" | "Jupiter" {
-  return provider === "metamatcha" ? "MetaMatcha" : "Jupiter";
+  provider: "metamatcha" | "dflow" | "jupiter",
+): "MetaMatcha" | "DFlow" | "Jupiter" {
+  if (provider === "metamatcha") return "MetaMatcha";
+  if (provider === "dflow") return "DFlow";
+  return "Jupiter";
 }
 
 function runJsonHelper<T>(
@@ -1372,6 +1447,27 @@ async function getJupiterQuote(
   return quote;
 }
 
+export async function getDFlowQuote(
+  config: Config,
+  inputMint: PublicKey,
+  outputMint: PublicKey,
+  amountRaw: bigint,
+): Promise<JupiterQuote> {
+  const url = `${config.dflowApiBase}/quote?inputMint=${inputMint.toBase58()}&outputMint=${outputMint.toBase58()}&amount=${amountRaw.toString()}&slippageBps=0`;
+  const quote = await fetchJson<JupiterQuote>(
+    url,
+    { headers: { accept: "application/json" } },
+    config,
+    "DFlow quote",
+  );
+  if (!quote.routePlan?.length) throw new Error("DFlow returned no swap route");
+  quote.provider = "DFlow";
+  if (!quote.otherAmountThreshold && quote.outAmount) {
+    quote.otherAmountThreshold = String(quote.outAmount);
+  }
+  return quote;
+}
+
 async function getDexQuote(
   config: Config,
   inputMint: PublicKey,
@@ -1383,12 +1479,42 @@ async function getDexQuote(
 ): Promise<JupiterQuote> {
   if (config.dexProvider === "metamatcha") {
     try {
-      return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, wallet);
+      const taker = config.subKeypair ? config.subKeypair.publicKey : wallet;
+      return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, taker);
     } catch (error) {
-      const allowFallback = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER !== "false";
-      if (!allowFallback) throw error;
+      const allowDflow = process.env.SOL_FLASH_ARB_FALLBACK_DFLOW !== "false";
+      if (allowDflow) {
+        console.warn(
+          `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to DFlow DEX...`,
+        );
+        try {
+          return await getDFlowQuote(config, inputMint, outputMint, amountRaw);
+        } catch (dflowError) {
+          console.warn(
+            `DFlow quote unavailable (${errorMessage(dflowError)}); falling back to Jupiter DEX...`,
+          );
+        }
+      }
+      const allowJupiter = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER !== "false";
+      if (!allowJupiter) throw error;
+      return await getJupiterQuote(
+        config,
+        inputMint,
+        outputMint,
+        amountRaw,
+        requestNumber,
+        overrideMaxAccounts,
+      );
+    }
+  }
+  if (config.dexProvider === "dflow") {
+    try {
+      return await getDFlowQuote(config, inputMint, outputMint, amountRaw);
+    } catch (error) {
+      const allowJupiter = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER !== "false";
+      if (!allowJupiter) throw error;
       console.warn(
-        `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to Jupiter DEX...`,
+        `DFlow quote unavailable (${errorMessage(error)}); falling back to Jupiter DEX...`,
       );
       return await getJupiterQuote(
         config,
@@ -1686,14 +1812,16 @@ async function getSwapLeg(
     const decompiled = TransactionMessage.decompile(transaction.message, {
       addressLookupTableAccounts: lookupTables,
     });
-    if (!decompiled.payerKey.equals(wallet)) {
+    const subKeypair = config.subKeypair;
+    const expectedPayer = subKeypair ? subKeypair.publicKey : wallet;
+    if (!decompiled.payerKey.equals(wallet) && !decompiled.payerKey.equals(expectedPayer)) {
       throw new Error(
-        `MetaMatcha transaction payer ${decompiled.payerKey.toBase58()} does not match wallet ${wallet.toBase58()}`,
+        `MetaMatcha transaction payer ${decompiled.payerKey.toBase58()} does not match wallet ${wallet.toBase58()} or sub-account ${expectedPayer.toBase58()}`,
       );
     }
     const unexpectedSigner = decompiled.instructions
       .flatMap((instruction) => instruction.keys)
-      .find((account) => account.isSigner && !account.pubkey.equals(wallet));
+      .find((account) => account.isSigner && !account.pubkey.equals(wallet) && !account.pubkey.equals(expectedPayer));
     if (unexpectedSigner) {
       throw new Error(
         `MetaMatcha transaction requires unexpected signer ${unexpectedSigner.pubkey.toBase58()}`,
@@ -1716,22 +1844,107 @@ async function getSwapLeg(
         return (await connection.getAccountInfo(instruction.keys[1].pubkey)) !== null;
       }),
     );
-    const instructions = withoutComputeBudget.filter(
+    let instructions = withoutComputeBudget.filter(
       (_instruction, index) => !existingAtaSetup[index],
     );
     if (!instructions.length) {
       throw new Error("MetaMatcha transaction contained no swap instructions");
     }
+
+    if (subKeypair && !subKeypair.publicKey.equals(wallet)) {
+      const inMint = new PublicKey(quote.inputMint);
+      const outMint = new PublicKey(quote.outputMint);
+      const inProgram = intermediateTokenProgram(inMint);
+      const outProgram = intermediateTokenProgram(outMint);
+
+      const masterInAta = getAssociatedTokenAddressSync(inMint, wallet, false, inProgram);
+      const subInAta = getAssociatedTokenAddressSync(inMint, subKeypair.publicKey, false, inProgram);
+      const masterOutAta = getAssociatedTokenAddressSync(outMint, wallet, false, outProgram);
+      const subOutAta = getAssociatedTokenAddressSync(outMint, subKeypair.publicKey, false, outProgram);
+
+      const inAmountRaw = BigInt(quote.inAmount);
+      const outAmountRaw = BigInt(quote.otherAmountThreshold || quote.outAmount);
+
+      const [subInAtaExists, masterOutAtaExists] = await Promise.all([
+        connection.getAccountInfo(subInAta).then((acc) => acc !== null).catch(() => false),
+        connection.getAccountInfo(masterOutAta).then((acc) => acc !== null).catch(() => false),
+      ]);
+
+      const preTransfer: TransactionInstruction[] = [];
+      if (!subInAtaExists) {
+        preTransfer.push(
+          createAssociatedTokenAccountIdempotentInstruction(wallet, subInAta, subKeypair.publicKey, inMint, inProgram),
+        );
+      }
+      preTransfer.push(
+        createTransferCheckedInstruction(masterInAta, inMint, subInAta, wallet, inAmountRaw, 6, [], inProgram),
+      );
+
+      const postTransfer: TransactionInstruction[] = [];
+      if (!masterOutAtaExists) {
+        postTransfer.push(
+          createAssociatedTokenAccountIdempotentInstruction(wallet, masterOutAta, wallet, outMint, outProgram),
+        );
+      }
+      postTransfer.push(
+        createTransferCheckedInstruction(subOutAta, outMint, masterOutAta, subKeypair.publicKey, outAmountRaw, 6, [], outProgram),
+      );
+      instructions = [...preTransfer, ...instructions, ...postTransfer];
+    }
+
     console.log(
       `MetaMatcha selected ${quote.aggregator ?? "unknown aggregator"}: ` +
       `${Buffer.from(quote.serializedTransaction, "base64").length} quote bytes, ` +
       `${instructions.length} swap instructions, ${lookupTables.length} lookup tables` +
-      `${existingAtaSetup.some(Boolean) ? `, stripped ${existingAtaSetup.filter(Boolean).length} existing ATA setup instructions` : ""}`,
+      `${existingAtaSetup.some(Boolean) ? `, stripped ${existingAtaSetup.filter(Boolean).length} existing ATA setup instructions` : ""}` +
+      `${subKeypair && !subKeypair.publicKey.equals(wallet) ? " (linked to sub-account taker)" : ""}`,
     );
     return {
       instructions,
       lookupTables,
       ignoredComputeBudgetInstructionCount: computeBudgetInstructions.length,
+    };
+  }
+
+  if (config.dexProvider === "dflow" || quote.provider === "DFlow") {
+    const result = await fetchJson<JupiterSwapInstructions>(
+      `${config.dflowApiBase}/swap-instructions`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          userPublicKey: wallet.toBase58(),
+          payer: wallet.toBase58(),
+          quoteResponse: quote,
+        }),
+      },
+      config,
+      "DFlow swap-instructions",
+    );
+    if (result.error) throw new Error(`DFlow swap-instructions error: ${result.error}`);
+    if (!result.swapInstruction) throw new Error("DFlow omitted swapInstruction");
+
+    const cleanup = result.cleanupInstruction
+      ? [result.cleanupInstruction]
+      : (Array.isArray(result.cleanupInstructions) ? result.cleanupInstructions : []);
+    const instructionJson = [
+      ...(result.setupInstructions ?? []),
+      ...(result.otherInstructions ?? []),
+      result.swapInstruction,
+      ...cleanup,
+    ];
+    return {
+      instructions: instructionJson.map(decodeJupiterInstruction),
+      lookupTables: await fetchLookupTables(
+        connection,
+        (result.addressLookupTableAddresses ?? []).map(
+          (address) => new PublicKey(address),
+        ),
+      ),
+      ignoredComputeBudgetInstructionCount:
+        result.computeBudgetInstructions?.length ?? 0,
     };
   }
 
@@ -1869,6 +2082,7 @@ async function buildFlashTransaction(
   blockhash: string,
   computeUnitLimit: number,
   computeUnitPriceMicroLamports: number,
+  additionalSigners: Keypair[] = [],
 ): Promise<VersionedTransaction> {
   const uiAmount = formatRaw(loanAmountRaw, TOKEN_DECIMALS);
   const borrow = await account.makeBorrowIx(bankAddress, uiAmount, {
@@ -1960,7 +2174,11 @@ async function buildFlashTransaction(
     }).compileToV0Message(lookupTables);
 
     const transaction = new VersionedTransaction(message);
-    transaction.sign([keypair]);
+    const requiredSigners = message.staticAccountKeys.slice(0, message.header.numRequiredSignatures);
+    const signers = [keypair, ...additionalSigners].filter((s) =>
+      requiredSigners.some((req) => req.equals(s.publicKey)),
+    );
+    transaction.sign(signers);
     return transaction;
   } catch (err: unknown) {
     const msg = errorMessage(err);
@@ -1980,6 +2198,7 @@ export async function buildWalletFundedTransaction(
   blockhash: string,
   computeUnitLimit: number,
   computeUnitPriceMicroLamports: number,
+  additionalSigners: Keypair[] = [],
 ): Promise<VersionedTransaction> {
   try {
     const message = new TransactionMessage({
@@ -1995,7 +2214,11 @@ export async function buildWalletFundedTransaction(
     }).compileToV0Message(lookupTables);
 
     const transaction = new VersionedTransaction(message);
-    transaction.sign([keypair]);
+    const requiredSigners = message.staticAccountKeys.slice(0, message.header.numRequiredSignatures);
+    const signers = [keypair, ...additionalSigners].filter((s) =>
+      requiredSigners.some((req) => req.equals(s.publicKey)),
+    );
+    transaction.sign(signers);
     return transaction;
   } catch (error) {
     if (errorMessage(error).includes("encoding overruns")) {
@@ -2113,6 +2336,7 @@ export async function prerunCandidateQuotes(
             stableLeg.instruction,
             ...swapLeg.instructions,
           ];
+          const additionalSigners = config.subKeypair ? [config.subKeypair] : [];
           const probe = isWalletFunded
             ? await buildWalletFundedTransaction(
                 config.keypair,
@@ -2121,6 +2345,7 @@ export async function prerunCandidateQuotes(
                 blockhash,
                 config.probeComputeUnitLimit,
                 0,
+                additionalSigners,
               )
             : await buildFlashTransaction(
                 account!,
@@ -2132,6 +2357,7 @@ export async function prerunCandidateQuotes(
                 blockhash,
                 config.probeComputeUnitLimit,
                 0,
+                additionalSigners,
               );
           const probeWireSize = probe.serialize().length;
           if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
@@ -2227,6 +2453,7 @@ export async function prerunCandidateQuotes(
             ...swapLeg.instructions,
             candStableLeg.instruction,
           ];
+          const additionalSigners = config.subKeypair ? [config.subKeypair] : [];
           const probe = isWalletFunded
             ? await buildWalletFundedTransaction(
                 config.keypair,
@@ -2235,6 +2462,7 @@ export async function prerunCandidateQuotes(
                 blockhash,
                 config.probeComputeUnitLimit,
                 0,
+                additionalSigners,
               )
             : await buildFlashTransaction(
                 account!,
@@ -2246,6 +2474,7 @@ export async function prerunCandidateQuotes(
                 blockhash,
                 config.probeComputeUnitLimit,
                 0,
+                additionalSigners,
               );
           const probeWireSize = probe.serialize().length;
           if (probeWireSize > MAX_WIRE_TRANSACTION_BYTES) {
@@ -2735,6 +2964,13 @@ async function main(): Promise<void> {
     await createMarginfiAccount(config, cli, connection);
     return;
   }
+  if (cli.setupSubAtas) {
+    if (!config.subKeypair) {
+      throw new Error("Sub-account taker is not enabled (SOL_FLASH_ARB_USE_SUB_TAKER is false)");
+    }
+    await ensureSubAccountAtas(connection, config.keypair, config.subKeypair);
+    return;
+  }
   if (cli.send && cli.confirmation !== "EXECUTE_SOLANA_FLASH_ARB") {
     throw new Error(
       "Live execution requires --send --confirm-mainnet EXECUTE_SOLANA_FLASH_ARB",
@@ -2753,6 +2989,9 @@ async function main(): Promise<void> {
   let isWalletFunded = false;
 
   if (!cli.quoteOnly) {
+    if (cli.send && config.subKeypair) {
+      await ensureSubAccountAtas(connection, config.keypair, config.subKeypair);
+    }
     await assertTokenAccountsExist(
       connection,
       walletAddress,
@@ -2926,6 +3165,7 @@ async function main(): Promise<void> {
       firstSwap1.ignoredComputeBudgetInstructionCount +
       firstSwap2.ignoredComputeBudgetInstructionCount;
 
+    const additionalSigners = config.subKeypair ? [config.subKeypair] : [];
     probe = isWalletFunded
       ? await buildWalletFundedTransaction(
           config.keypair,
@@ -2934,6 +3174,7 @@ async function main(): Promise<void> {
           latest.blockhash,
           config.probeComputeUnitLimit,
           0,
+          additionalSigners,
         )
       : await buildFlashTransaction(
           account!,
@@ -2945,6 +3186,7 @@ async function main(): Promise<void> {
           latest.blockhash,
           config.probeComputeUnitLimit,
           0,
+          additionalSigners,
         );
 
     const probeWireSize = probe.serialize().length;
@@ -2987,6 +3229,7 @@ async function main(): Promise<void> {
     config.computeUnitSafetyBps,
     config.probeComputeUnitLimit,
   );
+  const additionalSigners = config.subKeypair ? [config.subKeypair] : [];
   const transaction = isWalletFunded
     ? await buildWalletFundedTransaction(
         config.keypair,
@@ -2995,6 +3238,7 @@ async function main(): Promise<void> {
         latest.blockhash,
         computeUnitLimit,
         config.computeUnitPriceMicroLamports,
+        additionalSigners,
       )
     : await buildFlashTransaction(
         account!,
@@ -3006,6 +3250,7 @@ async function main(): Promise<void> {
         latest.blockhash,
         computeUnitLimit,
         config.computeUnitPriceMicroLamports,
+        additionalSigners,
       );
   const wireSize = transaction.serialize().length;
   if (wireSize > MAX_WIRE_TRANSACTION_BYTES) {
