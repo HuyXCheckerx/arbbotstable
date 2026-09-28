@@ -454,6 +454,8 @@ def failure_category(detail: str) -> str:
         or "conflicts with this matcha route" in lowered
     ):
         return "no-route"
+    if "6026" in lowered or "illegalutilizationratio" in lowered or "utilization ratio" in lowered:
+        return "marginfi-utilization"
     if "capacity kept changing" in lowered:
         return "unstable-capacity"
     if (
@@ -547,9 +549,21 @@ def unresolved_submission(
 def concise_failure(stdout: str, stderr: str, returncode: int) -> str:
     combined = "\n".join(part for part in (stderr, stdout) if part)
     lines = [line.strip() for line in combined.splitlines() if line.strip()]
-    for line in reversed(lines):
+    for idx, line in enumerate(lines):
         if line.startswith("ERROR:"):
-            return line[6:].strip()
+            header = line[6:].strip()
+            if header.endswith(":") and idx + 1 < len(lines):
+                details = []
+                for sub in lines[idx + 1:]:
+                    if sub.startswith("-") or "Atomic simulation reverted" in sub or "AnchorError" in sub or "IllegalUtilizationRatio" in sub:
+                        details.append(sub)
+                    elif sub.startswith("ERROR:") or sub.startswith("Wallet:"):
+                        break
+                    if len(details) >= 3:
+                        break
+                if details:
+                    return f"{header} {' '.join(details)}"
+            return header
     for line in reversed(lines):
         if "No executable opportunity" in line or "below" in line:
             return line.removeprefix("Error:").strip()
@@ -569,6 +583,11 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         if "does not support loan token" in lowered or "unsupported loan token" in lowered:
             return f"{route.chain.title()} executor does not support {route.loan}/{route.intermediate}"
         return f"{route.dex_name} has no executable {dex_leg} route right now"
+    if category == "marginfi-utilization":
+        return (
+            f"Marginfi {route.loan} bank utilization is >100% on Solana "
+            "(AnchorError 6026: IllegalUtilizationRatio); borrows are disabled on-chain"
+        )
     if category == "transient-stable":
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")

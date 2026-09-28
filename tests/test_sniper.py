@@ -337,6 +337,19 @@ class CrosschainSniperTests(unittest.TestCase):
         )
         self.assertEqual(detail, "guaranteed net is below 5.000001 USDC")
 
+    def test_failure_summary_preserves_multiline_candidate_details(self):
+        stderr = (
+            "ERROR: All candidate quotes failed atomic prerun simulation or fell below the profit floor:\n"
+            "  - Aggregator #1: Atomic simulation reverted: {\"InstructionError\":[3,{\"Custom\":6026}]}\n"
+        )
+        detail = concise_failure("", stderr, 1)
+        self.assertIn("Custom", detail)
+        self.assertIn("6026", detail)
+        cat = failure_category(detail)
+        self.assertEqual(cat, "marginfi-utilization")
+        readable = readable_failure(Route("solana", "PYUSD/USDG", "dex-first"), detail, cat)
+        self.assertIn("Marginfi PYUSD bank utilization is >100%", readable)
+
     def test_execution_links_are_extracted_without_exposing_plan_data(self):
         eth = execution_detail(
             Route("ethereum", "PYUSD/USDC"),
