@@ -449,6 +449,9 @@ def failure_category(detail: str) -> str:
         or "exceeds solana 1232-byte size limit" in lowered
         or "does not support loan token" in lowered
         or "unsupported loan token" in lowered
+        or "poolmanager" in lowered
+        or "alreadyunlocked" in lowered
+        or "conflicts with this matcha route" in lowered
     ):
         return "no-route"
     if "capacity kept changing" in lowered:
@@ -2138,6 +2141,14 @@ def main(argv: list[str] | None = None) -> int:
             start_background_cookie_solver()
         except Exception as exc:
             logger.warning("Failed to initialize MetaMatcha cookie session: %s", exc)
+
+        # Proactively ensure warm Matcha browser bridge daemon is ready
+        try:
+            from src.engines.matcha_browser_bridge import ensure_bridge_running
+            logger.info("Ensuring Matcha browser bridge daemon is ready...")
+            ensure_bridge_running(timeout=45.0)
+        except Exception as exc:
+            logger.warning("Failed to initialize Matcha browser bridge: %s", exc)
 
         threads = []
         for chain in args.chains:

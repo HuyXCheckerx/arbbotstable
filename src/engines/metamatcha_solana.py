@@ -340,9 +340,11 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
                         best_quote["candidates"] = candidate_quotes
                         return best_quote
             except Exception as exc:
-                logger.debug("[MatchaBridge] SOL bridge quote failed, trying direct HTTP: %s", exc)
-
-    proxy_url = os.getenv("MATCHA_PROXY", "").strip()
+                err_msg = str(exc)
+                logger.debug("[MatchaBridge] SOL bridge quote failed: %s", exc)
+                if any(x in err_msg.lower() for x in ("forbidden", "403", "checkpoint", "challenge", "429")):
+                    raise ProviderAccessBlockedError(f"MetaMatcha access denied (HTTP 403): {err_msg}") from exc
+                raise
     with proxy_gate_lock():
         competition = _post_json(
             f"{base_url}/api/competitions", competition_payload, timeout_seconds

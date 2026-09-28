@@ -1381,9 +1381,16 @@ async function getDexQuote(
   requestNumber: number,
   overrideMaxAccounts?: number,
 ): Promise<JupiterQuote> {
-  return config.dexProvider === "metamatcha"
-    ? getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, wallet)
-    : getJupiterQuote(
+  if (config.dexProvider === "metamatcha") {
+    try {
+      return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, wallet);
+    } catch (error) {
+      const allowFallback = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER !== "false";
+      if (!allowFallback) throw error;
+      console.warn(
+        `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to Jupiter DEX...`,
+      );
+      return await getJupiterQuote(
         config,
         inputMint,
         outputMint,
@@ -1391,6 +1398,16 @@ async function getDexQuote(
         requestNumber,
         overrideMaxAccounts,
       );
+    }
+  }
+  return getJupiterQuote(
+    config,
+    inputMint,
+    outputMint,
+    amountRaw,
+    requestNumber,
+    overrideMaxAccounts,
+  );
 }
 
 async function getCapacitySizedCycle(
@@ -1650,7 +1667,7 @@ async function getSwapLeg(
   requestNumber: number,
   connection: Connection,
 ): Promise<SwapLeg> {
-  if (config.dexProvider === "metamatcha") {
+  if (config.dexProvider === "metamatcha" && quote.provider === "MetaMatcha") {
     if (!quote.serializedTransaction) {
       throw new Error("MetaMatcha quote omitted its serialized transaction");
     }
@@ -2480,9 +2497,10 @@ export function parseSolanaRpcEndpoints(
     .filter(Boolean);
 
   const safePublicFallbacks = [
+    "https://rpc.ankr.com/solana",
     "https://api.mainnet-beta.solana.com",
     "https://api.mainnet.solana.com",
-    "https://solana.publicnode.com",
+    // publicnode.com (Allnodes) intentionally excluded: blocks getProgramAccounts without auth
   ];
 
   const candidates: string[] = [];
@@ -2545,10 +2563,17 @@ export function wrapConnectionWithResilientRpc(
             body: JSON.stringify(body),
             signal: controller.signal,
           });
-          if (res.status === 429 || res.status >= 500) {
+          if (res.status === 403 || res.status === 429 || res.status >= 500) {
             throw new Error(`HTTP ${res.status} on ${url}`);
           }
           const data = await res.json();
+          // Treat JSON-RPC-level errors as retryable — public nodes return HTTP 200
+          // with {error:{message:"Request blocked"}} or "Indexed requests require a
+          // personal token" rather than an HTTP error code.
+          if (data && typeof data === "object" && data.error) {
+            const msg = data.error.message ?? JSON.stringify(data.error);
+            throw new Error(`RPC error from ${url} [${methodName}]: ${msg}`);
+          }
           return data;
         } finally {
           clearTimeout(timer);
@@ -2592,10 +2617,15 @@ export function wrapConnectionWithResilientRpc(
                 body: JSON.stringify(body),
                 signal: controller.signal,
               });
-              if (res.status === 429 || res.status >= 500) {
+              if (res.status === 403 || res.status === 429 || res.status >= 500) {
                 throw new Error(`HTTP ${res.status} on ${url}`);
               }
-              return await res.json();
+              const batchData = await res.json();
+              if (batchData && typeof batchData === "object" && batchData.error) {
+                const msg = batchData.error.message ?? JSON.stringify(batchData.error);
+                throw new Error(`RPC batch error from ${url} [${req.methodName}]: ${msg}`);
+              }
+              return batchData;
             }),
           );
           if (Array.isArray(results) && results.length === requests.length) {

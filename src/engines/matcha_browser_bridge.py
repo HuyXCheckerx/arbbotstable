@@ -20,10 +20,13 @@ from typing import Any
 import urllib.request
 import urllib.error
 
+from filelock import FileLock
+
 logger = logging.getLogger("matcha.bridge")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PID_FILE = PROJECT_ROOT / ".matcha_bridge.pid"
+LOCK_FILE = PROJECT_ROOT / ".matcha_bridge.lock"
 DEFAULT_PORT = 18234
 DEFAULT_HOST = "127.0.0.1"
 
@@ -52,44 +55,91 @@ def is_bridge_ready(base_url: str | None = None, timeout: float = 0.8) -> bool:
     return False
 
 
-def ensure_bridge_running(timeout: float = 35.0) -> bool:
-    """Ensures the background Matcha browser bridge server is running."""
+def stop_bridge_server(base_url: str | None = None) -> bool:
+    """Request graceful shutdown of the background Matcha bridge daemon."""
+    url = f"{base_url or get_bridge_base_url()}/shutdown"
+    stopped = False
+    try:
+        req = urllib.request.Request(url, method="POST", headers={"User-Agent": "MatchaBridgeClient"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            if resp.status == 200:
+                stopped = True
+    except Exception:
+        pass
+
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+            import signal
+            os.kill(pid, signal.SIGTERM)
+            stopped = True
+        except Exception:
+            pass
+        finally:
+            try:
+                PID_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return stopped
+
+
+def ensure_bridge_running(timeout: float = 50.0) -> bool:
+    """Ensures the background Matcha browser bridge server is running using process locks."""
     base_url = get_bridge_base_url()
     if is_bridge_ready(base_url, timeout=0.8):
         return True
 
-    bridge_script = Path(__file__).resolve()
-    logger.info("[MatchaBridge] Bridge daemon not detected at %s. Launching background worker...", base_url)
-
-    flags = 0
-    if sys.platform == "win32":
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-        CREATE_NO_WINDOW = 0x08000000
-        flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-
     try:
-        subprocess.Popen(
-            [sys.executable, str(bridge_script)],
-            creationflags=flags,
-            close_fds=(sys.platform != "win32"),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as exc:
-        logger.warning("[MatchaBridge] Failed to spawn bridge process: %s", exc)
+        lock = FileLock(str(LOCK_FILE), timeout=60)
+    except Exception:
+        lock = None
+
+    def _spawn_and_wait():
+        if is_bridge_ready(base_url, timeout=0.8):
+            return True
+
+        bridge_script = Path(__file__).resolve()
+        logger.info("[MatchaBridge] Bridge daemon not detected at %s. Launching background worker...", base_url)
+
+        flags = 0
+        if sys.platform == "win32":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+
+        log_dir = PROJECT_ROOT / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "matcha_browser_bridge.log"
+        log_file = open(log_path, "a", encoding="utf-8")
+
+        try:
+            subprocess.Popen(
+                [sys.executable, str(bridge_script)],
+                creationflags=flags,
+                close_fds=(sys.platform != "win32"),
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+            )
+        except Exception as exc:
+            logger.warning("[MatchaBridge] Failed to spawn bridge process: %s", exc)
+            return False
+
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if is_bridge_ready(base_url, timeout=1.0):
+                logger.info("[MatchaBridge] Bridge daemon ready at %s (took %.1fs)", base_url, time.monotonic() - t0)
+                return True
+            time.sleep(0.5)
+
+        logger.warning("[MatchaBridge] Timed out waiting for bridge daemon to be ready (%ss)", timeout)
         return False
 
-    t0 = time.monotonic()
-    while time.monotonic() - t0 < timeout:
-        if is_bridge_ready(base_url, timeout=1.0):
-            logger.info("[MatchaBridge] Bridge daemon ready at %s (took %.1fs)", base_url, time.monotonic() - t0)
-            return True
-        time.sleep(0.5)
-
-    logger.warning("[MatchaBridge] Timed out waiting for bridge daemon to be ready (%ss)", timeout)
-    return False
+    if lock:
+        with lock:
+            return _spawn_and_wait()
+    return _spawn_and_wait()
 
 
 def fetch_bridge_quotes(
@@ -99,7 +149,7 @@ def fetch_bridge_quotes(
     timeout: float = 25.0,
 ) -> dict[str, Any]:
     """Fetch quotes via the Matcha browser bridge."""
-    if not ensure_bridge_running(timeout=30.0):
+    if not ensure_bridge_running(timeout=45.0):
         raise RuntimeError("Matcha browser bridge daemon is not running or failed to clear challenges")
 
     chain_name = "ethereum" if chain in ("ethereum", "1", 1) else "solana"
@@ -212,7 +262,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
 
             if eth_ok and sol_ok and poll_idx >= 2:
                 logger.info("[MatchaBridge] Both tabs cleared! (ETH: %s, SOL: %s)", t_eth, t_sol)
-                time.sleep(2.5)  # Allow Kasada runtime to settle
+                time.sleep(2.0)  # Allow Kasada runtime to settle
                 state.ready_eth.set()
                 state.ready_sol.set()
                 break
@@ -222,7 +272,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
             try:
                 task = state.queue.get(timeout=1.0)
             except Exception:
-                # Periodic health check / keep-alive
+                # Periodic keep-alive
                 if time.monotonic() - last_health_check > 120.0:
                     last_health_check = time.monotonic()
                     try:
@@ -280,6 +330,18 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     }""",
                     {"chain": chain, "payload": payload, "aggregators": aggregators},
                 )
+
+                # Auto-heal if challenged
+                if isinstance(res, dict) and "error" in res:
+                    err_str = str(res.get("error", "")).lower()
+                    if any(x in err_str for x in ("checkpoint", "403", "429", "challenge")):
+                        logger.warning("[MatchaBridge] %s tab hit checkpoint (%s). Auto-reloading...", chain, err_str[:80])
+                        try:
+                            page.reload(wait_until="domcontentloaded", timeout=25000)
+                            time.sleep(2.0)
+                        except Exception:
+                            pass
+
                 elapsed = time.perf_counter() - t0
                 logger.info("[MatchaBridge] Quote [%s] fetched in %.1fms (aggregators: %s)", chain, elapsed * 1000, aggregators)
                 result_box["result"] = res
@@ -323,12 +385,37 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"ready": ready}).encode("utf-8"))
+                try:
+                    self.wfile.write(json.dumps({"ready": ready}).encode("utf-8"))
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+                    pass
+            elif self.path == "/shutdown":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                try:
+                    self.wfile.write(b'{"status": "shutting down"}')
+                except Exception:
+                    pass
+                state.is_running = False
+                threading.Thread(target=server.shutdown, daemon=True).start()
             else:
                 self.send_response(404)
                 self.end_headers()
 
         def do_POST(self) -> None:
+            if self.path == "/shutdown":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                try:
+                    self.wfile.write(b'{"status": "shutting down"}')
+                except Exception:
+                    pass
+                state.is_running = False
+                threading.Thread(target=server.shutdown, daemon=True).start()
+                return
+
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len).decode("utf-8")
             try:
@@ -368,7 +455,7 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
     logger.info("[MatchaBridge] Server running at http://%s:%d (PID %d)", host, port, os.getpid())
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         state.is_running = False
         server.server_close()
     finally:
