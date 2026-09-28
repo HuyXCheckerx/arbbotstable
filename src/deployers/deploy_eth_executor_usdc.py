@@ -77,9 +77,12 @@ def parse_args() -> argparse.Namespace:
         "--confirm-mainnet",
         help=f"must equal {CONFIRMATION_TEXT} when --send is used",
     )
-    parser.add_argument("--max-fee-gwei", type=Decimal)
+    parser.add_argument("--max-fee-gwei", type=Decimal, help="explicit max fee per gas in Gwei")
+    parser.add_argument("--priority-fee-gwei", type=Decimal, help="explicit priority fee in Gwei")
+    parser.add_argument("--slow", action="store_true", help="use conservative slow gas settings (low priority fee and tight max fee)")
     parser.add_argument("--gas-multiplier", type=Decimal, default=Decimal("1.15"))
-    parser.add_argument("--receipt-timeout", type=int, default=180)
+    parser.add_argument("--receipt-timeout", type=int, default=600)
+    parser.add_argument("--update-env", action="store_true", default=True, help="automatically update ETH_ARB_STABLECOIN_EXECUTOR in .env")
     return parser.parse_args()
 
 
@@ -100,14 +103,27 @@ def main() -> int:
             f"--send requires --confirm-mainnet {CONFIRMATION_TEXT}"
         )
 
-    web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
-    if not web3.is_connected():
-        raise DeploymentError("cannot connect using ETH_RPC_URL")
-    chain_id = web3.eth.chain_id
-    if chain_id != EXPECTED_CHAIN_ID:
-        raise DeploymentError(
-            f"RPC chain ID is {chain_id}; Ethereum mainnet chain ID 1 is required"
-        )
+    candidate_rpcs = [os.getenv("ETH_RPC_URL", "").strip()] + [
+        u.strip() for u in os.getenv("ETH_RPC_FALLBACKS", "").split(",") if u.strip()
+    ]
+    web3 = None
+    active_rpc = None
+    for url in candidate_rpcs:
+        if not url:
+            continue
+        try:
+            cand = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 15}))
+            if cand.is_connected() and cand.eth.chain_id == EXPECTED_CHAIN_ID:
+                web3 = cand
+                active_rpc = url
+                break
+        except Exception:
+            continue
+
+    if not web3:
+        raise DeploymentError("cannot connect using ETH_RPC_URL or any ETH_RPC_FALLBACKS")
+    print(f"[*] Connected to Ethereum RPC: {active_rpc}")
+    chain_id = EXPECTED_CHAIN_ID
 
     try:
         account = web3.eth.account.from_key(private_key)
@@ -137,15 +153,26 @@ def main() -> int:
         )
     )
     latest = web3.eth.get_block("latest")
-    try:
-        priority_fee = int(web3.eth.max_priority_fee)
-    except Exception:
-        priority_fee = int(web3.to_wei(Decimal("0.05"), "gwei"))
+    base_fee = int(latest.get("baseFeePerGas", web3.eth.gas_price))
+
+    if args.priority_fee_gwei is not None:
+        priority_fee = int(web3.to_wei(args.priority_fee_gwei, "gwei"))
+    elif args.slow:
+        priority_fee = int(web3.to_wei(Decimal("0.005"), "gwei"))
+    else:
+        try:
+            priority_fee = int(web3.eth.max_priority_fee)
+        except Exception:
+            priority_fee = int(web3.to_wei(Decimal("0.05"), "gwei"))
+
     if args.max_fee_gwei is not None:
         max_fee = int(web3.to_wei(args.max_fee_gwei, "gwei"))
+    elif args.slow:
+        # Tighter max fee: base_fee * 1.08 + priority_fee so it waits for steady/cheaper blocks
+        max_fee = max(int(Decimal(base_fee) * Decimal("1.08")) + priority_fee, base_fee + priority_fee)
     else:
-        base_fee = int(latest.get("baseFeePerGas", web3.eth.gas_price))
         max_fee = base_fee * 2 + priority_fee
+
     if max_fee < priority_fee:
         raise DeploymentError("maximum fee per gas is below the priority fee")
 
@@ -217,6 +244,23 @@ def main() -> int:
             raise DeploymentError(
                 f"deployed executor does not support {provider_name} flash funding"
             )
+
+    if hasattr(executor.functions, "blacked"):
+        print("[+] Verified 'blacked' arb function exists on deployed contract.")
+
+    if args.update_env:
+        import re
+        env_path = PROJECT_DIR / ".env"
+        if env_path.exists():
+            content = env_path.read_text(encoding="utf-8")
+            new_content = re.sub(
+                r"^ETH_ARB_STABLECOIN_EXECUTOR=.*$",
+                f"ETH_ARB_STABLECOIN_EXECUTOR={address}",
+                content,
+                flags=re.MULTILINE,
+            )
+            env_path.write_text(new_content, encoding="utf-8")
+            print(f"[+] Updated .env with ETH_ARB_STABLECOIN_EXECUTOR={address}")
 
     print(
         json.dumps(

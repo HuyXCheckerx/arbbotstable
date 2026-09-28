@@ -66,6 +66,9 @@ fi
 echo "==> Testing build & types..."
 npm run typecheck || true
 
+echo "==> Ensuring MetaMatcha clearance cookies (.matcha_cookies.json)..."
+python3 -c "from src.engines.matcha_cookie_manager import ensure_vps_cookies; ensure_vps_cookies(force=False)" || true
+
 echo "================================================================="
 echo "  Setup Complete! Repository is ready at: $PROJECT_DIR"
 echo ""

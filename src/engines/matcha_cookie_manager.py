@@ -27,6 +27,105 @@ ROTATE_INTERVAL_SECONDS = 20 * 60  # 20 minutes
 DEFAULT_URL = "https://meta.matcha.xyz/solana"
 
 
+def is_vps() -> bool:
+    """Determine if running in a VPS or remote cloud VM environment."""
+    # 1. Direct environment variable flags
+    for env_var in ("IS_VPS", "RUNNING_ON_VPS", "RUNNING_ON_VM", "VPS", "VM_HOST", "CLOUD_ENV"):
+        val = os.getenv(env_var, "").strip().lower()
+        if val in ("1", "true", "yes", "y"):
+            return True
+        if val in ("0", "false", "no", "n"):
+            return False
+
+    # 2. Check for VM marker files in project root
+    for marker_name in ("runningonvm.txt", ".vps", ".runningonvm"):
+        if (PROJECT_ROOT / marker_name).exists():
+            if sys.platform != "darwin":
+                return True
+
+    # 3. Known VPS usernames
+    user = (os.getenv("USER") or os.getenv("USERNAME") or "").strip().lower()
+    if user in ("administrator", "root", "ubuntu", "ec2-user", "azureuser", "cloud-user", "vm-user", "admin"):
+        return True
+
+    # 4. OS-specific VPS detection
+    if sys.platform == "linux":
+        for p in ("/sys/class/dmi/id/product_name", "/sys/class/dmi/id/sys_vendor"):
+            path = Path(p)
+            if path.exists():
+                try:
+                    content = path.read_text(encoding="utf-8", errors="ignore").lower()
+                    if any(x in content for x in ("kvm", "qemu", "virtualbox", "vmware", "google", "amazon", "droplet", "openstack", "bochs", "microsoft corporation")):
+                        return True
+                except Exception:
+                    pass
+        return True  # Linux execution of this bot is virtually always on a cloud VPS/VM
+    elif sys.platform == "win32":
+        if user == "administrator":
+            return True
+        comp = os.getenv("COMPUTERNAME", "").lower()
+        if any(x in comp for x in ("vps", "vm", "server", "rdp")):
+            return True
+
+    return False
+
+
+def is_cookie_file_missing_or_empty(cache_file: Path | None = None) -> bool:
+    """Check if the cookie cache file is not present, 0 bytes, or missing clearance cookies."""
+    path = cache_file or CACHE_FILE
+    if not path.exists():
+        return True
+    try:
+        if path.stat().st_size == 0:
+            return True
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        cookies = data.get("cookies")
+        if not isinstance(cookies, list) or len(cookies) == 0:
+            return True
+        has_clearance = any(c.get("name") in ("_vcrcs", "cf_clearance") for c in cookies)
+        if not has_clearance:
+            return True
+        return False
+    except Exception:
+        return True
+
+
+def ensure_vps_cookies(
+    force: bool = False,
+    target_url: str = DEFAULT_URL,
+    logger_instance: Any = None,
+) -> list[dict[str, Any]]:
+    """If on a VPS and the cookie file is not present or empty, do the browser solve step and add cookies."""
+    log = logger_instance or logger
+    on_vps = is_vps()
+    missing_or_empty = is_cookie_file_missing_or_empty(CACHE_FILE)
+
+    if (on_vps and missing_or_empty) or force:
+        reason = "force requested" if force else "VPS detected with missing/empty cookie file"
+        log.info(
+            "[CookieManager] %s. Executing browser solve step to acquire and add clearance cookies to %s...",
+            reason,
+            CACHE_FILE.name,
+        )
+        with FileLock(str(LOCK_FILE), timeout=60):
+            if not force and not is_cookie_file_missing_or_empty(CACHE_FILE):
+                cached = _read_cache(CACHE_FILE, ROTATE_INTERVAL_SECONDS)
+                if cached:
+                    return cached
+            cookies = _solve_challenge(target_url)
+            _write_cache(CACHE_FILE, cookies)
+            log.info(
+                "[CookieManager] Successfully added %d cookies to %s.",
+                len(cookies),
+                CACHE_FILE.name,
+            )
+            return cookies
+
+    cached = _read_cache(CACHE_FILE, ROTATE_INTERVAL_SECONDS)
+    return cached or []
+
+
 def _read_cache(cache_file: Path, ttl: int) -> list[dict[str, Any]] | None:
     if not cache_file.exists():
         return None
@@ -56,12 +155,28 @@ def _write_cache(cache_file: Path, cookies: list[dict[str, Any]]) -> None:
         logger.warning("[CookieManager] Solved 0 cookies; skipping cache overwrite to preserve existing session")
         return
     try:
+        existing_cookies = []
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+                    if isinstance(existing_data.get("cookies"), list):
+                        existing_cookies = existing_data["cookies"]
+            except Exception:
+                pass
+
+        cookie_dict = {(c.get("name"), c.get("domain")): c for c in existing_cookies if c.get("name")}
+        for c in cookies:
+            if c.get("name"):
+                cookie_dict[(c.get("name"), c.get("domain"))] = c
+        merged = list(cookie_dict.values())
+
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(cache_file.parent), prefix=".matcha_cookies_", suffix=".tmp"
         )
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": time.time(), "cookies": cookies}, f)
+            json.dump({"timestamp": time.time(), "cookies": merged}, f, indent=2)
         os.replace(tmp_path, str(cache_file))
     except Exception as exc:
         logger.warning("Failed to write cookie cache: %s", exc)
@@ -181,6 +296,16 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
                 elif not is_checkpoint and len(title) > 0 and poll_sec >= 3:
                     cleared = True
                     break
+
+            if cleared:
+                time.sleep(2.0)
+                try:
+                    page.evaluate("""async () => {
+                        try { await fetch("https://meta.matcha.xyz/api/gas?chainId=1"); } catch(e){}
+                    }""")
+                    time.sleep(1.0)
+                except Exception:
+                    pass
 
             c = context.cookies()
             browser.close()
@@ -332,16 +457,17 @@ def get_valid_cookies(
     if cached is not None and not force_refresh:
         return cached
 
-    # If stale or force refresh requested, signal background solver
-    trigger_background_solve()
+    # If on a VPS and cookies are missing or empty, force synchronous solve so workers never run cookie-less
+    if is_vps() and is_cookie_file_missing_or_empty(CACHE_FILE):
+        logger.info("[CookieManager] VPS detected with missing/empty cookies. Executing synchronous solve...")
+        non_blocking = False
 
-    # In non-blocking mode (default), return whatever cached cookies exist immediately
-    if non_blocking and cached is not None:
-        return cached
-
-    # If no cached cookies exist at all and non_blocking is True, attempt quick fallback or short wait
+    # In non-blocking mode, signal background solver and return cached cookies immediately
     if non_blocking:
-        # Give background solver or existing file a brief 0.5s check
+        trigger_background_solve()
+        if cached is not None:
+            return cached
+        # Give background solver or existing file a brief check
         cached_fallback = _read_cache(CACHE_FILE, ttl * 5)
         if cached_fallback:
             return cached_fallback
@@ -405,4 +531,26 @@ def inject_matcha_cookies(
             break
 
     return cookies
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="MetaMatcha Cookie Manager & VPS Clearance Solver")
+    parser.add_argument("--force", action="store_true", help="Force browser challenge solve and write cookies")
+    parser.add_argument("--check-vps", action="store_true", help="Ensure cookies if on a VPS and missing")
+    parser.add_argument("--url", default=DEFAULT_URL, help=f"Target URL for challenge solve (default: {DEFAULT_URL})")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    vps_status = is_vps()
+    missing_status = is_cookie_file_missing_or_empty()
+    print(f"VPS Detected: {vps_status}")
+    print(f"Cookie Cache Missing or Empty: {missing_status}")
+
+    if args.force or (vps_status and missing_status) or args.check_vps:
+        res = ensure_vps_cookies(force=args.force or (not vps_status and args.check_vps), target_url=args.url)
+        print(f"Result: Acquired and saved {len(res)} cookies to {CACHE_FILE.name}.")
+    else:
+        cached = _read_cache(CACHE_FILE, ROTATE_INTERVAL_SECONDS)
+        print(f"Result: {len(cached or [])} existing valid cookies in {CACHE_FILE.name}.")
 

@@ -2002,6 +2002,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--live", action="store_true", help="allow guarded broadcasts")
     parser.add_argument("--confirm-live")
     parser.add_argument(
+        "--no-proxy",
+        "--no-proxies",
+        dest="no_proxy",
+        action="store_true",
+        default=os.getenv("DISABLE_PROXIES", "").strip().lower() in ("1", "true", "yes"),
+        help="disable proxy testing/rotation and connect directly without proxies",
+    )
+    parser.add_argument(
         "--request-stop",
         action="store_true",
         help="ask the running sniper to stop after its active route checks",
@@ -2124,19 +2132,30 @@ def main(argv: list[str] | None = None) -> int:
         watcher.start()
 
         # Proactively verify or purchase working residential proxy before solving cookies
-        try:
-            from scripts.manage_proxyisp import setup_sniper_proxy
-            setup_sniper_proxy(logger=logger)
-        except Exception as exc:
-            logger.warning("Failed to verify/renew sniper proxy: %s", exc)
+        if not args.no_proxy:
+            try:
+                from scripts.manage_proxyisp import setup_sniper_proxy
+                setup_sniper_proxy(logger=logger)
+            except Exception as exc:
+                logger.warning("Failed to verify/renew sniper proxy: %s", exc)
+        else:
+            logger.info("[ProxyManager] Running with --no-proxy; connecting directly.")
+            os.environ["MATCHA_PROXY"] = ""
+            try:
+                from src.engines.matcha_browser_bridge import stop_bridge_server
+                stop_bridge_server()
+            except Exception:
+                pass
 
         # Proactively maintain fresh Cloudflare/Kasada cookies for child quote processes
         try:
             from src.engines.matcha_cookie_manager import (
+                ensure_vps_cookies,
                 get_valid_cookies,
                 start_background_cookie_solver,
             )
             logger.info("Ensuring valid MetaMatcha browser session cookies...")
+            ensure_vps_cookies(logger_instance=logger)
             get_valid_cookies()
             start_background_cookie_solver()
         except Exception as exc:

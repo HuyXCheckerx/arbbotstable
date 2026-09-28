@@ -279,6 +279,68 @@ EXECUTOR_ABI = [
     {
         "inputs": [
             {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
+            {"internalType": "address", "name": "loanToken", "type": "address"},
+            {
+                "internalType": "address",
+                "name": "intermediateToken",
+                "type": "address",
+            },
+            {
+                "internalType": "enum MorphoMatchaStableArbUsdc.FlashProvider",
+                "name": "flashProvider",
+                "type": "uint8",
+            },
+            {
+                "internalType": "enum MorphoMatchaStableArbUsdc.SwapOrder",
+                "name": "swapOrder",
+                "type": "uint8",
+            },
+            {
+                "components": [
+                    {"internalType": "address", "name": "target", "type": "address"},
+                    {
+                        "internalType": "address",
+                        "name": "allowanceTarget",
+                        "type": "address",
+                    },
+                    {"internalType": "uint256", "name": "sellAmount", "type": "uint256"},
+                    {"internalType": "uint256", "name": "value", "type": "uint256"},
+                    {"internalType": "bytes", "name": "data", "type": "bytes"},
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.MatchaRoute",
+                "name": "matcha",
+                "type": "tuple",
+            },
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint64", "name": "deadline", "type": "uint64"},
+                    {"internalType": "uint256", "name": "nonce", "type": "uint256"},
+                    {
+                        "internalType": "bytes",
+                        "name": "maintainerSignature",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "executionFeeNative",
+                        "type": "uint256",
+                    },
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.StableOrder",
+                "name": "stable",
+                "type": "tuple",
+            },
+            {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+        ],
+        "name": "blacked",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
             {
                 "internalType": "address",
                 "name": "loanToken",
@@ -1927,27 +1989,25 @@ def prepare_transaction(
 
     swap_order_id = 1 if swap_order == "stable-first" else 0
     executor_code = web3.eth.get_code(web3.to_checksum_address(executor)).hex().lower()
+    has_blacked_method = "f3ac40fc" in executor_code and hasattr(
+        contract.functions, "blacked"
+    )
     has_order_method = "17feadd1" in executor_code and hasattr(
         contract.functions, "executeArbitrageWithTokensAndProviderAndOrder"
     )
 
-    if not has_order_method:
-        if swap_order == "dex-first" and hasattr(contract.functions, "executeArbitrageWithTokensAndProvider"):
-            call = contract.functions.executeArbitrageWithTokensAndProvider(
-                loan_amount,
-                web3.to_checksum_address(loan_token),
-                web3.to_checksum_address(intermediate_token),
-                flash_provider.provider_id,
-                matcha_arguments,
-                stable.contract_tuple(),
-                min_profit,
-            )
-        else:
-            raise ArbError(
-                f"deployed executor contract {executor} does not support "
-                f"--swap-order {swap_order}; redeploy MorphoMatchaStableArbUsdc"
-            )
-    else:
+    if has_blacked_method:
+        call = contract.functions.blacked(
+            loan_amount,
+            web3.to_checksum_address(loan_token),
+            web3.to_checksum_address(intermediate_token),
+            flash_provider.provider_id,
+            swap_order_id,
+            matcha_arguments,
+            stable.contract_tuple(),
+            min_profit,
+        )
+    elif has_order_method:
         call = contract.functions.executeArbitrageWithTokensAndProviderAndOrder(
             loan_amount,
             web3.to_checksum_address(loan_token),
@@ -1957,6 +2017,21 @@ def prepare_transaction(
             matcha_arguments,
             stable.contract_tuple(),
             min_profit,
+        )
+    elif swap_order == "dex-first" and hasattr(contract.functions, "executeArbitrageWithTokensAndProvider"):
+        call = contract.functions.executeArbitrageWithTokensAndProvider(
+            loan_amount,
+            web3.to_checksum_address(loan_token),
+            web3.to_checksum_address(intermediate_token),
+            flash_provider.provider_id,
+            matcha_arguments,
+            stable.contract_tuple(),
+            min_profit,
+        )
+    else:
+        raise ArbError(
+            f"deployed executor contract {executor} does not support "
+            f"--swap-order {swap_order}; redeploy MorphoMatchaStableArbUsdc"
         )
 
     native_value = matcha.value + stable.execution_fee_native

@@ -56,9 +56,15 @@ else:
 print("\n[2/4] Testing Playwright Vercel Security Checkpoint Solver...")
 from src.engines import matcha_cookie_manager as cm
 
+print(f"  VPS Detected:   {cm.is_vps()}")
+print(f"  Cache Missing:  {cm.is_cookie_file_missing_or_empty()}")
+
 t0 = time.perf_counter()
 try:
-    cookies = cm.get_valid_cookies(force_refresh=True, target_url="https://meta.matcha.xyz/solana")
+    if cm.is_vps() and cm.is_cookie_file_missing_or_empty():
+        cookies = cm.ensure_vps_cookies(target_url="https://meta.matcha.xyz/solana")
+    else:
+        cookies = cm.get_valid_cookies(force_refresh=True, target_url="https://meta.matcha.xyz/solana")
     elapsed = round(time.perf_counter() - t0, 2)
     has_vcrcs = any(c.get("name") == "_vcrcs" for c in cookies)
     has_cf = any(c.get("name") == "cf_clearance" for c in cookies)

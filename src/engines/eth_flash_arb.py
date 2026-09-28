@@ -231,6 +231,18 @@ class TransientRpcError(RetryableArbError):
     pass
 
 
+class ProviderAccessBlockedError(ArbError):
+    pass
+
+
+class ProviderRateLimitedError(ArbError):
+    """Defer to the scanner's cooldown instead of rebuilding the route immediately."""
+
+    def __init__(self, response: Any, url: str):
+        super().__init__(rate_limit_detail(response, url))
+        self.retry_after_seconds = retry_after_seconds(response)
+
+
 def classify_atomic_simulation_error(exc: Exception) -> ArbError:
     detail = str(exc)
     lowered = detail.lower()

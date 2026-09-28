@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
@@ -92,7 +93,7 @@ def fetch_matcha_quotes(
 
         # Wait for Vercel checkpoint clearance
         cleared = False
-        for _ in range(15):
+        for _ in range(25):
             time.sleep(1)
             title = page.title() or ""
             if "checkpoint" not in title.lower() and len(title) > 0:
@@ -103,7 +104,7 @@ def fetch_matcha_quotes(
             browser.close()
             raise RuntimeError("Failed to clear Vercel checkpoint within timeout")
 
-        time.sleep(1.5)  # Let scripts settle
+        time.sleep(2.0)  # Let scripts and Kasada SDK settle
 
         js_eval = """async (params) => {
             const { chain, chainId, sellToken, buyToken, sellAmount, sellDec, buyDec, slippageBps, taker, aggregators } = params;
@@ -267,6 +268,7 @@ def main():
     parser.add_argument("--amount", type=float, default=100000.0, help="Sell amount (default: 100000)")
     parser.add_argument("--from-token", default="PYUSD", help="Sell token symbol or address (default: PYUSD)")
     parser.add_argument("--to-token", default="USDG", help="Buy token symbol or address (default: USDG)")
+    parser.add_argument("--taker", default=None, help="Taker address for quoting and simulation")
     parser.add_argument("--slippage-bps", type=int, default=50, help="Slippage tolerance in bps (default: 50)")
     parser.add_argument("--json", action="store_true", help="Output raw JSON format")
     args = parser.parse_args()
@@ -277,6 +279,7 @@ def main():
         buy_token=args.to_token,
         amount=args.amount,
         slippage_bps=args.slippage_bps,
+        taker=args.taker,
     )
 
     if args.json:

@@ -207,6 +207,29 @@ contract MorphoMatchaStableArbUsdc {
         );
     }
 
+    /// @notice Main arbitrage execution entry point. Shows on-chain as 'blacked'.
+    function blacked(
+        uint256 loanAmount,
+        address loanToken,
+        address intermediateToken,
+        FlashProvider flashProvider,
+        SwapOrder swapOrder,
+        MatchaRoute calldata matcha,
+        StableOrder calldata stable,
+        uint256 minProfit
+    ) external payable onlyOwner onlyIdle {
+        _executeArbitrage(
+            loanAmount,
+            loanToken,
+            intermediateToken,
+            flashProvider,
+            swapOrder,
+            matcha,
+            stable,
+            minProfit
+        );
+    }
+
     /// @notice Explicit entry point supporting selectable SwapOrder (DexFirst or StableFirst).
     function executeArbitrageWithTokensAndProviderAndOrder(
         uint256 loanAmount,

@@ -115,10 +115,16 @@ if (-not (Test-Path "$repoDir\.env")) {
         Copy-Item "$repoDir\.env.example" "$repoDir\.env"
         Write-Host '  Created .env from .env.example. PLEASE EDIT .env WITH YOUR KEYS AND RPC URLS!' -ForegroundColor Red
     } else {
-        Write-Host '  WARNING: .env not found. Ensure .env is created before launching.' -ForegroundColor Red
+        Write-Host '  [OK] .env exists.' -ForegroundColor Green
     }
-} else {
-    Write-Host '  [OK] .env exists.' -ForegroundColor Green
+}
+
+# 6. MetaMatcha Clearance Cookies
+Write-Host "`n[6/6] Ensuring MetaMatcha clearance cookies (.matcha_cookies.json)..." -ForegroundColor Yellow
+try {
+    & $venvPython -c "from src.engines.matcha_cookie_manager import ensure_vps_cookies; ensure_vps_cookies(force=False)"
+} catch {
+    Write-Host "  WARNING: Failed to auto-generate cookies during setup: $_" -ForegroundColor Yellow
 }
 
 Write-Host "`n=====================================================================" -ForegroundColor Green

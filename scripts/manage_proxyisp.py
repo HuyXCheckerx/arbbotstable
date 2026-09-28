@@ -447,7 +447,11 @@ def wait_for_new_proxy(
     return None
 
 
-def update_env_proxy(proxy_url: str, env_path: Path = ENV_FILE) -> bool:
+def update_env_proxy(
+    proxy_url: str,
+    env_path: Path = ENV_FILE,
+    cookie_path: Path | None = None,
+) -> bool:
     """Safely update MATCHA_PROXY in .env, runtime environment, and clear old cookies."""
     if not env_path.exists():
         logger.warning(".env file not found at %s", env_path)
@@ -469,9 +473,10 @@ def update_env_proxy(proxy_url: str, env_path: Path = ENV_FILE) -> bool:
         os.environ["MATCHA_PROXY"] = proxy_url
 
         # Invalidate old cached clearance cookie so fresh IP generates new challenge token
-        if COOKIE_FILE.exists():
+        target_cookie = cookie_path or (env_path.parent / ".matcha_cookies.json" if env_path != ENV_FILE else COOKIE_FILE)
+        if target_cookie.exists():
             try:
-                COOKIE_FILE.unlink()
+                target_cookie.unlink()
                 logger.info("[CookieManager] Cleared stale .matcha_cookies.json for new proxy IP")
             except Exception:
                 pass

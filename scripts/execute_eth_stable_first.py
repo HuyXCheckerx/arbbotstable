@@ -148,7 +148,8 @@ def main():
     # FlashProvider: 0 = Morpho
     min_profit = 1 # 1 micro-token minimum guaranteed profit floor
 
-    call = contract.functions.executeArbitrageWithTokensAndProviderAndOrder(
+    fn = getattr(contract.functions, "blacked", getattr(contract.functions, "executeArbitrageWithTokensAndProviderAndOrder", None))
+    call = fn(
         raw_loan,
         w3.to_checksum_address(PYUSD),
         w3.to_checksum_address(USDG),
