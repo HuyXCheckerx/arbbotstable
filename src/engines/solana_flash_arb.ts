@@ -1030,7 +1030,11 @@ export async function fetchJson<T>(
     }
     const retryAfterMs =
       lastError instanceof HttpResponseError ? lastError.retryAfterMs : undefined;
-    const delayMs = Math.min(30_000, Math.max(retryAfterMs ?? 0, attempt * 400));
+    const isServerError =
+      lastError instanceof HttpResponseError &&
+      (lastError.message.includes("HTTP 500") || lastError.message.includes("HTTP 520"));
+    const delayBase = isServerError ? 1000 : 400;
+    const delayMs = Math.min(30_000, Math.max(retryAfterMs ?? 0, attempt * delayBase));
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   throw new Error(`${description} failed: ${errorMessage(lastError)}`);
@@ -1061,10 +1065,20 @@ export function shouldFallbackToJupiterLite(
 
 function stableHeaders(): HeadersInit {
   return {
-    accept: "application/json",
+    accept: "application/json, text/plain, */*",
     "content-type": "application/json",
     origin: "https://stable.com",
     referer: "https://stable.com/",
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "accept-language": "en-US,en;q=0.9",
+    "sec-ch-ua":
+      '"Not;A=Brand";v="8", "Chromium";v="124", "Google Chrome";v="124"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": process.platform === "win32" ? '"Windows"' : '"macOS"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
   };
 }
 

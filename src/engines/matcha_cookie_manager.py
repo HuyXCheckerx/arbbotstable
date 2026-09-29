@@ -336,6 +336,12 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
                 has_vcrcs = any(c.get("name") == "_vcrcs" for c in cookies)
                 has_cf = any(c.get("name") == "cf_clearance" for c in cookies)
                 logger.info("[CookieManager] Direct fallback solve succeeded! Clearance cookie acquired.")
+                os.environ["MATCHA_PROXY"] = ""
+                try:
+                    from .matcha_browser_bridge import stop_bridge_server
+                    stop_bridge_server()
+                except Exception:
+                    pass
         except Exception as exc:
             logger.warning("[CookieManager] Direct fallback solve failed: %s", exc)
 

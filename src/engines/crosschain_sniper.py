@@ -2177,9 +2177,12 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_proxy:
             try:
                 from scripts.manage_proxyisp import setup_sniper_proxy
-                setup_sniper_proxy(logger=logger)
+                active_proxy = setup_sniper_proxy(logger=logger)
+                if not active_proxy:
+                    os.environ["MATCHA_PROXY"] = ""
             except Exception as exc:
                 logger.warning("Failed to verify/renew sniper proxy: %s", exc)
+                os.environ["MATCHA_PROXY"] = ""
         else:
             logger.info("[ProxyManager] Running with --no-proxy; connecting directly.")
             os.environ["MATCHA_PROXY"] = ""

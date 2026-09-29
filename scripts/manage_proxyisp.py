@@ -546,9 +546,10 @@ def setup_sniper_proxy(
         if balance < VN_RESIDENTIAL_DAILY_PRICE_VND:
             log_warn(
                 f"[ProxyManager] Insufficient balance ({balance:,.1f} VND) to buy proxy "
-                f"(requires {VN_RESIDENTIAL_DAILY_PRICE_VND:,.1f} VND)."
+                f"(requires {VN_RESIDENTIAL_DAILY_PRICE_VND:,.1f} VND). Disabling non-working proxy to connect directly."
             )
-            return os.getenv("MATCHA_PROXY")
+            update_env_proxy("", env_path=env_path)
+            return ""
 
         # Buy 1 day residential proxy with auto_renew=False
         order = buy_residential_proxy(api_key, days=1, auto_renew=False)
@@ -559,8 +560,9 @@ def setup_sniper_proxy(
         log_info("[ProxyManager] Waiting for residential proxy allocation from ProxyISP...")
         new_proxy = wait_for_new_proxy(api_key, known_ids, timeout=30.0)
         if not new_proxy:
-            log_warn(f"[ProxyManager] Proxy allocation timed out for order {order_no}.")
-            return os.getenv("MATCHA_PROXY")
+            log_warn(f"[ProxyManager] Proxy allocation timed out for order {order_no}. Disabling proxy.")
+            update_env_proxy("", env_path=env_path)
+            return ""
 
         # Remove auto-renew on the new proxy
         disable_proxy_autorenew(api_key, new_proxy.get("id"))
@@ -581,8 +583,9 @@ def setup_sniper_proxy(
 
         return new_url
     except Exception as exc:
-        log_warn(f"[ProxyManager] Failed to purchase new residential proxy: {exc}")
-        return os.getenv("MATCHA_PROXY")
+        log_warn(f"[ProxyManager] Failed to purchase new residential proxy: {exc}. Disabling proxy to connect directly.")
+        update_env_proxy("", env_path=env_path)
+        return ""
 
 
 def ensure_active_proxy(

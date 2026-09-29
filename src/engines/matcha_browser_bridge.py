@@ -414,8 +414,8 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     except Exception:
                         pass
 
-                    eth_ok = "checkpoint" not in t_eth and len(t_eth) > 0
-                    sol_ok = "checkpoint" not in t_sol and len(t_sol) > 0
+                    eth_ok = "checkpoint" not in t_eth and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
+                    sol_ok = "checkpoint" not in t_sol and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
 
                     if eth_ok and sol_ok and poll_idx >= 2:
                         logger.info("[MatchaBridge] Both tabs cleared! (ETH: %s, SOL: %s)", t_eth, t_sol)
@@ -423,6 +423,44 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         state.ready_eth.set()
                         state.ready_sol.set()
                         break
+
+                # If proxy was used and failed to clear tabs, fallback directly without proxy
+                if proxy_url and not (state.ready_eth.is_set() and state.ready_sol.is_set()):
+                    logger.warning("[MatchaBridge] Proxy failed to clear browser tabs; retrying directly without proxy...")
+                    os.environ["MATCHA_PROXY"] = ""
+                    try:
+                        context.close()
+                        browser.close()
+                    except Exception:
+                        pass
+                    launch_kwargs.pop("proxy", None)
+                    launch_kwargs["args"] = list(launch_kwargs.get("args", [])) + ["--no-proxy-server"]
+                    browser = pw.chromium.launch(**launch_kwargs)
+                    context = browser.new_context(viewport={"width": 1280, "height": 800})
+                    page_eth = context.new_page()
+                    Stealth().apply_stealth_sync(page_eth)
+                    page_sol = context.new_page()
+                    Stealth().apply_stealth_sync(page_sol)
+                    try:
+                        page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
+                    except Exception:
+                        pass
+                    try:
+                        page_sol.goto("https://meta.matcha.xyz/solana", wait_until="domcontentloaded", timeout=45000)
+                    except Exception:
+                        pass
+                    for poll_idx in range(30):
+                        time.sleep(1)
+                        t_eth = (page_eth.title() or "").lower()
+                        t_sol = (page_sol.title() or "").lower()
+                        eth_ok = "checkpoint" not in t_eth and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
+                        sol_ok = "checkpoint" not in t_sol and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
+                        if eth_ok and sol_ok and poll_idx >= 2:
+                            logger.info("[MatchaBridge] Direct fallback cleared tabs! (ETH: %s, SOL: %s)", t_eth, t_sol)
+                            time.sleep(2.0)
+                            state.ready_eth.set()
+                            state.ready_sol.set()
+                            break
 
                 last_health_check = time.monotonic()
                 while state.is_running:
@@ -464,7 +502,12 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                                     headers,
                                     body: JSON.stringify(payload)
                                 });
-                                let comp = await compRes.json();
+                                let comp;
+                                try {
+                                    comp = await compRes.json();
+                                } catch (e) {
+                                    comp = { error: `HTTP ${compRes.status} (non-JSON response)` };
+                                }
                                 let compId = comp.id || comp.competitionId;
                                 if (!compId) {
                                     return { error: comp };
