@@ -35,6 +35,35 @@ Set a conservative observed value with `--bridge-fee-usd` (or
 `MANUAL_REVIEW` is only a signal: the bridge makes the cycle non-atomic, and the
 MetaMatcha quote must be refreshed after USDG actually arrives on Ethereum.
 
+## Live terminal dashboard
+
+`start_sniper.cmd` automatically shows a refreshing route table in an interactive
+terminal. Ethereum and Solana appear side by side in windows at least 136 columns
+wide. Every route keeps its position and updates independently as quotes arrive.
+Small windows rotate through numbered pages every eight seconds.
+
+Install updated dependencies once with `python -m pip install -r requirements.txt`
+using the Python environment that runs the sniper. No web app is needed.
+
+The table shows the cycle, first venue, guaranteed gross/net result when available,
+status, pause countdown, and age of the last result. Profit values are in the
+cycle's first token, not cumulative realized P&L. Dim values during SCANNING are
+from the previous check; `--` means unavailable. At widths below 64 columns, the
+net column is hidden. Enlarge the window to see both profit columns.
+
+Recent result details and startup/provider events appear below the table. Complete
+history remains in `logs/crosschain-sniper.log`. Redirected output keeps the normal
+scrolling logs. Set `SNIPER_DISPLAY=log` in `.env` to always use scrolling output,
+or use `--display log` with your usual command arguments. Display options do not
+enable live execution: the launcher's existing behavior is unchanged (no arguments
+select live mode; custom arguments must include the existing live confirmation).
+
+To preview the display with simulated results and no network or trading:
+
+```bash
+python scripts/preview_sniper_terminal.py
+```
+
 ## Live sniper dashboard
 
 The web app is a read-only live dashboard for `start_sniper.cmd`. Start the

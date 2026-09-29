@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -885,7 +886,7 @@ def profit_metrics(route: Route, stdout: str, stderr: str = "") -> tuple[str | N
 
 
 class SniperDashboardFeed:
-    """Thread-safe, atomic status feed consumed by the local web dashboard."""
+    """Thread-safe status feed shared by the terminal and web dashboards."""
 
     _PAUSED_CATEGORIES = {
         "no-route",
@@ -966,6 +967,7 @@ class SniperDashboardFeed:
             "loan_token": route.loan,
             "counter_token": route.intermediate,
             "flow": route.display,
+            "dex_name": route.dex_name,
             "execution_floor": amount_text(execution_floor),
             "profit_token": route.loan,
             "state": state,
@@ -998,6 +1000,10 @@ class SniperDashboardFeed:
             # Dashboard observability must never interrupt route execution.
             temporary.unlink(missing_ok=True)
 
+    def snapshot(self) -> dict:
+        with self._lock:
+            return deepcopy(self._state)
+
     def begin_check(self, route: Route, execution_floor: Decimal) -> None:
         with self._lock:
             routes = self._state["routes"]
@@ -1013,7 +1019,10 @@ class SniperDashboardFeed:
             record["started_at"] = self._now()
             previous = routes.get(route.key)
             if isinstance(previous, dict):
-                record["checked_at"] = previous.get("checked_at")
+                # Keep the last quote visible during refresh; CHECKING and its
+                # original timestamp distinguish it from a fresh result.
+                for field in ("checked_at", "gross_profit", "net_profit", "profit_token"):
+                    record[field] = previous.get(field)
             routes[route.key] = record
             active[route.chain] = dict(record)
             summary["checks"] = int(summary.get("checks", 0)) + 1
@@ -2057,6 +2066,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="ask the running sniper to stop after its active route checks",
     )
+    parser.add_argument(
+        "--display", choices=("auto", "table", "log"),
+        default=os.getenv("SNIPER_DISPLAY", "auto"),
+        help="auto: refreshing table in a terminal, scrolling logs when redirected",
+    )
     return parser.parse_args(argv)
 
 
@@ -2190,7 +2204,7 @@ def main(argv: list[str] | None = None) -> int:
     for route in routes:
         logger.info("ROUTE   | %-8s | %s", route.chain.title(), route.display)
 
-    with single_instance():
+    with single_instance(), ExitStack() as display_resources:
         stop = threading.Event()
         dashboard = SniperDashboardFeed(
             DASHBOARD_PATH,
@@ -2198,6 +2212,8 @@ def main(argv: list[str] | None = None) -> int:
             live=args.live,
             base_threshold=args.threshold_usd,
         )
+        from src.engines.sniper_terminal import terminal_dashboard
+        display_resources.enter_context(terminal_dashboard(dashboard, logger, args.display))
         backoff = AdaptiveBackoff()
         cooldown_policy = CooldownPolicy(
             transient_base_seconds=args.transient_backoff_seconds,
