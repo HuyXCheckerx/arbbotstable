@@ -1661,7 +1661,7 @@ async function getCapacitySizedCycle(
   let loanAmountRaw = config.maximumLoanAmountRaw;
   if (maxBankBorrowRaw && maxBankBorrowRaw > 0n && loanAmountRaw > maxBankBorrowRaw) {
     console.log(
-      `Marginfi pool headroom capped the loan from ${formatRaw(loanAmountRaw)} to ${formatRaw(maxBankBorrowRaw)} ${config.loanSymbol}`,
+      `Flash-loan liquidity headroom capped the loan from ${formatRaw(loanAmountRaw)} to ${formatRaw(maxBankBorrowRaw)} ${config.loanSymbol}`,
     );
     loanAmountRaw = maxBankBorrowRaw;
   }
@@ -3496,6 +3496,36 @@ async function main(): Promise<void> {
           console.log(
             `Marginfi liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`,
           );
+        }
+
+        // Marginfi stays first only while it can fund the full principal.
+        // Otherwise its small vault would cap the loan, and a later
+        // Marginfi-to-Kamino fallback would keep that reduced size.
+        if (
+          isMarginfiHealthy &&
+          config.provider === "auto" &&
+          headroom < config.maximumLoanAmountRaw
+        ) {
+          try {
+            const kaminoHeadroom = await getKaminoAvailableLiquidity(
+              connection,
+              config.loanMint,
+            );
+            if (kaminoHeadroom > headroom) {
+              activeProvider = "kamino";
+              availableBankLiquidityRaw = kaminoHeadroom;
+              console.log(
+                `[Flash Loan] Marginfi headroom ${formatRaw(headroom)} ${config.loanSymbol} is below the ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol} maximum; using Kamino Lending (headroom ${formatRaw(kaminoHeadroom)} ${config.loanSymbol}).`,
+              );
+              console.log(
+                `Kamino ${config.loanSymbol} reserve: ${getKaminoReserveInfo(config.loanMint).reserve.toBase58()}`,
+              );
+            }
+          } catch (kaminoErr) {
+            console.log(
+              `[Flash Loan] Kamino headroom check failed (${errorMessage(kaminoErr)}); keeping Marginfi.`,
+            );
+          }
         }
       } catch (err) {
         marginfiUnavailableReason = errorMessage(err);

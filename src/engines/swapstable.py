@@ -91,11 +91,13 @@ class Logger(object):
         self.terminal.flush()
         self.log.flush()
 
-os.makedirs("logs", exist_ok=True)
-log_name = os.environ.get("BOT_LOG_NAME", os.path.splitext(os.path.basename(__file__))[0])
-log_filename = f"logs/{log_name}.log"
-sys.stdout = Logger(log_filename)
-sys.stderr = sys.stdout
+def install_log_tee():
+    # Only the running scanner tees its output; importing this module (for
+    # example from tests) must not hijack the caller's stdout/stderr.
+    os.makedirs("logs", exist_ok=True)
+    log_name = os.environ.get("BOT_LOG_NAME", os.path.splitext(os.path.basename(__file__))[0])
+    sys.stdout = Logger(f"logs/{log_name}.log")
+    sys.stderr = sys.stdout
 
 # ============================================================
 # CONFIG
@@ -3174,4 +3176,5 @@ def main():
             time.sleep(5)
 
 if __name__ == "__main__":
+    install_log_tee()
     main()

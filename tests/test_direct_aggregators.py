@@ -4,10 +4,13 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+# Always move these to the front: another test may have put the repository
+# root first, where same-named root launch wrappers would shadow the engines.
 for sub in ("", "engines"):
     path = str(SRC_DIR / sub) if sub else str(SRC_DIR)
-    if path not in sys.path:
-        sys.path.insert(0, path)
+    while path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
 
 import eth_flash_arb_pyusd_usdc as engine  # noqa: E402
 from direct_aggregators import DirectAggregatorClient  # noqa: E402

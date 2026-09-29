@@ -1,13 +1,12 @@
-"""Matcha Browser Bridge Daemon & Client.
+"""Keep browser tabs for MetaMatcha quotes and report real upstream failures.
 
-Solves Kasada KPSDK client-side telemetry and Vercel firewall challenges by keeping warm
-browser tabs active on MetaMatcha Ethereum and Solana endpoints. Quotes are executed directly
-within the page context via native browser fetch(), guaranteeing genuine single-use KPSDK
-proof-of-work tokens and avoiding HTTP 403 blocks.
+A ready browser does not guarantee API access. Lifecycle operations are serialized
+across callers so a slow request or browser warmup cannot trigger a restart storm.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -20,7 +19,7 @@ from typing import Any
 import urllib.request
 import urllib.error
 
-from filelock import FileLock
+from filelock import FileLock, Timeout as FileLockTimeout
 
 logger = logging.getLogger("matcha.bridge")
 
@@ -29,7 +28,12 @@ PID_FILE = PROJECT_ROOT / ".matcha_bridge.pid"
 LOCK_FILE = PROJECT_ROOT / ".matcha_bridge.lock"
 DEFAULT_PORT = 18234
 DEFAULT_HOST = "127.0.0.1"
-BRIDGE_VERSION = 3
+BRIDGE_VERSION = 4
+# Diagnostic instances on another port must not share lifecycle files.
+if os.getenv("MATCHA_BRIDGE_PORT", str(DEFAULT_PORT)) != str(DEFAULT_PORT):
+    _port = int(os.environ["MATCHA_BRIDGE_PORT"])
+    PID_FILE = PROJECT_ROOT / f".matcha_bridge_{_port}.pid"
+    LOCK_FILE = PROJECT_ROOT / f".matcha_bridge_{_port}.lock"
 
 
 def get_bridge_port() -> int:
@@ -42,27 +46,20 @@ def get_bridge_base_url() -> str:
     return f"http://{host}:{port}"
 
 
+def proxy_fingerprint(proxy: str | None = None) -> str:
+    value = os.getenv("MATCHA_PROXY", "").strip() if proxy is None else proxy.strip()
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _compatible(status: dict[str, Any]) -> bool:
+    # Compare launch configuration, not the active connection after direct fallback.
+    return (status.get("version") == BRIDGE_VERSION
+            and status.get("configured_proxy") == proxy_fingerprint())
+
+
 def is_bridge_ready(base_url: str | None = None, timeout: float = 0.8) -> bool:
-    """Check if the Matcha browser bridge is running, tabs are cleared, and version/proxy match."""
-    url = f"{base_url or get_bridge_base_url()}/health"
-    expected_proxy = os.getenv("MATCHA_PROXY", "").strip()
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "MatchaBridgeClient"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status == 200:
-                data = json.loads(resp.read().decode("utf-8"))
-                if not data.get("ready"):
-                    return False
-                if data.get("version") != BRIDGE_VERSION:
-                    logger.info("[MatchaBridge] Stale bridge version %s (expected %s); will restart", data.get("version"), BRIDGE_VERSION)
-                    return False
-                if data.get("proxy", "").strip() != expected_proxy:
-                    logger.info("[MatchaBridge] Bridge proxy mismatch ('%s' vs '%s'); will restart", data.get("proxy"), expected_proxy)
-                    return False
-                return True
-    except Exception:
-        pass
-    return False
+    status = get_bridge_status(base_url, timeout)
+    return bool(status.get("ready") and _compatible(status))
 
 
 def get_bridge_status(base_url: str | None = None, timeout: float = 0.8) -> dict[str, Any]:
@@ -114,39 +111,7 @@ def is_pid_alive(pid: int) -> bool:
             return False
 
 
-def kill_process_on_port(port: int) -> None:
-    """Forcefully terminate any process listening on the bridge port."""
-    if sys.platform == "win32":
-        try:
-            out = subprocess.check_output(
-                f"netstat -ano -p tcp | findstr :{port}",
-                shell=True,
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-            pids = set()
-            for line in out.strip().splitlines():
-                parts = line.strip().split()
-                if len(parts) >= 5 and "LISTENING" in parts[3].upper():
-                    pid_str = parts[4]
-                    if pid_str.isdigit() and int(pid_str) != os.getpid():
-                        pids.add(int(pid_str))
-            for p in pids:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(p)], capture_output=True, check=False)
-        except Exception:
-            pass
-    else:
-        try:
-            out = subprocess.check_output(["lsof", "-t", f"-i:{port}"], text=True, stderr=subprocess.DEVNULL)
-            for line in out.strip().splitlines():
-                if line.isdigit() and int(line) != os.getpid():
-                    import signal
-                    os.kill(int(line), signal.SIGKILL)
-        except Exception:
-            pass
-
-
-def stop_bridge_server(base_url: str | None = None) -> bool:
+def _stop_bridge_server_locked(base_url: str | None = None) -> bool:
     """Request graceful shutdown of the background Matcha bridge daemon."""
     url = f"{base_url or get_bridge_base_url()}/shutdown"
     stopped = False
@@ -176,126 +141,124 @@ def stop_bridge_server(base_url: str | None = None) -> bool:
             except Exception:
                 pass
 
-    kill_process_on_port(get_bridge_port())
+    if stopped:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if get_bridge_status(base_url, timeout=0.2).get("unreachable"):
+                break
+            time.sleep(0.05)
     return stopped
 
 
 _spawn_lock = threading.Lock()
-_last_spawn_attempt: float = 0.0
-_SPAWN_COOLDOWN_SECONDS: float = 10.0
+
+
+def stop_bridge_server(base_url: str | None = None) -> bool:
+    """Serialize shutdown with startup; never kill arbitrary port users."""
+    with _spawn_lock:
+        try:
+            with FileLock(str(LOCK_FILE), timeout=10):
+                return _stop_bridge_server_locked(base_url)
+        except FileLockTimeout:
+            logger.warning("[MatchaBridge] Startup is still in progress; shutdown deferred")
+            return False
+
+
+def _recorded_pid() -> int | None:
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+        return pid if is_pid_alive(pid) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _spawn_bridge() -> subprocess.Popen:
+    creationflags = 0
+    startupinfo = None
+    if sys.platform == "win32":
+        creationflags = subprocess.CREATE_NO_WINDOW
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+    log_dir = PROJECT_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with (log_dir / "matcha_browser_bridge.log").open("a", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve())],
+            creationflags=creationflags, startupinfo=startupinfo,
+            close_fds=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        )
+    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+    return proc
 
 
 def ensure_bridge_running(timeout: float = 50.0) -> bool:
-    """Ensures the background Matcha browser bridge server is running using process locks."""
+    """A warming/busy daemon is not dead. Only confirmed mismatches are replaced."""
     base_url = get_bridge_base_url()
-    if is_bridge_ready(base_url, timeout=0.8):
+    deadline = time.monotonic() + timeout
+    if is_bridge_ready(base_url):
         return True
-
-    # If the bridge was not ready (stale version, proxy mismatch, fatal error, or dead),
-    # terminate any existing process or listener on this port so a clean daemon starts.
-    stop_bridge_server(base_url)
-
-    # 1. Thread-level guard: avoid duplicate spawns from concurrent worker threads
-    if not _spawn_lock.acquire(blocking=False):
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < min(timeout, 10.0):
-            if is_bridge_ready(base_url, timeout=1.0):
-                return True
-            time.sleep(0.5)
-        return is_bridge_ready(base_url, timeout=1.0)
-
+    if not _spawn_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+        return False
     try:
-        if is_bridge_ready(base_url, timeout=0.8):
-            return True
-
-        # 2. Debounce: enforce cooldown between spawn attempts to prevent runaway spawning
-        global _last_spawn_attempt
-        now = time.monotonic()
-        if (now - _last_spawn_attempt) < _SPAWN_COOLDOWN_SECONDS:
-            logger.debug(
-                "[MatchaBridge] Spawn cooldown active (%.1fs < %.1fs). Skipping spawn.",
-                now - _last_spawn_attempt,
-                _SPAWN_COOLDOWN_SECONDS,
-            )
-            return False
-        _last_spawn_attempt = now
-
         try:
-            lock = FileLock(str(LOCK_FILE), timeout=10)
-        except Exception:
-            lock = None
-
-        def _spawn_and_wait() -> bool:
-            if is_bridge_ready(base_url, timeout=0.8):
-                return True
-
-            bridge_script = Path(__file__).resolve()
-            logger.info("[MatchaBridge] Bridge daemon not detected at %s. Launching background worker...", base_url)
-
-            creationflags = 0
-            startupinfo = None
-            if sys.platform == "win32":
-                creationflags = subprocess.CREATE_NO_WINDOW
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0  # SW_HIDE
-
-            log_dir = PROJECT_ROOT / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log_path = log_dir / "matcha_browser_bridge.log"
-            try:
-                with open(log_path, "a", encoding="utf-8") as log_file:
-                    proc = subprocess.Popen(
-                        [sys.executable, str(bridge_script)],
-                        creationflags=creationflags,
-                        startupinfo=startupinfo,
-                        close_fds=(sys.platform != "win32"),
-                        stdin=subprocess.DEVNULL,
-                        stdout=log_file,
-                        stderr=log_file,
-                    )
-                try:
-                    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
-                except Exception:
-                    pass
-            except Exception as exc:
-                logger.warning("[MatchaBridge] Failed to spawn bridge process: %s", exc)
-                return False
-
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < timeout:
-                if proc.poll() is not None:
-                    logger.warning(
-                        "[MatchaBridge] Bridge process PID %d exited prematurely with code %s (check %s)",
-                        proc.pid,
-                        proc.returncode,
-                        log_path,
-                    )
-                    try:
-                        PID_FILE.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    return False
-
-                st = get_bridge_status(base_url, timeout=1.0)
-                if st.get("ready"):
-                    logger.info("[MatchaBridge] Bridge daemon ready at %s (took %.1fs)", base_url, time.monotonic() - t0)
+            with FileLock(str(LOCK_FILE), timeout=max(0, deadline - time.monotonic())):
+                # Both thread and cross-process locks cover the entire lifecycle.
+                status = get_bridge_status(base_url)
+                if status.get("ready") and _compatible(status):
                     return True
-                if st.get("error"):
-                    logger.error("[MatchaBridge] Bridge daemon reported fatal error: %s", st["error"])
+                if "version" in status and not _compatible(status):
+                    logger.info("[MatchaBridge] Replacing daemon with outdated version or launch configuration")
+                    if not _stop_bridge_server_locked(base_url):
+                        return False
+                    status = {}
+                # Fatal startup errors need intervention, not an endless restart loop.
+                if status.get("error"):
+                    logger.warning("[MatchaBridge] Worker reported a startup error; see bridge log")
                     return False
-
-                time.sleep(0.5)
-
-            logger.warning("[MatchaBridge] Timed out waiting for bridge daemon to be ready (%ss)", timeout)
+                proc = None
+                if not status.get("running") and not _recorded_pid():
+                    try:
+                        logger.info("[MatchaBridge] Launching browser worker at %s", base_url)
+                        proc = _spawn_bridge()
+                    except OSError as exc:
+                        logger.warning("[MatchaBridge] Could not start worker (%s)", type(exc).__name__)
+                        return False
+                while time.monotonic() < deadline:
+                    if proc is not None and proc.poll() is not None:
+                        return False
+                    status = get_bridge_status(base_url)
+                    if status.get("ready") and _compatible(status):
+                        return True
+                    if status.get("error"):
+                        return False
+                    time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+                logger.warning("[MatchaBridge] Worker is not ready yet; leaving it running")
+                return False
+        except FileLockTimeout:
             return False
-
-        if lock:
-            with lock:
-                return _spawn_and_wait()
-        return _spawn_and_wait()
     finally:
         _spawn_lock.release()
+
+
+class BridgeUnavailableError(RuntimeError):
+    """Local browser/transport failure, with no claim about provider HTTP status."""
+
+
+class BridgeProviderError(RuntimeError):
+    def __init__(self, detail: dict[str, Any]):
+        self.upstream_status = detail.get("status")
+        self.endpoint = detail.get("endpoint", "unknown")
+        self.access_blocked = self.upstream_status in (401, 403)
+        message = f"MetaMatcha {self.endpoint} returned HTTP {self.upstream_status}"
+        for key in ("mitigation", "request_id", "denial"):
+            value = detail.get(key)
+            if value:
+                message += f"; {key}={str(value)[:160]}"
+        retry_after = str(detail.get("retry_after", ""))
+        if retry_after.isdigit():
+            message += f"; retry-after={retry_after}s"
+        super().__init__(message)
 
 
 def fetch_bridge_quotes(
@@ -306,7 +269,7 @@ def fetch_bridge_quotes(
 ) -> dict[str, Any]:
     """Fetch quotes via the Matcha browser bridge."""
     if not ensure_bridge_running(timeout=45.0):
-        raise RuntimeError("Matcha browser bridge daemon is not running or failed to clear challenges")
+        raise BridgeUnavailableError("Matcha bridge temporarily failed to become ready; see logs/matcha_browser_bridge.log")
 
     chain_name = "ethereum" if chain in ("ethereum", "1", 1) else "solana"
     url = f"{get_bridge_base_url()}/{chain_name}/quote"
@@ -323,24 +286,83 @@ def fetch_bridge_quotes(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data.get("provider_error"), dict):
+                    raise BridgeProviderError(data["provider_error"])
                 if "error" in data:
-                    raise RuntimeError(f"Matcha bridge error: {data['error']}")
+                    raise BridgeUnavailableError("Matcha bridge temporarily failed: " + str(data["error"]))
                 return data.get("quotes", {})
             raise RuntimeError(f"Matcha bridge HTTP {resp.status}")
+    except BridgeProviderError:
+        raise
+    except BridgeUnavailableError:
+        raise
     except urllib.error.HTTPError as exc:
         try:
             err_data = json.loads(exc.read().decode("utf-8"))
             err_msg = err_data.get("error", str(exc))
         except Exception:
             err_msg = str(exc)
-        raise RuntimeError(f"Matcha bridge request failed (HTTP {exc.code}): {err_msg}") from exc
+        raise BridgeUnavailableError(f"Matcha bridge temporarily failed (local-status={exc.code}): {err_msg}") from exc
     except Exception as exc:
-        raise RuntimeError(f"Matcha bridge connection failed: {exc}") from exc
+        raise BridgeUnavailableError(f"Matcha bridge temporarily failed ({type(exc).__name__})") from exc
 
 
 # ---------------------------------------------------------------------------
 # Server / Daemon Implementation
 # ---------------------------------------------------------------------------
+
+QUOTE_SCRIPT = r"""async (args) => {
+    const { chain, payload, aggregators } = args;
+    const headers = { 'content-type': 'application/json', 'x-fetch-native': '1' };
+    if (chain === 'ethereum' && payload.taker) headers['x-taker'] = payload.taker.toLowerCase();
+    async function failure(response, endpoint) {
+        const safe = name => {
+            const value = response.headers.get(name) || '';
+            return /^[a-zA-Z0-9._|:= -]{1,160}$/.test(value) ? value : '';
+        };
+        const body = (await response.text()).toLowerCase();
+        const denial = ['vercel security checkpoint', 'kasada', 'forbidden', 'unauthorized', 'rate limit']
+            .find(marker => body.includes(marker)) || '';
+        return {status: response.status, endpoint, denial,
+                mitigation: safe('x-vercel-mitigated'),
+                request_id: safe('x-vercel-id') || safe('cf-ray'),
+                retry_after: safe('retry-after')};
+    }
+    if (chain === 'ethereum') {
+        try { await fetch('https://meta.matcha.xyz/api/gas?chainId=1', {signal: AbortSignal.timeout(8000)}); } catch(e) {}
+    }
+    const compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
+        method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000)
+    });
+    if (!compRes.ok) return {provider_error: await failure(compRes, '/api/competitions')};
+    let comp;
+    try { comp = await compRes.json(); }
+    catch(e) { return {error: 'Competition response was not JSON'}; }
+    const compId = comp && (comp.id || comp.competitionId);
+    if (!compId) return {error: 'Competition response omitted competitionId'};
+    const quotes = {};
+    const failures = [];
+    await Promise.all(aggregators.map(async agg => {
+        try {
+            const response = await fetch(`https://meta.matcha.xyz/api/quotes?aggregator=${encodeURIComponent(agg)}`, {
+                method: 'POST', headers, body: JSON.stringify({competitionId: compId, aggregator: agg}),
+                signal: AbortSignal.timeout(15000)
+            });
+            if (!response.ok) {
+                const detail = await failure(response, '/api/quotes');
+                failures.push(detail);
+                quotes[agg] = {error: `HTTP ${response.status}`, provider_error: detail};
+            } else {
+                quotes[agg] = await response.json();
+            }
+        } catch(e) { quotes[agg] = {error: 'Quote transport or JSON parsing failed'}; }
+    }));
+    if (failures.length && !Object.values(quotes).some(q => q && !q.error)) {
+        return {provider_error: failures.find(f => [401,403].includes(f.status)) || failures[0]};
+    }
+    return {competitionId: compId, quotes};
+}"""
+
 
 class _BridgeServerState:
     def __init__(self) -> None:
@@ -351,6 +373,7 @@ class _BridgeServerState:
         self.is_running = True
         self.fatal_error: str | None = None
         self.proxy_url: str = os.getenv("MATCHA_PROXY", "").strip()
+        self.configured_proxy = proxy_fingerprint(self.proxy_url)
 
 
 def _run_playwright_worker(state: _BridgeServerState) -> None:
@@ -441,7 +464,6 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                 # If proxy was used and failed to clear tabs, fallback directly without proxy
                 if proxy_url and not (state.ready_eth.is_set() and state.ready_sol.is_set()):
                     logger.warning("[MatchaBridge] Proxy failed to clear browser tabs; retrying directly without proxy...")
-                    os.environ["MATCHA_PROXY"] = ""
                     state.proxy_url = ""
                     try:
                         context.close()
@@ -500,60 +522,17 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     try:
                         t0 = time.perf_counter()
                         res = page.evaluate(
-                            """async (args) => {
-                                const { chain, payload, aggregators } = args;
-                                const taker = payload.taker ? (chain === 'ethereum' ? payload.taker.toLowerCase() : payload.taker) : '';
-                                const headers = { 'content-type': 'application/json', 'x-fetch-native': '1' };
-                                if (chain === 'ethereum' && taker) {
-                                    headers['x-taker'] = taker;
-                                }
-
-                                if (chain === 'ethereum') {
-                                    try { await fetch('https://meta.matcha.xyz/api/gas?chainId=1'); } catch(e) {}
-                                }
-
-                                let compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
-                                    method: 'POST',
-                                    headers,
-                                    body: JSON.stringify(payload)
-                                });
-                                let comp;
-                                try {
-                                    comp = await compRes.json();
-                                } catch (e) {
-                                    comp = { error: `HTTP ${compRes.status} (non-JSON response)` };
-                                }
-                                let compId = comp.id || comp.competitionId;
-                                if (!compId) {
-                                    return { error: comp };
-                                }
-
-                                const quotes = {};
-                                await Promise.all(aggregators.map(async (agg) => {
-                                    try {
-                                        const qRes = await fetch(`https://meta.matcha.xyz/api/quotes?aggregator=${agg}`, {
-                                            method: 'POST',
-                                            headers,
-                                            body: JSON.stringify({ competitionId: compId, aggregator: agg })
-                                        });
-                                        quotes[agg] = await qRes.json();
-                                    } catch (e) {
-                                        quotes[agg] = { error: String(e) };
-                                    }
-                                }));
-                                return { competitionId: compId, quotes };
-                            }""",
+                            QUOTE_SCRIPT,
                             {"chain": chain, "payload": payload, "aggregators": aggregators},
                         )
 
-                        # Auto-heal if challenged
-                        if isinstance(res, dict) and "error" in res:
-                            err_str = str(res.get("error", "")).lower()
-                            if any(x in err_str for x in ("checkpoint", "403", "429", "challenge")):
-                                logger.warning("[MatchaBridge] %s tab hit checkpoint (%s). Auto-reloading...", chain, err_str[:80])
+                        if isinstance(res, dict) and res.get("provider_error"):
+                            detail = res["provider_error"]
+                            logger.warning("[MatchaBridge] %s | %s", chain, BridgeProviderError(detail))
+                            # Only a real browser challenge warrants reloading, not a deny or 429.
+                            if detail.get("mitigation") == "challenge":
                                 try:
                                     page.reload(wait_until="domcontentloaded", timeout=25000)
-                                    time.sleep(2.0)
                                 except Exception:
                                     pass
 
@@ -589,7 +568,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
 
 def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     """Run the bridge HTTP service and Playwright worker."""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
     logging.basicConfig(
         level=logging.INFO,
@@ -613,7 +592,9 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                             "ready": False,
                             "error": state.fatal_error,
                             "version": BRIDGE_VERSION,
-                            "proxy": state.proxy_url,
+                            "configured_proxy": state.configured_proxy,
+                            "connection": "proxy" if state.proxy_url else "direct",
+                            "pid": os.getpid(),
                         }).encode("utf-8"))
                     except Exception:
                         pass
@@ -629,7 +610,9 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                         "ready": ready,
                         "running": state.is_running,
                         "version": BRIDGE_VERSION,
-                        "proxy": state.proxy_url,
+                        "configured_proxy": state.configured_proxy,
+                        "connection": "proxy" if state.proxy_url else "direct",
+                        "pid": os.getpid(),
                     }).encode("utf-8"))
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
                     pass
@@ -696,7 +679,7 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
             self.wfile.write(json.dumps(result_box["result"]).encode("utf-8"))
 
     try:
-        server = HTTPServer((host, port), BridgeHandler)
+        server = ThreadingHTTPServer((host, port), BridgeHandler)
     except OSError as exc:
         logger.warning(
             "[MatchaBridge] Cannot bind http://%s:%d: %s. An existing bridge instance may be active.",
@@ -727,6 +710,8 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
         state.is_running = False
         server.server_close()
     finally:
+        state.is_running = False
+        server.server_close()
         try:
             if PID_FILE.exists():
                 stored_pid = int(PID_FILE.read_text(encoding="utf-8").strip())

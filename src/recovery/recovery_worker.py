@@ -58,6 +58,7 @@ from swapstable import (  # noqa: E402
     get_jup_quote,
     get_submission_signature_status,
     get_token_balance,
+    install_log_tee,
     is_submission_blockhash_valid,
 )
 
@@ -415,4 +416,5 @@ def main():
 
 
 if __name__ == "__main__":
+    install_log_tee()
     main()

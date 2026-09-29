@@ -35,6 +35,32 @@ Set a conservative observed value with `--bridge-fee-usd` (or
 `MANUAL_REVIEW` is only a signal: the bridge makes the cycle non-atomic, and the
 MetaMatcha quote must be refreshed after USDG actually arrives on Ethereum.
 
+## Browser bridge startup and access diagnostics
+
+The browser bridge serializes startup across threads and processes. A slow health
+check or a browser still warming up does not cause it to be killed. Health checks
+run independently of queued quotes. A confirmed version or launch-configuration
+mismatch triggers replacement under the same startup lock.
+
+Local bridge failures use a temporary-failure cooldown. Only an actual upstream
+401/403 is reported as an access rejection; HTTP 429 stays a rate-limit error.
+The bridge log preserves the failed API endpoint, status, and request ID without
+dumping response bodies or proxy credentials. A loaded browser page does not
+prove that the quote API accepts requests.
+
+To diagnose the MetaMatcha leg of PYUSD/USDG with Stable.com first, run:
+
+```bash
+python scripts/diagnose_matcha_bridge.py --sell USDG --buy PYUSD
+```
+
+This uses a separate direct browser, a one-token quote, and a dummy public taker.
+It does not load `.env`, touch the live bridge, or sign/broadcast anything.
+An optional `--taker PUBLIC_ADDRESS` can test the intended public executor address.
+Success indicates API reachability, not executable profitability. If this returns
+`provider_error.status: 403`, check provider access; changing Solana RPC settings
+or repeatedly restarting the bridge will not resolve that denial.
+
 ## Live terminal dashboard
 
 `start_sniper.cmd` automatically shows a refreshing route table in an interactive

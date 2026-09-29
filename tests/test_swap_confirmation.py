@@ -9,10 +9,13 @@ from unittest.mock import patch
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+# Always move these to the front: another test may have put the repository
+# root first, where same-named root launch wrappers would shadow the engines.
 for sub in ("core", "recovery", "engines", "web", "deployers"):
     subpath = str(SRC_DIR / sub)
-    if subpath not in sys.path:
-        sys.path.insert(0, subpath)
+    while subpath in sys.path:
+        sys.path.remove(subpath)
+    sys.path.insert(0, subpath)
 
 os.environ.setdefault("SOLANA_PRIVATE_KEY", "[]")
 

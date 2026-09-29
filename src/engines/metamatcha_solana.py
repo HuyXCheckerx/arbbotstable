@@ -342,8 +342,8 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
             except Exception as exc:
                 err_msg = str(exc)
                 logger.debug("[MatchaBridge] SOL bridge quote failed: %s", exc)
-                if any(x in err_msg.lower() for x in ("forbidden", "403", "checkpoint", "challenge", "429")):
-                    raise ProviderAccessBlockedError(f"MetaMatcha access denied (HTTP 403): {err_msg}") from exc
+                if getattr(exc, "access_blocked", False):
+                    raise ProviderAccessBlockedError(err_msg) from exc
                 raise
     proxy_url = os.getenv("MATCHA_PROXY", "").strip()
     with proxy_gate_lock():
