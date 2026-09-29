@@ -134,6 +134,16 @@ class CrosschainSniperTests(unittest.TestCase):
             self.assertEqual(recorded["routes"][route.key]["net_profit"], "6")
             self.assertEqual(recorded["last_execution"]["state"], "CONFIRMED")
 
+            feed.begin_check(route, Decimal("5.000001"))
+            refreshing = feed.snapshot()
+            self.assertEqual(refreshing["routes"][route.key]["state"], "CHECKING")
+            self.assertEqual(refreshing["routes"][route.key]["net_profit"], "6")
+            self.assertEqual(refreshing["routes"][route.key]["checked_at"], recorded["routes"][route.key]["checked_at"])
+            refreshing["routes"][route.key]["net_profit"] = "999"
+            self.assertEqual(feed.snapshot()["routes"][route.key]["net_profit"], "6")
+            feed.record_result(route, Decimal("5.000001"), Outcome(False, "RPC unavailable", "transient-rpc"))
+            self.assertIsNone(feed.snapshot()["routes"][route.key]["net_profit"])
+
             feed.stop()
             stopped = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(stopped["session"]["status"], "stopped")
@@ -1002,4 +1012,3 @@ class CrosschainSniperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

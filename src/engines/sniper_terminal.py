@@ -74,7 +74,7 @@ class EventHandler(logging.Handler):
     def emit(self, record):
         message = record.getMessage()
         # Quotes and their cooldowns already have persistent table rows.
-        if message.split("|", 1)[0].strip() in {"CHECK", "RESULT", "PAUSE", "ROUTE"}:
+        if message.split("|", 1)[0].strip() in {"CHECK", "RESULT", "ROUTE"}:
             return
         stamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
         with self.guard:
@@ -96,16 +96,16 @@ def render_dashboard(snapshot: dict, *, width: int, height: int, elapsed: float 
     session, summary = snapshot.get("session", {}), snapshot.get("summary", {})
     routes = list(snapshot.get("routes", {}).values())
     live = session.get("mode") == "live"
-    header = Text(" ARBBOT  ", style="bold cyan")
+    header = Text(" ARBBOT  ", style="bold cyan", no_wrap=True, overflow="ellipsis")
     header.append("LIVE" if live else "DRY RUN", style="bold white on red" if live else "bold black on cyan")
     header.append(f"  {clean_text(session.get('status', 'running')).upper()}  |  {len(routes)} routes  |  {now.astimezone():%H:%M:%S}")
     uptime = seconds_since(session.get("started_at"), now)
     if uptime is not None:
         header.append(f"  |  up {duration(uptime)}", style="dim")
     counts = Text(
-        f" Checks {summary.get('checks', 0)}   Ready {summary.get('ready', 0)}   "
-        f"Confirmed {summary.get('confirmed', 0)}   Pending {summary.get('submitted', 0)}   "
-        f"No trade {summary.get('no_trade', 0)}   Paused {summary.get('paused', 0)}   Errors {summary.get('errors', 0)}",
+        f" Checks {summary.get('checks', 0)}  Ready {summary.get('ready', 0)}  "
+        f"Conf {summary.get('confirmed', 0)}  Pending {summary.get('submitted', 0)}  "
+        f"No trade {summary.get('no_trade', 0)}  Pause {summary.get('paused', 0)}  Err {summary.get('errors', 0)}",
         style="dim", overflow="ellipsis", no_wrap=True,
     )
     side_by_side = width >= 136 and len({r['chain'] for r in routes}) > 1
@@ -123,7 +123,7 @@ def render_dashboard(snapshot: dict, *, width: int, height: int, elapsed: float 
         table = Table(title=title, title_style="bold cyan", box=box.SIMPLE_HEAD, expand=True,
                       padding=(0, 1), show_edge=False, collapse_padding=True)
         if not side_by_side:
-            table.add_column("Chain", width=3, no_wrap=True)
+            table.add_column("Netw", width=4, no_wrap=True)
         table.add_column("Cycle*", min_width=10, no_wrap=True)
         table.add_column("First", width=6, no_wrap=True)
         table.add_column("Gross", justify="right", min_width=8, no_wrap=True)
@@ -133,13 +133,14 @@ def render_dashboard(snapshot: dict, *, width: int, height: int, elapsed: float 
         table.add_column("Status", min_width=10, no_wrap=True)
         table.add_column("Age", justify="right", width=5, no_wrap=True)
         styles = {"CHECKING": "cyan", "READY": "bold green", "CONFIRMED": "bold green",
-                  "PAUSED": "yellow", "ERROR": "bold red", "FAILED": "bold red", "SUBMITTED": "bold magenta"}
+                  "PAUSED": "yellow", "ERROR": "bold red", "REVERTED": "bold red",
+                  "STOPPED": "bold magenta", "DROPPED": "yellow"}
         for row in visible:
             state = str(row.get("state", "WAITING"))
             checking = state == "CHECKING"
-            status = "SCANNING" if checking else state
+            status = "SCANNING" if checking else "PENDING" if row.get("category") == "submitted" else state
             remaining = seconds_since(row.get("cooldown_until"), now)
-            if remaining is not None and remaining < 0 and not checking:
+            if remaining is not None and remaining < 0 and state == "PAUSED":
                 status = f"PAUSE {duration(math.ceil(-remaining))}"
             age = seconds_since(row.get("checked_at"), now)
             dex = str(row.get("dex_name", "MetaMatcha"))
@@ -161,7 +162,7 @@ def render_dashboard(snapshot: dict, *, width: int, height: int, elapsed: float 
     else:
         tables = route_table(routes, width)
     legend = Text(" *USDC/USDG = USDC > USDG > USDC. First = first venue; then the other venue.", style="dim", no_wrap=True, overflow="ellipsis")
-    units = Text(" Gross/net in the cycle's first token; dim numbers = previous quote while scanning; -- = unavailable.", style="dim", no_wrap=True, overflow="ellipsis")
+    units = Text(" Profit in first token. Dim = previous quote during scan. -- = unavailable.", style="dim", no_wrap=True, overflow="ellipsis")
     recent = snapshot.get("recent_results", [])
     notes = []
     # Rotate detailed results too, so clipped table states still have context.
@@ -174,7 +175,7 @@ def render_dashboard(snapshot: dict, *, width: int, height: int, elapsed: float 
         notes.append(Text(" Waiting for first results...", style="dim"))
     for stamp, level, message in list(events)[-2:]:
         notes.append(Text(f" {stamp} {clean_text(message)}", style="red" if level >= logging.ERROR else "yellow" if level >= logging.WARNING else "dim", no_wrap=True, overflow="ellipsis"))
-    footer = Text(f" Refresh 0.5s  |  {'All routes visible' if pages == 1 else f'Page {page + 1}/{pages} - rotates every 8s; enlarge window for more rows'}  |  Ctrl+C stop", style="dim", no_wrap=True, overflow="ellipsis")
+    footer = Text(f" Ctrl+C stop  |  Refresh 0.5s  |  {'All routes visible' if pages == 1 else f'Page {page + 1}/{pages} - rotates every 8s (resize for more)'}", style="dim", no_wrap=True, overflow="ellipsis")
     log_hint = Text(" Full details: logs/crosschain-sniper.log  |  --display log for scrolling output", style="dim", no_wrap=True, overflow="ellipsis")
     return Group(header, counts, tables, legend, units, *notes, footer, log_hint)
 
