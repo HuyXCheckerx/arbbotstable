@@ -791,5 +791,53 @@ class EthereumFlashArbTests(unittest.TestCase):
 
 
 
+class EthereumRpcCacheTests(unittest.TestCase):
+    EXECUTOR = "0xB00f38246ea6870c2e3ed6DBa9d542a9a3fb6920"
+    TOKEN = "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"
+
+    def setUp(self):
+        pyusd_arb.clear_rpc_caches()
+        self.addCleanup(pyusd_arb.clear_rpc_caches)
+
+    def test_recently_probed_web3_connection_is_reused(self):
+        web3_cls = MagicMock()
+        web3_cls.return_value.is_connected.return_value = True
+        with patch.object(pyusd_arb, "require_web3", return_value=web3_cls):
+            first = pyusd_arb.get_working_web3("https://rpc.invalid")
+            second = pyusd_arb.get_working_web3("https://rpc.invalid")
+        self.assertIs(first[0], second[0])
+        self.assertEqual(web3_cls.return_value.is_connected.call_count, 1)
+
+    def test_web3_connection_is_probed_again_after_the_ttl(self):
+        web3_cls = MagicMock()
+        web3_cls.return_value.is_connected.return_value = True
+        with patch.object(pyusd_arb, "require_web3", return_value=web3_cls), \
+                patch.object(pyusd_arb.time, "monotonic", side_effect=[0.0, 100.0, 100.0]):
+            pyusd_arb.get_working_web3("https://rpc.invalid")
+            pyusd_arb.get_working_web3("https://rpc.invalid")
+        self.assertEqual(web3_cls.return_value.is_connected.call_count, 2)
+
+    def executor_web3(self, supported):
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+        web3.eth.contract.return_value.functions.supportsLoanToken.return_value.call.return_value = supported
+        return web3
+
+    def test_supported_loan_token_is_checked_once_per_executor(self):
+        web3 = self.executor_web3(True)
+        with patch.object(pyusd_arb, "get_working_web3", return_value=(web3, "rpc")):
+            pyusd_arb.require_executor_loan_support("rpc", 5, self.EXECUTOR, self.TOKEN)
+            pyusd_arb.require_executor_loan_support("rpc", 5, self.EXECUTOR.lower(), self.TOKEN)
+        self.assertEqual(web3.eth.contract.call_count, 1)
+
+    def test_unsupported_loan_token_is_not_remembered(self):
+        web3 = self.executor_web3(False)
+        with patch.object(pyusd_arb, "get_working_web3", return_value=(web3, "rpc")):
+            for _ in range(2):
+                with self.assertRaisesRegex(pyusd_arb.ArbError, "does not support loan token"):
+                    pyusd_arb.require_executor_loan_support("rpc", 5, self.EXECUTOR, self.TOKEN)
+        self.assertEqual(web3.eth.contract.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

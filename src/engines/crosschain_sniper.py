@@ -116,6 +116,16 @@ class Route:
             f"{self.intermediate.lower()}"
         )
 
+    @property
+    def arbitrage_key(self) -> str:
+        """Routes sharing this key capture the same price difference.
+
+        Borrowing A to sell A->B on Stable.com and buy it back on the DEX needs
+        the same two rates as borrowing B to buy A on the DEX and sell it on
+        Stable.com; only the loan and profit token differ.
+        """
+        return f"{self.chain}:stable:{self.stable_from}>{self.stable_to}"
+
 
 @dataclass(frozen=True)
 class Invocation:
@@ -255,6 +265,38 @@ def selected_routes(
         for pair in pairs
         for swap_order in swap_orders
     ]
+
+
+# Outcomes meaning the loan token cannot be borrowed right now, so the
+# equivalent route that borrows the other token should be checked instead.
+FUNDING_UNAVAILABLE_CATEGORIES = frozenset({"flash-liquidity", "marginfi-utilization"})
+
+
+def arbitrage_groups(routes: list[Route]) -> list[list[Route]]:
+    """Equivalent routes in configured order; the first is preferred."""
+    groups: dict[str, list[Route]] = {}
+    for route in routes:
+        groups.setdefault(route.arbitrage_key, []).append(route)
+    return list(groups.values())
+
+
+def active_routes(
+    groups: list[list[Route]],
+    funding_blocked_until: dict[str, float],
+    now: float,
+) -> list[Route]:
+    """One route per arbitrage: the first whose flash loan is not known to be unavailable.
+
+    The equivalent route with the other loan token is quoted only while the
+    preferred one cannot be funded, instead of quoting both every cycle.
+    """
+    active = []
+    for group in groups:
+        for route in group:
+            if funding_blocked_until.get(route.key, 0.0) <= now:
+                active.append(route)
+                break
+    return active
 
 
 def build_route_invocation(
@@ -446,6 +488,17 @@ def failure_category(detail: str) -> str:
     matcha_vercel_block = "matcha" in lowered and is_vercel_challenge(detail)
     if matcha_access_block or zero_ex_auth_block or matcha_vercel_block:
         return "access-blocked-matcha"
+    if any(
+        marker in lowered
+        for marker in (
+            "no zero-fee flash provider has",
+            "only 0% fee flash loan providers are allowed",
+            "marginfi flash loan is unavailable",
+            "no known kamino reserve configured",
+            "flash-loan liquidity is below",
+        )
+    ) or ("flash liquidity is" in lowered and "below requested" in lowered):
+        return "flash-liquidity"
     if (
         "no_routes_found" in lowered
         or "no routes found" in lowered
@@ -589,6 +642,8 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         if "does not support loan token" in lowered or "unsupported loan token" in lowered:
             return f"{route.chain.title()} executor does not support {route.loan}/{route.intermediate}"
         return f"{route.dex_name} has no executable {dex_leg} route right now"
+    if category == "flash-liquidity":
+        return f"{route.loan} flash loan cannot be funded right now: {detail}"
     if category == "marginfi-utilization":
         return (
             f"Marginfi {route.loan} bank utilization is >100% on Solana "
@@ -889,6 +944,7 @@ class SniperDashboardFeed:
     """Thread-safe status feed shared by the terminal and web dashboards."""
 
     _PAUSED_CATEGORIES = {
+        "flash-liquidity",
         "no-route",
         "capacity",
         "unstable-capacity",
@@ -1085,6 +1141,31 @@ class SniperDashboardFeed:
                     datetime.now(timezone.utc) + timedelta(seconds=seconds)
                 ).isoformat(timespec="seconds")
                 record["cooldown_reason"] = reason
+            self._write_locked()
+
+    def mark_standby(self, route: Route, preferred: Route) -> None:
+        """Show that an equivalent route is being checked instead of this one."""
+        detail = (
+            f"Same arbitrage as {preferred.display}; checked only while the "
+            f"{preferred.loan} flash loan is unavailable"
+        )
+        with self._lock:
+            routes = self._state["routes"]
+            assert isinstance(routes, dict)
+            previous = routes.get(route.key)
+            if isinstance(previous, dict) and previous.get("state") == "STANDBY" and previous.get("detail") == detail:
+                return
+            floor = previous.get("execution_floor") if isinstance(previous, dict) else None
+            record = self._route_record(
+                route,
+                Decimal(str(floor)) if floor is not None else Decimal("0"),
+                state="STANDBY",
+                detail=detail,
+            )
+            if isinstance(previous, dict):
+                for field in ("checked_at", "gross_profit", "net_profit", "profit_token"):
+                    record[field] = previous.get(field)
+            routes[route.key] = record
             self._write_locked()
 
     def stop(self, label: str = "Sniper stopped") -> None:
@@ -1746,6 +1827,22 @@ def _handle_route_outcome(
                 cooldown_policy.provider_access_seconds,
                 "Quote provider rejected the request",
             )
+    elif outcome.category == "flash-liquidity":
+        route_deadlines[route.key] = (
+            time.monotonic() + cooldown_policy.capacity_seconds
+        )
+        logger.info(
+            "PAUSE   | %-17s | %.0fs | %s flash loan cannot be funded",
+            route.display,
+            cooldown_policy.capacity_seconds,
+            route.loan,
+        )
+        if dashboard:
+            dashboard.record_cooldown(
+                route,
+                cooldown_policy.capacity_seconds,
+                f"{route.loan} flash loan cannot be funded",
+            )
     elif outcome.category == "capacity":
         route_deadlines[route.key] = (
             time.monotonic() + cooldown_policy.capacity_seconds
@@ -1829,6 +1926,78 @@ def worker(
         )
 
     route_deadlines: dict[str, float] = {}
+    groups = arbitrage_groups(routes)
+    funding_blocked_until: dict[str, float] = {}
+
+    def publish_standby(active: list[Route]) -> None:
+        if not dashboard:
+            return
+        active_keys = {route.key for route in active}
+        for group in groups:
+            preferred = next((route for route in group if route.key in active_keys), None)
+            for route in group:
+                if preferred and route is not preferred:
+                    dashboard.mark_standby(route, preferred)
+
+    def settle(route: Route, floor: Decimal, outcome: Outcome) -> bool:
+        stop_requested = _handle_route_outcome(
+            route,
+            floor,
+            outcome,
+            chain=chain,
+            cooldown_policy=cooldown_policy,
+            backoff=backoff,
+            route_deadlines=route_deadlines,
+            dashboard=dashboard,
+            logger=logger,
+            cooldown_seconds=cooldown_seconds,
+            stop=stop,
+        )
+        if outcome.category in FUNDING_UNAVAILABLE_CATEGORIES:
+            funding_blocked_until[route.key] = (
+                time.monotonic() + cooldown_policy.capacity_seconds
+            )
+        return stop_requested
+
+    def is_due(route: Route) -> bool:
+        return (
+            route_deadlines.get(route.key, 0.0) <= time.monotonic()
+            and backoff.remaining(dependency_keys(route)) <= 0
+        )
+
+    def check(route: Route) -> tuple[Route, Decimal, Outcome]:
+        return _execute_single_check(
+            route,
+            floor=route_execution_floor(route, base_threshold),
+            live=live,
+            timeout_seconds=timeout_seconds,
+            dashboard=dashboard,
+            logger=logger,
+            chain=chain,
+        )
+
+    def run_checks(candidates: list[Route]) -> bool:
+        """Check due routes; return True when the worker must stop."""
+        if parallel_scanning:
+            eligible = [route for route in candidates if is_due(route)]
+            if not eligible or stop.is_set():
+                return stop.is_set()
+            with ThreadPoolExecutor(max_workers=min(len(eligible), 6)) as pool:
+                futures = [pool.submit(check, route) for route in eligible]
+                for future in as_completed(futures):
+                    if stop.is_set():
+                        return True
+                    if settle(*future.result()):
+                        return True
+            return False
+        for route in candidates:
+            if stop.is_set():
+                return True
+            # Re-check each time: an earlier result may have paused a shared provider.
+            if is_due(route) and settle(*check(route)):
+                return True
+        return False
+
     while not stop.is_set():
         if chain == "ethereum" and eth_max_base_fee_gwei is not None:
             current_base_fee = fetch_ethereum_base_fee_gwei(eth_rpc_url, timeout=5.0)
@@ -1846,82 +2015,27 @@ def worker(
                     return
                 continue
 
-        if parallel_scanning:
-            now = time.monotonic()
-            eligible_routes = [
-                r for r in routes
-                if route_deadlines.get(r.key, 0.0) <= now
-                and backoff.remaining(dependency_keys(r)) <= 0
-            ]
-            if eligible_routes and not stop.is_set():
-                max_workers = min(len(eligible_routes), 6)
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = {
-                        pool.submit(
-                            _execute_single_check,
-                            route,
-                            floor=route_execution_floor(route, base_threshold),
-                            live=live,
-                            timeout_seconds=timeout_seconds,
-                            dashboard=dashboard,
-                            logger=logger,
-                            chain=chain,
-                        ): route
-                        for route in eligible_routes
-                    }
-                    for future in as_completed(futures):
-                        if stop.is_set():
-                            break
-                        route, floor, outcome = future.result()
-                        stop_requested = _handle_route_outcome(
-                            route,
-                            floor,
-                            outcome,
-                            chain=chain,
-                            cooldown_policy=cooldown_policy,
-                            backoff=backoff,
-                            route_deadlines=route_deadlines,
-                            dashboard=dashboard,
-                            logger=logger,
-                            cooldown_seconds=cooldown_seconds,
-                            stop=stop,
-                        )
-                        if stop_requested:
-                            return
-        else:
-            for route in routes:
-                if stop.is_set():
-                    return
-                now = time.monotonic()
-                if route_deadlines.get(route.key, 0.0) > now:
-                    continue
-                if backoff.remaining(dependency_keys(route)) > 0:
-                    continue
-                floor = route_execution_floor(route, base_threshold)
-                route, floor, outcome = _execute_single_check(
-                    route,
-                    floor=floor,
-                    live=live,
-                    timeout_seconds=timeout_seconds,
-                    dashboard=dashboard,
-                    logger=logger,
-                    chain=chain,
+        current = active_routes(groups, funding_blocked_until, time.monotonic())
+        publish_standby(current)
+        if run_checks(current):
+            return
+        # A preferred route that just proved unfundable hands its arbitrage to
+        # the equivalent route now instead of one interval later.
+        replacements = [
+            route
+            for route in active_routes(groups, funding_blocked_until, time.monotonic())
+            if route not in current
+        ]
+        if replacements:
+            publish_standby(replacements)
+            for route in replacements:
+                logger.info(
+                    "SWITCH  | %-8s | %s | preferred loan cannot be funded",
+                    chain.title(),
+                    route.display,
                 )
-                stop_requested = _handle_route_outcome(
-                    route,
-                    floor,
-                    outcome,
-                    chain=chain,
-                    cooldown_policy=cooldown_policy,
-                    backoff=backoff,
-                    route_deadlines=route_deadlines,
-                    dashboard=dashboard,
-                    logger=logger,
-                    cooldown_seconds=cooldown_seconds,
-                    stop=stop,
-                )
-                if stop_requested:
-                    return
+            if run_checks(replacements):
+                return
 
         if once:
             return

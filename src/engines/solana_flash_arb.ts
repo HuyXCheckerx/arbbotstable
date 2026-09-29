@@ -171,6 +171,19 @@ export function isMarginfiBorrowError(error: unknown): boolean {
   );
 }
 
+/** Borrowable principal kept below a lending vault's full balance. */
+export function flashHeadroomRaw(vaultRaw: bigint): bigint {
+  return (vaultRaw * 95n) / 100n;
+}
+
+/** SPL Token and Token-2022 accounts share the base layout: amount is a u64 at offset 64. */
+export function tokenAccountAmountRaw(data: Buffer | Uint8Array): bigint {
+  if (data.length < 72) {
+    throw new Error(`Token account data is ${data.length} bytes; expected at least 72`);
+  }
+  return Buffer.from(data.buffer, data.byteOffset, data.byteLength).readBigUInt64LE(64);
+}
+
 export async function getKaminoAvailableLiquidity(
   connection: Connection,
   mint: PublicKey,
@@ -178,8 +191,7 @@ export async function getKaminoAvailableLiquidity(
   const info = getKaminoReserveInfo(mint);
   try {
     const bal = await connection.getTokenAccountBalance(info.supplyVault);
-    const amount = BigInt(bal.value.amount);
-    return (amount * 95n) / 100n;
+    return flashHeadroomRaw(BigInt(bal.value.amount));
   } catch (err) {
     throw new Error(
       `Failed to fetch Kamino supply vault balance for ${mint.toBase58()}: ${errorMessage(err)}`,
@@ -984,6 +996,90 @@ function writePlan(outputPath: string, plan: JsonRecord): void {
   });
 }
 
+// Each sniper check is a separate process. These small files carry facts
+// between checks so every process does not rediscover them over the network.
+// They are advisory: a missing or unreadable file only costs the lookup.
+function runtimeStatePath(name: string): string {
+  const directory =
+    process.env.SOL_FLASH_ARB_STATE_DIR ||
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "logs");
+  return path.join(directory, name);
+}
+
+function readRuntimeState<T>(name: string): T | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(runtimeStatePath(name), "utf8")) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeRuntimeState(name: string, value: unknown): void {
+  const target = runtimeStatePath(name);
+  const temporary = `${target}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    fs.rmSync(temporary, { force: true });
+    console.warn(`Could not update ${path.basename(target)}: ${errorMessage(error)}`);
+  }
+}
+
+const METAMATCHA_DENIAL_STATE = "solana-metamatcha-denial.json";
+const METAMATCHA_ACCESS_DENIAL =
+  /\bHTTP\s+(?:401|403)\b|Vercel Security Checkpoint|access blocked by Vercel|x-vercel-mitigated=challenge/i;
+
+function metaMatchaDenialCooldownMs(): number {
+  const seconds = Number(process.env.SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS ?? "3600");
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : 3_600_000;
+}
+
+/** Milliseconds until MetaMatcha may be asked again after an access denial. */
+export function metaMatchaDenialRemainingMs(now = Date.now()): number {
+  const state = readRuntimeState<{ until?: number }>(METAMATCHA_DENIAL_STATE);
+  const until = Number(state?.until ?? 0);
+  return Number.isFinite(until) ? Math.max(0, until - now) : 0;
+}
+
+export function recordMetaMatchaDenial(detail: string, now = Date.now()): void {
+  writeRuntimeState(METAMATCHA_DENIAL_STATE, {
+    until: now + metaMatchaDenialCooldownMs(),
+    recordedAt: new Date(now).toISOString(),
+    detail: detail.slice(0, 300),
+  });
+}
+
+const MARGINFI_BANK_STATE = "solana-marginfi-banks.json";
+
+interface CachedMarginfiBank {
+  bank: string;
+  liquidityVault: string;
+}
+
+function cachedMarginfiVault(mint: PublicKey): PublicKey | undefined {
+  const banks = readRuntimeState<Record<string, CachedMarginfiBank>>(MARGINFI_BANK_STATE);
+  try {
+    const vault = banks?.[mint.toBase58()]?.liquidityVault;
+    return vault ? new PublicKey(vault) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberMarginfiBank(mint: PublicKey, bank: Bank): void {
+  const entry = {
+    bank: bank.address.toBase58(),
+    liquidityVault: bank.liquidityVault.toBase58(),
+  };
+  const banks = readRuntimeState<Record<string, CachedMarginfiBank>>(MARGINFI_BANK_STATE) ?? {};
+  const existing = banks[mint.toBase58()];
+  if (existing?.bank === entry.bank && existing.liquidityVault === entry.liquidityVault) return;
+  banks[mint.toBase58()] = entry;
+  writeRuntimeState(MARGINFI_BANK_STATE, banks);
+}
+
 function responseRetryAfterMs(response: Response): number | undefined {
   const value = response.headers.get("retry-after")?.trim();
   if (!value) return undefined;
@@ -1121,11 +1217,11 @@ function unwrapStableStatus(response: StableStatusResponse): StableStatusAsset {
   throw new Error("Stable.com status response omitted asset quote data");
 }
 
-async function getStableQuote(
+async function fetchStableStatus(
   config: Config,
   wallet: PublicKey,
   inputRaw: bigint,
-): Promise<StableQuote> {
+): Promise<StableStatusAsset> {
   const response = await fetchJson<StableStatusResponse>(
     `${config.stableApiBase}/swap/status`,
     {
@@ -1136,7 +1232,64 @@ async function getStableQuote(
     config,
     "Stable.com status",
   );
-  const status = unwrapStableStatus(response);
+  return unwrapStableStatus(response);
+}
+
+export interface StableCapacity {
+  capacityRaw: bigint;
+  minimumRaw: bigint;
+  usableCapacityRaw: bigint;
+}
+
+/** Usable Stable.com pool capacity; throws when no valid order can fit. */
+export function stableCapacity(
+  status: Pick<StableStatusAsset, "balance" | "min" | "max">,
+  bufferRaw: bigint,
+  symbol: string,
+): StableCapacity {
+  const capacityRaw = parseDecimalToRawFloor(String(status.balance));
+  const minimumRaw = parseDecimalToRawCeil(String(status.min));
+  const maximumRaw = parseDecimalToRawFloor(String(status.max));
+  if (capacityRaw <= 0n) {
+    throw new Error(`Stable.com pool has no remaining ${symbol} capacity`);
+  }
+  const capacityAfterBufferRaw =
+    capacityRaw > bufferRaw
+      ? capacityRaw - bufferRaw
+      : (capacityRaw > 1n ? capacityRaw - 1n : capacityRaw);
+  const usableCapacityRaw =
+    maximumRaw > 0n && maximumRaw < capacityAfterBufferRaw
+      ? maximumRaw
+      : capacityAfterBufferRaw;
+  if (usableCapacityRaw < minimumRaw) {
+    throw new Error(
+      `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} ${symbol} is below its ${formatRaw(minimumRaw)} ${symbol} minimum order`,
+    );
+  }
+  return { capacityRaw, minimumRaw, usableCapacityRaw };
+}
+
+/** A /swap/status response fetched ahead of sizing, reusable while fresh. */
+export interface PrefetchedStableStatus {
+  inputRaw: bigint;
+  status: StableStatusAsset;
+  fetchedAtMs: number;
+}
+
+const STABLE_PREFETCH_MAX_AGE_MS = 10_000;
+
+async function getStableQuote(
+  config: Config,
+  wallet: PublicKey,
+  inputRaw: bigint,
+  prefetched?: PrefetchedStableStatus,
+): Promise<StableQuote> {
+  const status =
+    prefetched &&
+    prefetched.inputRaw === inputRaw &&
+    Date.now() - prefetched.fetchedAtMs <= STABLE_PREFETCH_MAX_AGE_MS
+      ? prefetched.status
+      : await fetchStableStatus(config, wallet, inputRaw);
   const quotedInputRaw = parseDecimalToRawFloor(status.amountFrom);
   if (quotedInputRaw !== inputRaw) {
     throw new Error(
@@ -1471,6 +1624,14 @@ export async function getMetaMatchaQuote(
   if (!config.matchaAggregators.length) {
     throw new Error("SOL_FLASH_ARB_MATCHA_AGGREGATORS must not be empty");
   }
+  // A denial costs a Python/browser round trip of up to ~20 s per check.
+  // Honor it for the provider-access cooldown instead of asking again.
+  const deniedForMs = metaMatchaDenialRemainingMs();
+  if (deniedForMs > 0) {
+    throw new Error(
+      `MetaMatcha quote skipped: access was denied (HTTP 403) recently; next attempt in ${Math.ceil(deniedForMs / 1_000)}s`,
+    );
+  }
   let lastError: unknown;
   for (let attempt = 1; attempt <= config.httpAttempts; attempt += 1) {
     try {
@@ -1506,7 +1667,15 @@ export async function getMetaMatchaQuote(
       lastError = error;
       // The sniper defers access denials and rate limits until its cooldown.
       // Repeating the whole competition here only adds rejected requests.
-      if (/\bHTTP\s+(?:401|403|429)\b|Vercel Security Checkpoint|access blocked by Vercel|x-vercel-mitigated=challenge/i.test(errorMessage(error))) break;
+      if (METAMATCHA_ACCESS_DENIAL.test(errorMessage(error))) {
+        // One competitor's denial (listed under "request failures") says
+        // nothing about MetaMatcha itself, so only its own block is recorded.
+        if (!/request failures:/i.test(errorMessage(error))) {
+          recordMetaMatchaDenial(errorMessage(error));
+        }
+        break;
+      }
+      if (/\bHTTP\s+429\b/i.test(errorMessage(error))) break;
       if (attempt < config.httpAttempts) {
         await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
       }
@@ -1657,6 +1826,7 @@ async function getCapacitySizedCycle(
   config: Config,
   wallet: PublicKey,
   maxBankBorrowRaw?: bigint,
+  prefetchedStable?: PrefetchedStableStatus,
 ): Promise<SizedCycle> {
   let loanAmountRaw = config.maximumLoanAmountRaw;
   if (maxBankBorrowRaw && maxBankBorrowRaw > 0n && loanAmountRaw > maxBankBorrowRaw) {
@@ -1677,28 +1847,17 @@ async function getCapacitySizedCycle(
     attempt += 1
   ) {
     if (config.swapOrder === "stable-first") {
-      const stableQuote = await getStableQuote(config, wallet, loanAmountRaw);
-      const capacityRaw = parseDecimalToRawFloor(String(stableQuote.status.balance));
-      const minimumRaw = parseDecimalToRawCeil(String(stableQuote.status.min));
-      const maximumRaw = parseDecimalToRawFloor(String(stableQuote.status.max));
-      if (capacityRaw <= 0n) {
-        throw new Error(
-          `Stable.com pool has no remaining ${config.loanSymbol} capacity`,
-        );
-      }
-      const capacityAfterBufferRaw =
-        capacityRaw > config.stableCapacityBufferRaw
-          ? capacityRaw - config.stableCapacityBufferRaw
-          : (capacityRaw > 1n ? capacityRaw - 1n : capacityRaw);
-      const usableCapacityRaw =
-        maximumRaw > 0n && maximumRaw < capacityAfterBufferRaw
-          ? maximumRaw
-          : capacityAfterBufferRaw;
-      if (usableCapacityRaw < minimumRaw) {
-        throw new Error(
-          `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} ${config.loanSymbol} is below its ${formatRaw(minimumRaw)} ${config.loanSymbol} minimum order`,
-        );
-      }
+      const stableQuote = await getStableQuote(
+        config,
+        wallet,
+        loanAmountRaw,
+        attempt === 0 ? prefetchedStable : undefined,
+      );
+      const { capacityRaw, minimumRaw, usableCapacityRaw } = stableCapacity(
+        stableQuote.status,
+        config.stableCapacityBufferRaw,
+        config.loanSymbol,
+      );
       if (stableQuote.inputRaw > usableCapacityRaw) {
         const adjustedLoanAmountRaw = capacityLimitedStableFirstLoanAmount(
           loanAmountRaw,
@@ -1814,27 +1973,11 @@ async function getCapacitySizedCycle(
     }
 
     const stableQuote = await getStableQuote(config, wallet, firstMinimumRaw);
-    const capacityRaw = parseDecimalToRawFloor(String(stableQuote.status.balance));
-    const minimumRaw = parseDecimalToRawCeil(String(stableQuote.status.min));
-    const maximumRaw = parseDecimalToRawFloor(String(stableQuote.status.max));
-    if (capacityRaw <= 0n) {
-      throw new Error(
-        `Stable.com pool has no remaining ${config.intermediateSymbol} capacity`,
-      );
-    }
-    const capacityAfterBufferRaw =
-      capacityRaw > config.stableCapacityBufferRaw
-        ? capacityRaw - config.stableCapacityBufferRaw
-        : (capacityRaw > 1n ? capacityRaw - 1n : capacityRaw);
-    const usableCapacityRaw =
-      maximumRaw > 0n && maximumRaw < capacityAfterBufferRaw
-        ? maximumRaw
-        : capacityAfterBufferRaw;
-    if (usableCapacityRaw < minimumRaw) {
-      throw new Error(
-        `Stable.com usable capacity ${formatRaw(usableCapacityRaw)} ${config.intermediateSymbol} is below its ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum order`,
-      );
-    }
+    const { capacityRaw, minimumRaw, usableCapacityRaw } = stableCapacity(
+      stableQuote.status,
+      config.stableCapacityBufferRaw,
+      config.intermediateSymbol,
+    );
 
     if (stableQuote.inputRaw <= usableCapacityRaw) {
       if (stableQuote.inputRaw < minimumRaw) {
@@ -1950,19 +2093,23 @@ async function getSwapLeg(
     const withoutComputeBudget = decompiled.instructions.filter(
       (instruction) => !instruction.programId.equals(ComputeBudgetProgram.programId),
     );
-    const existingAtaSetup = await Promise.all(
-      withoutComputeBudget.map(async (instruction) => {
-        const isIdempotentAtaCreate =
-          instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) &&
-          instruction.data.length === 1 &&
-          instruction.data[0] === 1 &&
-          instruction.keys.length >= 2;
-        if (!isIdempotentAtaCreate) return false;
-        return (await connection.getAccountInfo(instruction.keys[1].pubkey)) !== null;
-      }),
+    const ataCreates = withoutComputeBudget.filter(
+      (instruction) =>
+        instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) &&
+        instruction.data.length === 1 &&
+        instruction.data[0] === 1 &&
+        instruction.keys.length >= 2,
+    );
+    const ataInfos = ataCreates.length
+      ? await connection.getMultipleAccountsInfo(
+          ataCreates.map((instruction) => instruction.keys[1].pubkey),
+        )
+      : [];
+    const existingAtaCreates = new Set(
+      ataCreates.filter((_instruction, index) => ataInfos[index] !== null),
     );
     let instructions = withoutComputeBudget.filter(
-      (_instruction, index) => !existingAtaSetup[index],
+      (instruction) => !existingAtaCreates.has(instruction),
     );
     if (!instructions.length) {
       throw new Error("MetaMatcha transaction contained no swap instructions");
@@ -1982,10 +2129,11 @@ async function getSwapLeg(
       const inAmountRaw = BigInt(quote.inAmount);
       const outAmountRaw = BigInt(quote.otherAmountThreshold || quote.outAmount);
 
-      const [subInAtaExists, masterOutAtaExists] = await Promise.all([
-        connection.getAccountInfo(subInAta).then((acc) => acc !== null).catch(() => false),
-        connection.getAccountInfo(masterOutAta).then((acc) => acc !== null).catch(() => false),
-      ]);
+      // An unreadable account is treated as missing: the idempotent create is harmless.
+      const [subInAtaExists, masterOutAtaExists] = await connection
+        .getMultipleAccountsInfo([subInAta, masterOutAta])
+        .then((infos) => infos.map((info) => info !== null))
+        .catch(() => [false, false]);
 
       const preTransfer: TransactionInstruction[] = [];
       if (!subInAtaExists) {
@@ -2013,7 +2161,7 @@ async function getSwapLeg(
       `MetaMatcha selected ${quote.aggregator ?? "unknown aggregator"}: ` +
       `${Buffer.from(quote.serializedTransaction, "base64").length} quote bytes, ` +
       `${instructions.length} swap instructions, ${lookupTables.length} lookup tables` +
-      `${existingAtaSetup.some(Boolean) ? `, stripped ${existingAtaSetup.filter(Boolean).length} existing ATA setup instructions` : ""}` +
+      `${existingAtaCreates.size ? `, stripped ${existingAtaCreates.size} existing ATA setup instructions` : ""}` +
       `${subKeypair && !subKeypair.publicKey.equals(wallet) ? " (linked to sub-account taker)" : ""}`,
     );
     return {
@@ -2989,54 +3137,77 @@ async function fetchSolUsd(config: Config): Promise<number> {
   return price;
 }
 
-async function assertTokenAccountsExist(
+export interface FundingSnapshot {
+  walletLoanBalanceRaw: bigint;
+  kaminoHeadroomRaw?: bigint;
+  /** From a previously recorded Marginfi vault; used only to skip Marginfi. */
+  cachedMarginfiHeadroomRaw?: bigint;
+}
+
+/**
+ * Verifies the wallet token accounts and reads every balance needed to pick a
+ * funding source in one getMultipleAccounts call (previously four to six calls).
+ */
+async function readFundingSnapshot(
   connection: Connection,
   owner: PublicKey,
-  intermediateMint: PublicKey = PYUSD_MINT,
-  intermediateSymbol = "PYUSD",
-  loanMint: PublicKey = USDC_MINT,
-  loanSymbol = "USDC",
-): Promise<void> {
-  const inputTokenProgram = intermediateTokenProgram(intermediateMint);
-  const outputTokenProgram = intermediateTokenProgram(loanMint);
+  intermediateMint: PublicKey,
+  intermediateSymbol: string,
+  loanMint: PublicKey,
+  loanSymbol: string,
+): Promise<FundingSnapshot> {
   const loanAta = getAssociatedTokenAddressSync(
     loanMint,
     owner,
     false,
-    outputTokenProgram,
+    intermediateTokenProgram(loanMint),
   );
   const interAta = getAssociatedTokenAddressSync(
     intermediateMint,
     owner,
     false,
-    inputTokenProgram,
+    intermediateTokenProgram(intermediateMint),
   );
-  const checkAccounts: PublicKey[] = [loanAta, interAta];
-  const requiresUsdc =
-    !loanMint.equals(USDC_MINT) && !intermediateMint.equals(USDC_MINT);
-  let usdcAta: PublicKey | undefined;
-  if (requiresUsdc) {
-    usdcAta = getAssociatedTokenAddressSync(
-      USDC_MINT,
-      owner,
-      false,
-      TOKEN_PROGRAM_ID,
-    );
-    checkAccounts.push(usdcAta);
+  const required: Array<[string, PublicKey]> = [
+    [loanSymbol, loanAta],
+    [intermediateSymbol, interAta],
+  ];
+  if (!loanMint.equals(USDC_MINT) && !intermediateMint.equals(USDC_MINT)) {
+    required.push([
+      "USDC",
+      getAssociatedTokenAddressSync(USDC_MINT, owner, false, TOKEN_PROGRAM_ID),
+    ]);
   }
+  const kaminoVault = KAMINO_RESERVES[loanMint.toBase58()]?.supplyVault;
+  const marginfiVault = cachedMarginfiVault(loanMint);
+
   const infos = await connection.getMultipleAccountsInfo(
-    checkAccounts,
+    [
+      ...required.map(([, address]) => address),
+      ...(kaminoVault ? [kaminoVault] : []),
+      ...(marginfiVault ? [marginfiVault] : []),
+    ],
     "confirmed",
   );
-  const missing: string[] = [];
-  if (!infos[0]) missing.push(`${loanSymbol} ATA ${loanAta.toBase58()}`);
-  if (!infos[1]) missing.push(`${intermediateSymbol} ATA ${interAta.toBase58()}`);
-  if (requiresUsdc && !infos[2]) missing.push(`USDC ATA ${usdcAta!.toBase58()}`);
+  const missing = required
+    .filter((_entry, index) => !infos[index])
+    .map(([symbol, address]) => `${symbol} ATA ${address.toBase58()}`);
   if (missing.length) {
     throw new Error(
       `Create the wallet token accounts before using the flash loan: ${missing.join(", ")}`,
     );
   }
+  let next = required.length;
+  const vaultHeadroom = (present: boolean): bigint | undefined => {
+    if (!present) return undefined;
+    const info = infos[next++];
+    return info ? flashHeadroomRaw(tokenAccountAmountRaw(info.data)) : undefined;
+  };
+  return {
+    walletLoanBalanceRaw: tokenAccountAmountRaw(infos[0]!.data),
+    kaminoHeadroomRaw: vaultHeadroom(Boolean(kaminoVault)),
+    cachedMarginfiHeadroomRaw: vaultHeadroom(Boolean(marginfiVault)),
+  };
 }
 
 async function assertMainnet(connection: Connection): Promise<void> {
@@ -3206,6 +3377,9 @@ export function wrapConnectionWithResilientRpc(
           // with {error:{message:"Request blocked"}} or "Indexed requests require a
           // personal token" rather than an HTTP error code.
           if (data && typeof data === "object" && data.error) {
+            // Invalid params (e.g. "could not find account") is the same
+            // answer on every node; hand it to web3.js instead of retrying.
+            if (data.error.code === -32602) return data;
             const msg = data.error.message ?? JSON.stringify(data.error);
             throw new Error(`RPC error from ${url} [${methodName}]: ${msg}`);
           }
@@ -3395,11 +3569,23 @@ async function main(): Promise<void> {
   let loanBank: Bank | undefined;
   let isWalletFunded = false;
 
+  // Stable.com capacity decides whether this route can trade at all. Check it
+  // while the funding source is resolved instead of after the DEX quote.
+  const stableCapacitySymbol =
+    config.swapOrder === "stable-first" ? config.loanSymbol : config.intermediateSymbol;
+  const stablePreflightInputRaw = config.maximumLoanAmountRaw;
+  const stablePreflight = fetchStableStatus(config, walletAddress, stablePreflightInputRaw).then(
+    (status): { value: PrefetchedStableStatus } => ({
+      value: { inputRaw: stablePreflightInputRaw, status, fetchedAtMs: Date.now() },
+    }),
+    (error: unknown) => ({ error }),
+  );
+
   if (!cli.quoteOnly) {
     if (cli.send && config.subKeypair) {
       await ensureSubAccountAtas(connection, config.keypair, config.subKeypair);
     }
-    await assertTokenAccountsExist(
+    const funding = await readFundingSnapshot(
       connection,
       walletAddress,
       config.intermediateMint,
@@ -3407,42 +3593,42 @@ async function main(): Promise<void> {
       config.loanMint,
       config.loanSymbol,
     );
-
-    let walletBalanceRaw = 0n;
-    try {
-      const tokenProgram = intermediateTokenProgram(config.loanMint);
-      const tokenAta = getAssociatedTokenAddressSync(
-        config.loanMint,
-        walletAddress,
-        false,
-        tokenProgram,
-      );
-      const bal = await connection.getTokenAccountBalance(tokenAta);
-      walletBalanceRaw = BigInt(bal.value.amount);
-    } catch {
-      walletBalanceRaw = 0n;
-    }
-
-    if (walletBalanceRaw >= 1_000_000_000n) {
-      isWalletFunded = true;
-      availableBankLiquidityRaw = walletBalanceRaw;
+    const kaminoHeadroom = async (): Promise<bigint> =>
+      funding.kaminoHeadroomRaw ?? getKaminoAvailableLiquidity(connection, config.loanMint);
+    const useKamino = (headroomRaw: bigint, reason: string): void => {
+      activeProvider = "kamino";
+      availableBankLiquidityRaw = headroomRaw;
+      console.log(`Flash loan provider: Kamino Lending (${reason})`);
       console.log(
-        `Wallet capital available: ${formatRaw(walletBalanceRaw)} ${config.loanSymbol} (Executing wallet-funded 2-hop route, 0 flash loan overhead)`,
+        `Kamino ${config.loanSymbol} reserve: ${getKaminoReserveInfo(config.loanMint).reserve.toBase58()}`,
+      );
+      console.log(
+        `Kamino liquid pool headroom: ${formatRaw(headroomRaw)} ${config.loanSymbol}`,
+      );
+    };
+    const cachedMarginfiHeadroom = funding.cachedMarginfiHeadroomRaw;
+
+    if (funding.walletLoanBalanceRaw >= 1_000_000_000n) {
+      isWalletFunded = true;
+      availableBankLiquidityRaw = funding.walletLoanBalanceRaw;
+      console.log(
+        `Wallet capital available: ${formatRaw(funding.walletLoanBalanceRaw)} ${config.loanSymbol} (Executing wallet-funded 2-hop route, 0 flash loan overhead)`,
       );
     } else if (config.provider === "kamino") {
-      activeProvider = "kamino";
-      availableBankLiquidityRaw = await getKaminoAvailableLiquidity(
-        connection,
-        config.loanMint,
+      useKamino(await kaminoHeadroom(), "explicitly configured");
+    } else if (
+      config.provider === "auto" &&
+      cachedMarginfiHeadroom !== undefined &&
+      cachedMarginfiHeadroom < config.maximumLoanAmountRaw &&
+      funding.kaminoHeadroomRaw !== undefined &&
+      funding.kaminoHeadroomRaw > cachedMarginfiHeadroom
+    ) {
+      // Marginfi could only fund a smaller loan than Kamino, so skip its
+      // client initialization (~20 RPC calls) for this check.
+      console.log(
+        `[Flash Loan] Marginfi vault headroom ${formatRaw(cachedMarginfiHeadroom)} ${config.loanSymbol} is below the ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol} maximum; skipping Marginfi.`,
       );
-      const reserveInfo = getKaminoReserveInfo(config.loanMint);
-      console.log(`Flash loan provider: Kamino Lending (explicitly configured)`);
-      console.log(`Kamino ${config.loanSymbol} reserve: ${reserveInfo.reserve.toBase58()}`);
-      if (availableBankLiquidityRaw) {
-        console.log(
-          `Kamino liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`,
-        );
-      }
+      useKamino(funding.kaminoHeadroomRaw, "larger liquidity");
     } else {
       // Marginfi must always be the first option!
       console.log(`[Flash Loan] Inspecting Marginfi as primary flash loan provider...`);
@@ -3465,13 +3651,13 @@ async function main(): Promise<void> {
           );
         }
         loanBank = loanBanks[0];
+        rememberMarginfiBank(config.loanMint, loanBank);
         assertNoExistingLoanLiability(account, loanBank.address, config.loanSymbol);
 
         const vaultBalance = await connection.getTokenAccountBalance(
           loanBank.liquidityVault,
         );
-        const vaultRaw = BigInt(vaultBalance.value.amount);
-        const headroom = (vaultRaw * 95n) / 100n;
+        const headroom = flashHeadroomRaw(BigInt(vaultBalance.value.amount));
 
         // Check on-chain bank utilization to ensure borrow won't fail with AnchorError 6026: IllegalUtilizationRatio
         const assets = loanBank.getTotalAssetQuantity();
@@ -3507,19 +3693,12 @@ async function main(): Promise<void> {
           headroom < config.maximumLoanAmountRaw
         ) {
           try {
-            const kaminoHeadroom = await getKaminoAvailableLiquidity(
-              connection,
-              config.loanMint,
-            );
-            if (kaminoHeadroom > headroom) {
-              activeProvider = "kamino";
-              availableBankLiquidityRaw = kaminoHeadroom;
+            const kaminoHeadroomRaw = await kaminoHeadroom();
+            if (kaminoHeadroomRaw > headroom) {
               console.log(
-                `[Flash Loan] Marginfi headroom ${formatRaw(headroom)} ${config.loanSymbol} is below the ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol} maximum; using Kamino Lending (headroom ${formatRaw(kaminoHeadroom)} ${config.loanSymbol}).`,
+                `[Flash Loan] Marginfi headroom ${formatRaw(headroom)} ${config.loanSymbol} is below the ${formatRaw(config.maximumLoanAmountRaw)} ${config.loanSymbol} maximum.`,
               );
-              console.log(
-                `Kamino ${config.loanSymbol} reserve: ${getKaminoReserveInfo(config.loanMint).reserve.toBase58()}`,
-              );
+              useKamino(kaminoHeadroomRaw, "larger liquidity");
             }
           } catch (kaminoErr) {
             console.log(
@@ -3541,24 +3720,36 @@ async function main(): Promise<void> {
         console.log(
           `[Flash Loan Fallback] Marginfi is unavailable; falling back to Kamino Lending as secondary provider.`,
         );
-        activeProvider = "kamino";
-        availableBankLiquidityRaw = await getKaminoAvailableLiquidity(
-          connection,
-          config.loanMint,
-        );
-        const reserveInfo = getKaminoReserveInfo(config.loanMint);
-        console.log(`Flash loan provider: Kamino Lending (fallback)`);
-        console.log(`Kamino ${config.loanSymbol} reserve: ${reserveInfo.reserve.toBase58()}`);
-        if (availableBankLiquidityRaw) {
-          console.log(
-            `Kamino liquid pool headroom: ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}`,
-          );
-        }
+        useKamino(await kaminoHeadroom(), "fallback");
       }
     }
   }
 
-  const sized = await getCapacitySizedCycle(config, walletAddress, availableBankLiquidityRaw);
+  const preflight = await stablePreflight;
+  if ("error" in preflight) throw preflight.error;
+  const { minimumRaw: stableMinimumRaw } = stableCapacity(
+    preflight.value.status,
+    config.stableCapacityBufferRaw,
+    stableCapacitySymbol,
+  );
+  // The sniper reads this wording as "cannot be funded" and checks the
+  // equivalent route that borrows the other token instead.
+  if (
+    !isWalletFunded &&
+    availableBankLiquidityRaw !== undefined &&
+    availableBankLiquidityRaw < stableMinimumRaw
+  ) {
+    throw new Error(
+      `Flash-loan liquidity is below the Stable.com minimum order: ${activeProvider} can lend ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}; at least ${formatRaw(stableMinimumRaw)} ${stableCapacitySymbol} is required`,
+    );
+  }
+
+  const sized = await getCapacitySizedCycle(
+    config,
+    walletAddress,
+    availableBankLiquidityRaw,
+    preflight.value,
+  );
   let { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
   const isTwoHop = config.dexProvider === "jupiter" &&
     isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);

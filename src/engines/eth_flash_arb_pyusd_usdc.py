@@ -18,6 +18,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Any, Iterable
 from urllib.parse import urlencode
@@ -1149,6 +1150,24 @@ def resolve_eth_rpc_endpoints(primary_rpc: str | list[str] | None = None) -> lis
     return endpoints
 
 
+# The sniper runs this engine in-process for every Ethereum check, and one
+# check resolves Web3 about six times. Reuse a recently probed connection and
+# facts that cannot change for a deployed executor instead of re-reading them.
+WEB3_PROBE_TTL_SECONDS = 15.0
+ETH_PRICE_TTL_SECONDS = 30.0
+_rpc_cache_lock = threading.Lock()
+_web3_cache: dict[tuple[Any, ...], tuple[Any, str, float]] = {}
+_executor_facts: dict[tuple[Any, ...], Any] = {}
+_eth_price_cache: dict[str, tuple[Decimal, float]] = {}
+
+
+def clear_rpc_caches() -> None:
+    with _rpc_cache_lock:
+        _web3_cache.clear()
+        _executor_facts.clear()
+        _eth_price_cache.clear()
+
+
 def get_working_web3(
     rpc_url: str | list[str] | None = None,
     rpc_timeout: float = 10.0,
@@ -1156,12 +1175,19 @@ def get_working_web3(
     """Connect to the first responsive Ethereum Web3 RPC provider from primary/fallbacks."""
     Web3 = require_web3()
     candidates = resolve_eth_rpc_endpoints(rpc_url)
+    cache_key = (id(Web3), tuple(candidates), rpc_timeout)
+    with _rpc_cache_lock:
+        cached = _web3_cache.get(cache_key)
+    if cached and time.monotonic() - cached[2] < WEB3_PROBE_TTL_SECONDS:
+        return cached[0], cached[1]
 
     last_error: Exception | None = None
     for endpoint in candidates:
         try:
             w3 = Web3(Web3.HTTPProvider(endpoint, request_kwargs={"timeout": rpc_timeout}))
             if w3.is_connected():
+                with _rpc_cache_lock:
+                    _web3_cache[cache_key] = (w3, endpoint, time.monotonic())
                 return w3, endpoint
         except Exception as exc:
             last_error = exc
@@ -1819,6 +1845,9 @@ def require_executor_loan_support(
     executor: str,
     loan_token: str,
 ) -> None:
+    fact = ("loan-token", executor.lower(), loan_token.lower())
+    if fact in _executor_facts:
+        return
     web3, _ = get_working_web3(rpc_url, rpc_timeout)
     contract = web3.eth.contract(
         address=web3.to_checksum_address(executor),
@@ -1834,6 +1863,8 @@ def require_executor_loan_support(
         raise ArbError(
             f"executor {executor} does not support loan token {loan_token}"
         )
+    with _rpc_cache_lock:
+        _executor_facts[fact] = True
 
 
 def select_flash_provider(
@@ -2002,6 +2033,9 @@ def require_executor_flash_provider_support(
 ) -> None:
     if provider.key == "morpho":
         return
+    fact = ("flash-provider", executor.lower(), provider.provider_id)
+    if fact in _executor_facts:
+        return
     web3, _ = get_working_web3(rpc_url, rpc_timeout)
     contract = web3.eth.contract(
         address=web3.to_checksum_address(executor),
@@ -2019,6 +2053,8 @@ def require_executor_flash_provider_support(
         raise ArbError(
             f"executor {executor} does not support {provider.label} flash funding"
         )
+    with _rpc_cache_lock:
+        _executor_facts[fact] = True
 
 
 def checksum_matcha_arguments(web3: Any, matcha: MatchaQuote) -> tuple[Any, ...]:
@@ -2057,7 +2093,15 @@ def prepare_transaction(
     matcha_arguments = checksum_matcha_arguments(web3, matcha)
 
     swap_order_id = 1 if swap_order == "stable-first" else 0
-    executor_code = web3.eth.get_code(web3.to_checksum_address(executor)).hex().lower()
+    code_fact = ("code", executor.lower())
+    executor_code = _executor_facts.get(code_fact)
+    if executor_code is None:
+        executor_code = web3.eth.get_code(web3.to_checksum_address(executor)).hex().lower()
+        # Deployed code (including a minimal proxy's) is immutable; empty code
+        # may still be a pending deployment, so only real code is remembered.
+        if executor_code.removeprefix("0x"):
+            with _rpc_cache_lock:
+                _executor_facts[code_fact] = executor_code
     has_blacked_method = "f3ac40fc" in executor_code and hasattr(
         contract.functions, "blacked"
     )
@@ -2453,6 +2497,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     stable_client = StableClient(direct_http, args.stable_base_url)
 
     def fetch_eth_price(primary_url: str) -> Decimal:
+        # Only gas accounting uses this (with a safety buffer); ETH/USD does
+        # not need a fresh HTTP request for every route check.
+        with _rpc_cache_lock:
+            cached = _eth_price_cache.get(primary_url)
+        if cached and time.monotonic() - cached[1] < ETH_PRICE_TTL_SECONDS:
+            return cached[0]
+        price = fetch_uncached_eth_price(primary_url)
+        with _rpc_cache_lock:
+            _eth_price_cache[primary_url] = (price, time.monotonic())
+        return price
+
+    def fetch_uncached_eth_price(primary_url: str) -> Decimal:
         candidates = [
             primary_url,
             "https://api.coinbase.com/v2/prices/ETH-USD/spot",

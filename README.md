@@ -154,13 +154,19 @@ PYUSD on both chains while Ethereum and Solana monitor in parallel. `A/B` means
 venue orders: `A -> B` on MetaMatcha followed by `B -> A` on Stable.com,
 and `A -> B` on Stable.com followed by `B -> A` on MetaMatcha. For
 example, `PYUSD/USDC` always borrows and repays PYUSD, while `USDC/PYUSD` is the
-separate USDC-loan route. A `$5` threshold is converted to a
+separate USDC-loan route.
+
+Routes come in equivalent twins: borrowing A for `A -> B` on Stable.com then
+`B -> A` on the DEX depends on the same two rates as borrowing B for `B -> A`
+on the DEX then `A -> B` on Stable.com. Only the first configured route of each
+twin is quoted (12 of the 24). The other is shown as `STANDBY` and is quoted
+only while the preferred route's flash loan cannot be funded. A `$5` threshold is converted to a
 `5.000001`-unit gross and guaranteed-net floor in the route's starting
 stablecoin, so equality at exactly `$5` never broadcasts. Each engine still
 performs its atomic simulation, gas/fee accounting, mainnet check, and guarded
 submission logic.
 
-Check all 24 chain/pair/order combinations once without broadcasting:
+Check every chain/pair/order arbitrage once without broadcasting:
 
 ```bash
 python sniper.py --once

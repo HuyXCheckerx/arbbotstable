@@ -19,8 +19,12 @@ for sub in ("core", "recovery", "engines", "web", "deployers"):
         sys.path.insert(0, subpath)
 
 from crosschain_sniper import (
+    DEFAULT_ROUTE_PAIRS,
+    DEFAULT_SWAP_ORDERS,
     AdaptiveBackoff,
     CooldownPolicy,
+    active_routes,
+    arbitrage_groups,
     Outcome,
     Route,
     SniperDashboardFeed,
@@ -1008,6 +1012,125 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertEqual(eth_key, "metamatcha:ethereum:USDG/USDC")
         self.assertEqual(sol_key, "metamatcha:solana:USDG/USDC")
         self.assertNotEqual(eth_key, sol_key)
+
+
+class EquivalentRouteSchedulingTests(unittest.TestCase):
+    POLICY = CooldownPolicy(
+        transient_base_seconds=30,
+        transient_max_seconds=300,
+        provider_access_seconds=3600,
+        no_route_seconds=300,
+        capacity_seconds=300,
+        unstable_capacity_seconds=30,
+        reverted_seconds=60,
+    )
+    PREFERRED = Route("solana", "PYUSD/USDG", "stable-first")
+    TWIN = Route("solana", "USDG/PYUSD", "dex-first")
+
+    def run_worker(self, outcomes, *, parallel):
+        checked = []
+
+        def fake_run_route(route, **_kwargs):
+            checked.append(route.key)
+            return outcomes[route.key]
+
+        with patch("crosschain_sniper.run_route", side_effect=fake_run_route):
+            worker(
+                "solana",
+                [self.PREFERRED, self.TWIN],
+                live=False,
+                base_threshold=Decimal("5"),
+                interval_seconds=1,
+                cooldown_seconds=15,
+                timeout_seconds=300,
+                cooldown_policy=self.POLICY,
+                backoff=AdaptiveBackoff(),
+                once=True,
+                stop=threading.Event(),
+                logger=Mock(),
+                parallel_scanning=parallel,
+            )
+        return checked
+
+    def test_routes_with_the_same_stable_leg_are_one_arbitrage(self):
+        self.assertEqual(self.PREFERRED.arbitrage_key, self.TWIN.arbitrage_key)
+        self.assertNotEqual(
+            self.PREFERRED.arbitrage_key,
+            Route("solana", "PYUSD/USDG", "dex-first").arbitrage_key,
+        )
+        self.assertNotEqual(
+            self.PREFERRED.arbitrage_key,
+            Route("ethereum", "PYUSD/USDG", "stable-first").arbitrage_key,
+        )
+
+    def test_default_routes_form_twelve_pairs_of_equivalent_routes(self):
+        routes = selected_routes(
+            ["ethereum", "solana"],
+            list(DEFAULT_ROUTE_PAIRS),
+            list(DEFAULT_SWAP_ORDERS),
+        )
+        groups = arbitrage_groups(routes)
+        self.assertEqual(len(routes), 24)
+        self.assertEqual(len(groups), 12)
+        self.assertTrue(all(len(group) == 2 for group in groups))
+
+    def test_active_routes_prefer_the_first_fundable_route(self):
+        groups = [[self.PREFERRED, self.TWIN]]
+        self.assertEqual(active_routes(groups, {}, 100.0), [self.PREFERRED])
+        blocked = {self.PREFERRED.key: 200.0}
+        self.assertEqual(active_routes(groups, blocked, 100.0), [self.TWIN])
+        self.assertEqual(active_routes(groups, blocked, 200.0), [self.PREFERRED])
+        both = {self.PREFERRED.key: 200.0, self.TWIN.key: 200.0}
+        self.assertEqual(active_routes(groups, both, 100.0), [])
+
+    def test_flash_liquidity_failures_are_classified_for_both_engines(self):
+        for detail in (
+            "no zero-fee flash provider has 100000 USDG; available: Morpho 12 USDG",
+            "Morpho flash liquidity is 5 USDG, below requested 100000 USDG",
+            "Marginfi flash loan is unavailable: headroom is exhausted",
+            "Flash-loan liquidity is below the Stable.com minimum order: kamino can lend 3 PYUSD",
+        ):
+            with self.subTest(detail=detail):
+                self.assertEqual(failure_category(detail), "flash-liquidity")
+
+    def test_equivalent_route_is_not_quoted_when_the_preferred_route_is_fundable(self):
+        outcomes = {
+            self.PREFERRED.key: Outcome(False, "guaranteed gross -1 is below 5", "unprofitable"),
+            self.TWIN.key: Outcome(False, "guaranteed gross -1 is below 5", "unprofitable"),
+        }
+        for parallel in (False, True):
+            with self.subTest(parallel=parallel):
+                self.assertEqual(self.run_worker(outcomes, parallel=parallel), [self.PREFERRED.key])
+
+    def test_equivalent_route_is_quoted_in_the_same_pass_when_funding_fails(self):
+        outcomes = {
+            self.PREFERRED.key: Outcome(
+                False,
+                "Flash-loan liquidity is below the Stable.com minimum order",
+                "flash-liquidity",
+            ),
+            self.TWIN.key: Outcome(False, "guaranteed gross -1 is below 5", "unprofitable"),
+        }
+        for parallel in (False, True):
+            with self.subTest(parallel=parallel):
+                self.assertEqual(
+                    self.run_worker(outcomes, parallel=parallel),
+                    [self.PREFERRED.key, self.TWIN.key],
+                )
+
+    def test_dashboard_marks_the_unchecked_equivalent_route_as_standby(self):
+        with tempfile.TemporaryDirectory() as directory:
+            feed = SniperDashboardFeed(
+                Path(directory) / "feed.json",
+                [self.PREFERRED, self.TWIN],
+                live=False,
+                base_threshold=Decimal("5"),
+            )
+            feed.mark_standby(self.TWIN, self.PREFERRED)
+            record = feed.snapshot()["routes"][self.TWIN.key]
+        self.assertEqual(record["state"], "STANDBY")
+        self.assertIn(self.PREFERRED.display, record["detail"])
+        self.assertIn("PYUSD flash loan is unavailable", record["detail"])
 
 
 if __name__ == "__main__":

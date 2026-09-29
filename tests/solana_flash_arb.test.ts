@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test, { type TestContext } from "node:test";
+import test, { after, beforeEach, type TestContext } from "node:test";
 
 import {
   MAINNET_GENESIS_HASH,
@@ -50,6 +50,11 @@ import {
   isMarginfiBorrowError,
   buildKaminoFlashTransaction,
   KAMINO_PROGRAM_ID,
+  flashHeadroomRaw,
+  metaMatchaDenialRemainingMs,
+  recordMetaMatchaDenial,
+  stableCapacity,
+  tokenAccountAmountRaw,
   type JupiterQuote,
   type StableLeg,
 } from "../src/engines/solana_flash_arb.js";
@@ -62,6 +67,16 @@ import {
   type Connection,
 } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
+
+// Engine runtime state (provider denials, cached bank addresses) must never
+// reach the live logs/ directory from tests, nor carry over between tests.
+const runtimeStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "solana-flash-arb-state-"));
+process.env.SOL_FLASH_ARB_STATE_DIR = runtimeStateDir;
+beforeEach(() => {
+  fs.rmSync(runtimeStateDir, { recursive: true, force: true });
+  fs.mkdirSync(runtimeStateDir);
+});
+after(() => fs.rmSync(runtimeStateDir, { recursive: true, force: true }));
 
 test("uses the Solana mainnet-beta genesis hash", () => {
   assert.equal(
@@ -345,6 +360,67 @@ test("bounds transient MetaMatcha retries and adds a missing helper error prefix
     { message: "MetaMatcha quote failed: HTTP 503: unavailable" },
   );
   assert.equal(fixture.calls(), 3);
+});
+
+test("remembers a MetaMatcha access denial across checks instead of asking again", async (t) => {
+  const fixture = metaMatchaHelperFixture(t, ["MetaMatcha quote failed: HTTP 403: access denied"]);
+  await assert.rejects(
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+  );
+  assert.ok(metaMatchaDenialRemainingMs() > 0);
+  await assert.rejects(
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+    /MetaMatcha quote skipped: access was denied \(HTTP 403\)/,
+  );
+  assert.equal(fixture.calls(), 1);
+});
+
+test("does not treat one competitor's denial or a rate limit as a MetaMatcha denial", async (t) => {
+  for (const message of [
+    "MetaMatcha quote failed: no simulated executable quote; request failures: 0x: HTTP 403: access denied",
+    "MetaMatcha quote failed: HTTP 429: Too Many Requests; retry-after=120s",
+  ]) {
+    const fixture = metaMatchaHelperFixture(t, [message]);
+    await assert.rejects(
+      getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+    );
+    assert.equal(metaMatchaDenialRemainingMs(), 0, message);
+  }
+});
+
+test("a recorded MetaMatcha denial expires after its cooldown", () => {
+  recordMetaMatchaDenial("MetaMatcha /api/competitions returned HTTP 403", 1_000);
+  const cooldownMs = 3_600_000;
+  assert.equal(metaMatchaDenialRemainingMs(1_000), cooldownMs);
+  assert.equal(metaMatchaDenialRemainingMs(1_000 + cooldownMs), 0);
+});
+
+test("reads token amounts from SPL and Token-2022 account data", () => {
+  const data = Buffer.alloc(165);
+  data.writeBigUInt64LE(4_872_472_379_985n, 64);
+  assert.equal(tokenAccountAmountRaw(data), 4_872_472_379_985n);
+  assert.equal(tokenAccountAmountRaw(new Uint8Array(data)), 4_872_472_379_985n);
+  assert.throws(() => tokenAccountAmountRaw(Buffer.alloc(71)), /expected at least 72/);
+  assert.equal(flashHeadroomRaw(1_000_000n), 950_000n);
+});
+
+test("stableCapacity applies the buffer and order maximum, and rejects unusable pools", () => {
+  assert.deepEqual(
+    stableCapacity({ balance: 50_000, min: 1_000, max: 0 }, 1_000_000n, "USDG"),
+    { capacityRaw: 50_000_000_000n, minimumRaw: 1_000_000_000n, usableCapacityRaw: 49_999_000_000n },
+  );
+  assert.equal(
+    stableCapacity({ balance: 50_000, min: 1_000, max: 20_000 }, 1_000_000n, "USDG").usableCapacityRaw,
+    20_000_000_000n,
+  );
+  assert.throws(
+    () => stableCapacity({ balance: 0.99716, min: 1_000, max: 0 }, 1_000_000n, "USDG"),
+    /usable capacity 0\.997159 USDG is below its 1000 USDG minimum order/,
+  );
+  assert.throws(
+    () => stableCapacity({ balance: 0, min: 1_000, max: 0 }, 1_000_000n, "USDG"),
+    /no remaining USDG capacity/,
+  );
 });
 
 test("falls back to Jupiter Lite only for api.jup.ag authentication failures", () => {
@@ -770,6 +846,39 @@ test("parseSolanaRpcEndpoints deduplicates primary, fallbacks, and env variables
     else delete process.env.SOLANA_RPC_URL;
     if (origFallbacks !== undefined) process.env.SOLANA_RPC_FALLBACKS = origFallbacks;
     else delete process.env.SOLANA_RPC_FALLBACKS;
+  }
+});
+
+test("wrapConnectionWithResilientRpc returns invalid-params errors without retrying", async () => {
+  let originalCalls = 0;
+  const mockConn: any = {
+    rpcEndpoint: "https://primary-rpc.invalid",
+    _rpcRequest: async () => {
+      originalCalls += 1;
+      throw new Error("must not be reached");
+    },
+  };
+  const wrapped = wrapConnectionWithResilientRpc(mockConn, ["https://backup-rpc.invalid"]);
+  const response = {
+    jsonrpc: "2.0",
+    id: "1",
+    error: { code: -32602, message: "Invalid param: could not find account" },
+  };
+  const origFetch = globalThis.fetch;
+  let fetches = 0;
+  (globalThis as any).fetch = async () => {
+    fetches += 1;
+    return { status: 200, json: async () => response };
+  };
+  try {
+    assert.deepEqual(
+      await (wrapped as any)._rpcRequest("getTokenAccountBalance", ["missing"]),
+      response,
+    );
+    assert.equal(fetches, 1);
+    assert.equal(originalCalls, 0);
+  } finally {
+    globalThis.fetch = origFetch;
   }
 });
 
