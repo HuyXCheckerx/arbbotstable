@@ -1247,9 +1247,22 @@ export function stableCapacity(
   bufferRaw: bigint,
   symbol: string,
 ): StableCapacity {
-  const capacityRaw = parseDecimalToRawFloor(String(status.balance));
-  const minimumRaw = parseDecimalToRawCeil(String(status.min));
-  const maximumRaw = parseDecimalToRawFloor(String(status.max));
+  return stableCapacityRaw(
+    parseDecimalToRawFloor(String(status.balance)),
+    parseDecimalToRawCeil(String(status.min)),
+    parseDecimalToRawFloor(String(status.max)),
+    bufferRaw,
+    symbol,
+  );
+}
+
+export function stableCapacityRaw(
+  capacityRaw: bigint,
+  minimumRaw: bigint,
+  maximumRaw: bigint,
+  bufferRaw: bigint,
+  symbol: string,
+): StableCapacity {
   if (capacityRaw <= 0n) {
     throw new Error(`Stable.com pool has no remaining ${symbol} capacity`);
   }
@@ -1269,27 +1282,147 @@ export function stableCapacity(
   return { capacityRaw, minimumRaw, usableCapacityRaw };
 }
 
-/** A /swap/status response fetched ahead of sizing, reusable while fresh. */
-export interface PrefetchedStableStatus {
-  inputRaw: bigint;
-  status: StableStatusAsset;
-  fetchedAtMs: number;
+// Stable.com's reported pool balance is its on-chain vault minus a fixed
+// protocol floor, rounded down to 0.01. Reading the vault answers the capacity
+// question without an API request.
+export const STABLE_POOL_PROTOCOL_FLOOR_RAW = 1_800_000n;
+const STABLE_BALANCE_STEP_RAW = 10_000n;
+
+/** Token account that holds Stable.com's pool of `mint` (the swap's payout source). */
+export function stablePoolVault(mint: PublicKey): PublicKey {
+  const [pool] = PublicKey.findProgramAddressSync(
+    [Buffer.from("pool"), mint.toBuffer()],
+    STABLE_PROGRAM_ID,
+  );
+  return getAssociatedTokenAddressSync(mint, pool, true, intermediateTokenProgram(mint));
 }
 
-const STABLE_PREFETCH_MAX_AGE_MS = 10_000;
+export function stableReportedBalanceRaw(vaultRaw: bigint): bigint {
+  const available =
+    vaultRaw > STABLE_POOL_PROTOCOL_FLOOR_RAW ? vaultRaw - STABLE_POOL_PROTOCOL_FLOOR_RAW : 0n;
+  return available - (available % STABLE_BALANCE_STEP_RAW);
+}
+
+/** Order limits and fees that /swap/status reports and that rarely change. */
+export interface StableTerms {
+  minimumRaw: bigint;
+  maximumRaw: bigint;
+  /** Token fee per million units of input, rounded up. */
+  tokenFeePpm: bigint;
+  nativeFeeSol: number;
+}
+
+const STABLE_TERMS_STATE = "solana-stable-terms.json";
+
+interface StoredStableTerms {
+  minimumRaw: string;
+  maximumRaw: string;
+  tokenFeePpm: string;
+  nativeFeeSol: number;
+  recordedAt: number;
+}
+
+function stableTermsKey(config: Pick<Config, "swapOrder" | "loanSymbol" | "intermediateSymbol">): string {
+  return `${stableInputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol)}>` +
+    stableOutputSymbol(config.swapOrder, config.loanSymbol, config.intermediateSymbol);
+}
+
+function stableTermsTtlMs(): number {
+  const seconds = Number(process.env.SOL_FLASH_ARB_STABLE_TERMS_TTL_SECONDS ?? "21600");
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : 21_600_000;
+}
+
+export function stableTermsFromStatus(status: StableStatusAsset): StableTerms {
+  const amountFromRaw = parseDecimalToRawFloor(String(status.amountFrom));
+  const tokenFeeRaw = parseDecimalToRawCeil(String(status.tokenFee ?? 0));
+  return {
+    minimumRaw: parseDecimalToRawCeil(String(status.min)),
+    maximumRaw: parseDecimalToRawFloor(String(status.max)),
+    tokenFeePpm:
+      amountFromRaw > 0n ? (tokenFeeRaw * 1_000_000n + amountFromRaw - 1n) / amountFromRaw : 0n,
+    nativeFeeSol: Number(status.nativeFee ?? 0),
+  };
+}
+
+export function rememberStableTerms(
+  config: Pick<Config, "swapOrder" | "loanSymbol" | "intermediateSymbol">,
+  status: StableStatusAsset,
+  now = Date.now(),
+): void {
+  const terms = stableTermsFromStatus(status);
+  const stored = readRuntimeState<Record<string, StoredStableTerms>>(STABLE_TERMS_STATE) ?? {};
+  stored[stableTermsKey(config)] = {
+    minimumRaw: terms.minimumRaw.toString(),
+    maximumRaw: terms.maximumRaw.toString(),
+    tokenFeePpm: terms.tokenFeePpm.toString(),
+    nativeFeeSol: terms.nativeFeeSol,
+    recordedAt: now,
+  };
+  writeRuntimeState(STABLE_TERMS_STATE, stored);
+}
+
+export function cachedStableTerms(
+  config: Pick<Config, "swapOrder" | "loanSymbol" | "intermediateSymbol">,
+  now = Date.now(),
+): StableTerms | undefined {
+  const entry = readRuntimeState<Record<string, StoredStableTerms>>(STABLE_TERMS_STATE)?.[
+    stableTermsKey(config)
+  ];
+  if (!entry || !(now - Number(entry.recordedAt) < stableTermsTtlMs())) return undefined;
+  try {
+    return {
+      minimumRaw: BigInt(entry.minimumRaw),
+      maximumRaw: BigInt(entry.maximumRaw),
+      tokenFeePpm: BigInt(entry.tokenFeePpm),
+      nativeFeeSol: Number(entry.nativeFeeSol) || 0,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The quote /swap/status would return, computed from the on-chain pool and the
+ * cached terms. It drives sizing and the profit decision; a route that passes
+ * is confirmed with Stable.com before any order is created.
+ */
+export function estimatedStableQuote(
+  inputRaw: bigint,
+  reportedBalanceRaw: bigint,
+  terms: StableTerms,
+  outputSymbol: string,
+): StableQuote {
+  const tokenFeeRaw = (inputRaw * terms.tokenFeePpm + 999_999n) / 1_000_000n;
+  const outputRaw = inputRaw - tokenFeeRaw;
+  return {
+    inputRaw,
+    outputRaw,
+    tokenFeeRaw,
+    nativeFeeSol: terms.nativeFeeSol,
+    status: {
+      asset: outputSymbol,
+      precision: 6,
+      balance: Number(formatRaw(reportedBalanceRaw)),
+      min: Number(formatRaw(terms.minimumRaw)),
+      max: Number(formatRaw(terms.maximumRaw)),
+      nativeFee: terms.nativeFeeSol,
+      tokenFee: Number(formatRaw(tokenFeeRaw)),
+      amountFrom: formatRaw(inputRaw),
+      amountTo: formatRaw(outputRaw),
+      executionFeeNative: "0",
+      estimated: true,
+    },
+  };
+}
+
+type StableQuoter = (inputRaw: bigint) => Promise<StableQuote>;
 
 async function getStableQuote(
   config: Config,
   wallet: PublicKey,
   inputRaw: bigint,
-  prefetched?: PrefetchedStableStatus,
 ): Promise<StableQuote> {
-  const status =
-    prefetched &&
-    prefetched.inputRaw === inputRaw &&
-    Date.now() - prefetched.fetchedAtMs <= STABLE_PREFETCH_MAX_AGE_MS
-      ? prefetched.status
-      : await fetchStableStatus(config, wallet, inputRaw);
+  const status = await fetchStableStatus(config, wallet, inputRaw);
   const quotedInputRaw = parseDecimalToRawFloor(status.amountFrom);
   if (quotedInputRaw !== inputRaw) {
     throw new Error(
@@ -1825,8 +1958,8 @@ async function getDexQuote(
 async function getCapacitySizedCycle(
   config: Config,
   wallet: PublicKey,
-  maxBankBorrowRaw?: bigint,
-  prefetchedStable?: PrefetchedStableStatus,
+  maxBankBorrowRaw: bigint | undefined,
+  quoteStable: StableQuoter,
 ): Promise<SizedCycle> {
   let loanAmountRaw = config.maximumLoanAmountRaw;
   if (maxBankBorrowRaw && maxBankBorrowRaw > 0n && loanAmountRaw > maxBankBorrowRaw) {
@@ -1847,12 +1980,7 @@ async function getCapacitySizedCycle(
     attempt += 1
   ) {
     if (config.swapOrder === "stable-first") {
-      const stableQuote = await getStableQuote(
-        config,
-        wallet,
-        loanAmountRaw,
-        attempt === 0 ? prefetchedStable : undefined,
-      );
+      const stableQuote = await quoteStable(loanAmountRaw);
       const { capacityRaw, minimumRaw, usableCapacityRaw } = stableCapacity(
         stableQuote.status,
         config.stableCapacityBufferRaw,
@@ -1972,7 +2100,7 @@ async function getCapacitySizedCycle(
       firstMinimumRaw = BigInt(firstQuote.otherAmountThreshold);
     }
 
-    const stableQuote = await getStableQuote(config, wallet, firstMinimumRaw);
+    const stableQuote = await quoteStable(firstMinimumRaw);
     const { capacityRaw, minimumRaw, usableCapacityRaw } = stableCapacity(
       stableQuote.status,
       config.stableCapacityBufferRaw,
@@ -2718,6 +2846,7 @@ export async function prerunCandidateQuotes(
   ) => Promise<number> = simulate,
   existingStableLeg?: StableLeg,
   flashProvider: "marginfi" | "kamino" = config.provider === "kamino" ? "kamino" : "marginfi",
+  estimateStableOutputRaw?: (inputRaw: bigint) => bigint,
 ): Promise<ExecutableCandidate> {
   const candidates: JupiterQuote[] = firstQuote.candidates?.length
     ? firstQuote.candidates
@@ -2886,6 +3015,20 @@ export async function prerunCandidateQuotes(
         const aggregatorName =
           cand.aggregator ?? cand.provider ?? `Aggregator #${index + 1}`;
         const candFirstLegMinimumRaw = BigInt(cand.otherAmountThreshold);
+        // A candidate that cannot clear the floor even on the on-chain Stable.com
+        // estimate needs no Stable.com quote of its own.
+        if (estimateStableOutputRaw && candFirstLegMinimumRaw !== stableQuote.inputRaw) {
+          const estimatedGrossRaw = estimateStableOutputRaw(candFirstLegMinimumRaw) - loanAmountRaw;
+          if (estimatedGrossRaw < effectiveMinGrossRaw) {
+            return {
+              candidate: cand,
+              aggregatorName,
+              grossProfitRaw: estimatedGrossRaw,
+              error: `estimated gross profit ${formatRaw(estimatedGrossRaw)} ${config.loanSymbol} is below scaled minimum ${formatRaw(effectiveMinGrossRaw)} ${config.loanSymbol}`,
+              isPoisoned: false,
+            };
+          }
+        }
         try {
           const candStableQuote =
             candFirstLegMinimumRaw === stableQuote.inputRaw
@@ -3096,6 +3239,7 @@ export async function prerunCandidateQuotes(
         simulateFn,
         existingStableLeg,
         "kamino",
+        estimateStableOutputRaw,
       );
     }
 
@@ -3142,6 +3286,8 @@ export interface FundingSnapshot {
   kaminoHeadroomRaw?: bigint;
   /** From a previously recorded Marginfi vault; used only to skip Marginfi. */
   cachedMarginfiHeadroomRaw?: bigint;
+  /** Raw balance of the Stable.com pool vault that pays this route's Stable leg. */
+  stablePoolVaultRaw?: bigint;
 }
 
 /**
@@ -3155,6 +3301,7 @@ async function readFundingSnapshot(
   intermediateSymbol: string,
   loanMint: PublicKey,
   loanSymbol: string,
+  stableVault?: PublicKey,
 ): Promise<FundingSnapshot> {
   const loanAta = getAssociatedTokenAddressSync(
     loanMint,
@@ -3186,6 +3333,7 @@ async function readFundingSnapshot(
       ...required.map(([, address]) => address),
       ...(kaminoVault ? [kaminoVault] : []),
       ...(marginfiVault ? [marginfiVault] : []),
+      ...(stableVault ? [stableVault] : []),
     ],
     "confirmed",
   );
@@ -3198,15 +3346,18 @@ async function readFundingSnapshot(
     );
   }
   let next = required.length;
-  const vaultHeadroom = (present: boolean): bigint | undefined => {
+  const vaultAmount = (present: boolean): bigint | undefined => {
     if (!present) return undefined;
     const info = infos[next++];
-    return info ? flashHeadroomRaw(tokenAccountAmountRaw(info.data)) : undefined;
+    return info ? tokenAccountAmountRaw(info.data) : undefined;
   };
+  const headroom = (amount: bigint | undefined): bigint | undefined =>
+    amount === undefined ? undefined : flashHeadroomRaw(amount);
   return {
     walletLoanBalanceRaw: tokenAccountAmountRaw(infos[0]!.data),
-    kaminoHeadroomRaw: vaultHeadroom(Boolean(kaminoVault)),
-    cachedMarginfiHeadroomRaw: vaultHeadroom(Boolean(marginfiVault)),
+    kaminoHeadroomRaw: headroom(vaultAmount(Boolean(kaminoVault))),
+    cachedMarginfiHeadroomRaw: headroom(vaultAmount(Boolean(marginfiVault))),
+    stablePoolVaultRaw: vaultAmount(Boolean(stableVault)),
   };
 }
 
@@ -3569,17 +3720,24 @@ async function main(): Promise<void> {
   let loanBank: Bank | undefined;
   let isWalletFunded = false;
 
-  // Stable.com capacity decides whether this route can trade at all. Check it
-  // while the funding source is resolved instead of after the DEX quote.
-  const stableCapacitySymbol =
-    config.swapOrder === "stable-first" ? config.loanSymbol : config.intermediateSymbol;
-  const stablePreflightInputRaw = config.maximumLoanAmountRaw;
-  const stablePreflight = fetchStableStatus(config, walletAddress, stablePreflightInputRaw).then(
-    (status): { value: PrefetchedStableStatus } => ({
-      value: { inputRaw: stablePreflightInputRaw, status, fetchedAtMs: Date.now() },
-    }),
-    (error: unknown) => ({ error }),
+  // Stable.com is queried only once a route looks profitable: until then its
+  // capacity comes from the pool's on-chain vault and its order limits and fee
+  // from the last real /swap/status response (see cachedStableTerms).
+  const stableCapacitySymbol = stableInputSymbol(
+    config.swapOrder,
+    config.loanSymbol,
+    config.intermediateSymbol,
   );
+  const stablePayoutSymbol = stableOutputSymbol(
+    config.swapOrder,
+    config.loanSymbol,
+    config.intermediateSymbol,
+  );
+  const stableVault = stablePoolVault(
+    config.swapOrder === "stable-first" ? config.intermediateMint : config.loanMint,
+  );
+  const stableTerms = cachedStableTerms(config);
+  let stablePoolVaultRaw: bigint | undefined;
 
   if (!cli.quoteOnly) {
     if (cli.send && config.subKeypair) {
@@ -3592,7 +3750,9 @@ async function main(): Promise<void> {
       config.intermediateSymbol,
       config.loanMint,
       config.loanSymbol,
+      stableTerms ? stableVault : undefined,
     );
+    stablePoolVaultRaw = funding.stablePoolVaultRaw;
     const kaminoHeadroom = async (): Promise<bigint> =>
       funding.kaminoHeadroomRaw ?? getKaminoAvailableLiquidity(connection, config.loanMint);
     const useKamino = (headroomRaw: bigint, reason: string): void => {
@@ -3725,31 +3885,98 @@ async function main(): Promise<void> {
     }
   }
 
-  const preflight = await stablePreflight;
-  if ("error" in preflight) throw preflight.error;
-  const { minimumRaw: stableMinimumRaw } = stableCapacity(
-    preflight.value.status,
-    config.stableCapacityBufferRaw,
-    stableCapacitySymbol,
-  );
-  // The sniper reads this wording as "cannot be funded" and checks the
-  // equivalent route that borrows the other token instead.
-  if (
-    !isWalletFunded &&
-    availableBankLiquidityRaw !== undefined &&
-    availableBankLiquidityRaw < stableMinimumRaw
-  ) {
-    throw new Error(
-      `Flash-loan liquidity is below the Stable.com minimum order: ${activeProvider} can lend ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}; at least ${formatRaw(stableMinimumRaw)} ${stableCapacitySymbol} is required`,
+  if (stableTerms && stablePoolVaultRaw === undefined) {
+    const [vaultInfo] = await connection.getMultipleAccountsInfo([stableVault]);
+    stablePoolVaultRaw = vaultInfo ? tokenAccountAmountRaw(vaultInfo.data) : undefined;
+  }
+  const liveStableQuote: StableQuoter = async (inputRaw) => {
+    const quote = await getStableQuote(config, walletAddress, inputRaw);
+    rememberStableTerms(config, quote.status);
+    return quote;
+  };
+  let quoteStable = liveStableQuote;
+  let estimateStableOutputRaw: ((inputRaw: bigint) => bigint) | undefined;
+  if (stableTerms && stablePoolVaultRaw !== undefined) {
+    const reportedBalanceRaw = stableReportedBalanceRaw(stablePoolVaultRaw);
+    const { minimumRaw: stableMinimumRaw } = stableCapacityRaw(
+      reportedBalanceRaw,
+      stableTerms.minimumRaw,
+      stableTerms.maximumRaw,
+      config.stableCapacityBufferRaw,
+      stableCapacitySymbol,
     );
+    // The sniper reads this wording as "cannot be funded" and checks the
+    // equivalent route that borrows the other token instead.
+    if (
+      !isWalletFunded &&
+      availableBankLiquidityRaw !== undefined &&
+      availableBankLiquidityRaw < stableMinimumRaw
+    ) {
+      throw new Error(
+        `Flash-loan liquidity is below the Stable.com minimum order: ${activeProvider} can lend ${formatRaw(availableBankLiquidityRaw)} ${config.loanSymbol}; at least ${formatRaw(stableMinimumRaw)} ${stableCapacitySymbol} is required`,
+      );
+    }
+    console.log(
+      `Stable.com ${stablePayoutSymbol} pool (on-chain): ${formatRaw(reportedBalanceRaw)} available; Stable.com is queried only if the route is profitable`,
+    );
+    quoteStable = async (inputRaw) =>
+      estimatedStableQuote(inputRaw, reportedBalanceRaw, stableTerms, stablePayoutSymbol);
+    estimateStableOutputRaw = (inputRaw) =>
+      estimatedStableQuote(inputRaw, reportedBalanceRaw, stableTerms, stablePayoutSymbol).outputRaw;
   }
 
-  const sized = await getCapacitySizedCycle(
+  /** Replace the on-chain estimate with Stable.com's own quote before any order exists. */
+  async function confirmEstimatedStableLeg(estimated: SizedCycle): Promise<SizedCycle> {
+    console.log("Estimated route clears the floor; confirming the Stable.com leg with Stable.com...");
+    try {
+      const live = await liveStableQuote(estimated.stableQuote.inputRaw);
+      const capacity = stableCapacity(
+        live.status,
+        config.stableCapacityBufferRaw,
+        stableCapacitySymbol,
+      );
+      if (
+        live.outputRaw === estimated.stableQuote.outputRaw &&
+        live.inputRaw <= capacity.usableCapacityRaw
+      ) {
+        console.log("Stable.com confirmed the on-chain estimate.");
+        return {
+          ...estimated,
+          stableQuote: live,
+          capacityRaw: capacity.capacityRaw,
+          usableCapacityRaw: capacity.usableCapacityRaw,
+        };
+      }
+      console.log(
+        `Stable.com quoted ${formatRaw(live.outputRaw)} ${stablePayoutSymbol} against the ${formatRaw(estimated.stableQuote.outputRaw)} estimate; re-sizing with live Stable.com quotes...`,
+      );
+    } catch (error) {
+      console.log(
+        `Stable.com did not confirm the estimate (${errorMessage(error)}); re-sizing with live Stable.com quotes...`,
+      );
+    }
+    return getCapacitySizedCycle(config, walletAddress, availableBankLiquidityRaw, liveStableQuote);
+  }
+
+  let sized = await getCapacitySizedCycle(
     config,
     walletAddress,
     availableBankLiquidityRaw,
-    preflight.value,
+    quoteStable,
   );
+  if (sized.stableQuote.status.estimated) {
+    const estimatedMinGrossRaw = effectiveScaledMinimumProfitRaw(
+      config.minimumGrossProfitRaw,
+      sized.loanAmountRaw,
+      config.maximumLoanAmountRaw,
+    );
+    if (sized.cycle.grossProfitRaw >= estimatedMinGrossRaw) {
+      sized = await confirmEstimatedStableLeg(sized);
+    } else {
+      console.log("Stable.com leg estimated from its on-chain pool; below the floor, so Stable.com was not queried.");
+    }
+  }
+
   let { loanAmountRaw, firstQuote, secondJupiterQuote, stableQuote, cycle } = sized;
   const isTwoHop = config.dexProvider === "jupiter" &&
     isTwoHopJupiterRoute(config.loanMint, config.intermediateMint);
@@ -3944,6 +4171,7 @@ async function main(): Promise<void> {
       simulate,
       undefined,
       activeProvider,
+      estimateStableOutputRaw,
     );
     if (winning.activeFlashProvider) {
       activeProvider = winning.activeFlashProvider;

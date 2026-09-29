@@ -51,6 +51,14 @@ import {
   buildKaminoFlashTransaction,
   KAMINO_PROGRAM_ID,
   flashHeadroomRaw,
+  STABLE_POOL_PROTOCOL_FLOOR_RAW,
+  cachedStableTerms,
+  estimatedStableQuote,
+  rememberStableTerms,
+  stableCapacityRaw,
+  stablePoolVault,
+  stableReportedBalanceRaw,
+  stableTermsFromStatus,
   metaMatchaDenialRemainingMs,
   recordMetaMatchaDenial,
   stableCapacity,
@@ -402,6 +410,109 @@ test("reads token amounts from SPL and Token-2022 account data", () => {
   assert.equal(tokenAccountAmountRaw(new Uint8Array(data)), 4_872_472_379_985n);
   assert.throws(() => tokenAccountAmountRaw(Buffer.alloc(71)), /expected at least 72/);
   assert.equal(flashHeadroomRaw(1_000_000n), 950_000n);
+});
+
+test("derives Stable.com pool vaults that match the accounts the pool pays from", () => {
+  assert.equal(stablePoolVault(USDC_MINT).toBase58(), "EAWo2E745TtmvL76xhkn3kmj6avRC3KTyEfuA6ea4KkV");
+  assert.equal(stablePoolVault(USDG_MINT).toBase58(), "6REe5We6ieQh9qJzrmmVqTQmJ5RNorCSLuyJ6N4ef1dh");
+  assert.equal(stablePoolVault(PYUSD_MINT).toBase58(), "BPkxv9gNCUShv5oWnRfoSQA7Vngqb19Qc2Eba8EPDeJi");
+});
+
+test("reproduces Stable.com's reported balance from the on-chain vault", () => {
+  // Observed: vault 203235.977286 USDG, /swap/status balance 203234.17.
+  assert.equal(stableReportedBalanceRaw(203_235_977_286n), 203_234_170_000n);
+  assert.equal(stableReportedBalanceRaw(STABLE_POOL_PROTOCOL_FLOOR_RAW), 0n);
+  assert.equal(stableReportedBalanceRaw(1n), 0n);
+});
+
+const USDG_STATUS = {
+  asset: "USDG",
+  precision: 6,
+  balance: 93519.9,
+  min: 1000,
+  max: 1000000,
+  nativeFee: 6.288e-6,
+  tokenFee: 0,
+  amountFrom: "93518.9",
+  amountTo: "93518.9",
+  executionFeeNative: "0",
+};
+const PYUSD_TO_USDG = { swapOrder: "stable-first", loanSymbol: "PYUSD", intermediateSymbol: "USDG" } as const;
+
+test("derives Stable.com terms, including a proportional token fee, from a status response", () => {
+  assert.deepEqual(stableTermsFromStatus(USDG_STATUS), {
+    minimumRaw: 1_000_000_000n,
+    maximumRaw: 1_000_000_000_000n,
+    tokenFeePpm: 0n,
+    nativeFeeSol: 6.288e-6,
+  });
+  const fee = stableTermsFromStatus({ ...USDG_STATUS, amountFrom: "3000", tokenFee: 1 });
+  assert.equal(fee.tokenFeePpm, 334n);
+});
+
+test("caches Stable.com terms per swap direction until they expire", () => {
+  rememberStableTerms(PYUSD_TO_USDG, USDG_STATUS, 1_000);
+  assert.equal(cachedStableTerms(PYUSD_TO_USDG, 2_000)?.minimumRaw, 1_000_000_000n);
+  assert.equal(
+    cachedStableTerms({ swapOrder: "dex-first", loanSymbol: "PYUSD", intermediateSymbol: "USDG" }, 2_000),
+    undefined,
+  );
+  assert.equal(cachedStableTerms(PYUSD_TO_USDG, 1_000 + 21_600_000), undefined);
+});
+
+test("an estimated Stable.com quote feeds the same capacity checks as a real one", () => {
+  const terms = stableTermsFromStatus(USDG_STATUS);
+  const quote = estimatedStableQuote(5_000_000_000n, 93_519_900_000n, terms, "USDG");
+  assert.equal(quote.outputRaw, 5_000_000_000n);
+  assert.equal(quote.status.estimated, true);
+  assert.deepEqual(
+    stableCapacity(quote.status, 1_000_000n, "PYUSD"),
+    stableCapacityRaw(93_519_900_000n, terms.minimumRaw, terms.maximumRaw, 1_000_000n, "PYUSD"),
+  );
+  const charged = estimatedStableQuote(3_000_000_000n, 93_519_900_000n, { ...terms, tokenFeePpm: 334n }, "USDG");
+  assert.equal(charged.tokenFeeRaw, 1_002_000n);
+  assert.equal(charged.outputRaw, 2_998_998_000n);
+});
+
+test("dex-first prerun skips Stable.com for candidates below the floor on the on-chain estimate", async () => {
+  const wallet = Keypair.generate();
+  const candidates = [
+    createMockMatchaQuote(wallet.publicKey, "0x", 9_990_000n),
+    createMockMatchaQuote(wallet.publicKey, "OKX", 9_980_000n),
+  ];
+  const origFetch = globalThis.fetch;
+  let fetches = 0;
+  (globalThis as any).fetch = async () => {
+    fetches += 1;
+    throw new Error("Stable.com must not be queried");
+  };
+  try {
+    await assert.rejects(
+      prerunCandidateQuotes(
+        { provider: "auto", loanSymbol: "PYUSD", loanMint: PYUSD_MINT, swapOrder: "dex-first", dexProvider: "metamatcha", probeComputeUnitLimit: 300000, keypair: wallet } as any,
+        { getMultipleAccountsInfo: async () => [] } as unknown as Connection,
+        wallet.publicKey,
+        undefined,
+        undefined,
+        10_000_000n,
+        true,
+        { ...candidates[0], candidates },
+        { inputRaw: 1n, outputRaw: 1n, tokenFeeRaw: 0n, nativeFeeSol: 0, status: USDG_STATUS } as any,
+        1n,
+        [],
+        [],
+        "11111111111111111111111111111111",
+        async () => 200_000,
+        undefined,
+        "kamino",
+        (inputRaw) => inputRaw,
+      ),
+      /estimated gross profit -0\.01 PYUSD is below scaled minimum/,
+    );
+    assert.equal(fetches, 0);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });
 
 test("stableCapacity applies the buffer and order maximum, and rejects unusable pools", () => {
