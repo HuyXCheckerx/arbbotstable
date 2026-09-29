@@ -1,5 +1,28 @@
 # Stablecoin Arbitrage Bot
 
+## Standalone LlamaSwap quotes
+
+`scripts/get_defillama_quotes.py` queries `swap-api.defillama.com` for Ethereum
+USDC, USDG, and PYUSD quotes. It uses the request format observed in LlamaSwap's
+frontend (`POST /dexAggregatorQuote`), which is separate from the documented
+DefiLlama Pro data API. Authentication compatibility depends on that service.
+
+Put `DEFILLAMA_SWAP_API_KEY=YOUR_KEY` in `.env.defillama` (Git-ignored), or set it
+as an environment variable. The script uses only a public taker address; it never
+signs, approves, or submits transactions and does not change sniper settings.
+
+```bash
+python scripts/get_defillama_quotes.py --sell USDG --buy PYUSD --amount 100
+python scripts/get_defillama_quotes.py --sell PYUSD --buy USDC --amount 1000 --protocol "1inch" --output logs/llama-quotes.json
+```
+
+The defaults compare `1inch` and `Matcha/0x v2`. `--amount` is in tokens, and
+`--slippage 0.1` means 0.1 percent. Use `--taker 0x...` to override the configured
+public executor. `--json` includes sanitized unsigned quote data. No quotes means
+exit status 1. A Cloudflare challenge is reported separately from API errors;
+it does not establish that a key is valid or invalid. Keys and authenticated URLs
+are omitted from error output.
+
 Ethereum and Solana stablecoin arbitrage bot with a live operational dashboard.
 The profit sniper checks both venue orders between Stable.com and MetaMatcha on
 Ethereum and Solana. Jupiter is an explicit Solana fallback, not the default.

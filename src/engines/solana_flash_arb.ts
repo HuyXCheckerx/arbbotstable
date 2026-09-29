@@ -1896,63 +1896,51 @@ async function getDexQuote(
   requestNumber: number,
   overrideMaxAccounts?: number,
 ): Promise<JupiterQuote> {
+  // Quotes come only from the configured provider. Falling back to another
+  // venue is opt-in, so a MetaMatcha failure surfaces (and pauses the route)
+  // instead of silently trading on a different DEX.
+  const fallbackToDflow = process.env.SOL_FLASH_ARB_FALLBACK_DFLOW === "true";
+  const fallbackToJupiter = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER === "true";
+  const jupiterQuote = () =>
+    getJupiterQuote(config, inputMint, outputMint, amountRaw, requestNumber, overrideMaxAccounts);
   if (config.dexProvider === "metamatcha") {
     try {
       const taker = config.subKeypair ? config.subKeypair.publicKey : wallet;
       return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, taker);
     } catch (error) {
-      const allowDflow = process.env.SOL_FLASH_ARB_FALLBACK_DFLOW !== "false";
-      if (allowDflow) {
+      if (fallbackToDflow) {
         console.warn(
           `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to DFlow DEX...`,
         );
         try {
           return await getDFlowQuote(config, inputMint, outputMint, amountRaw);
         } catch (dflowError) {
+          if (!fallbackToJupiter) throw dflowError;
           console.warn(
             `DFlow quote unavailable (${errorMessage(dflowError)}); falling back to Jupiter DEX...`,
           );
+          return await jupiterQuote();
         }
       }
-      const allowJupiter = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER !== "false";
-      if (!allowJupiter) throw error;
-      return await getJupiterQuote(
-        config,
-        inputMint,
-        outputMint,
-        amountRaw,
-        requestNumber,
-        overrideMaxAccounts,
+      if (!fallbackToJupiter) throw error;
+      console.warn(
+        `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to Jupiter DEX...`,
       );
+      return await jupiterQuote();
     }
   }
   if (config.dexProvider === "dflow") {
     try {
       return await getDFlowQuote(config, inputMint, outputMint, amountRaw);
     } catch (error) {
-      const allowJupiter = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER !== "false";
-      if (!allowJupiter) throw error;
+      if (!fallbackToJupiter) throw error;
       console.warn(
         `DFlow quote unavailable (${errorMessage(error)}); falling back to Jupiter DEX...`,
       );
-      return await getJupiterQuote(
-        config,
-        inputMint,
-        outputMint,
-        amountRaw,
-        requestNumber,
-        overrideMaxAccounts,
-      );
+      return await jupiterQuote();
     }
   }
-  return getJupiterQuote(
-    config,
-    inputMint,
-    outputMint,
-    amountRaw,
-    requestNumber,
-    overrideMaxAccounts,
-  );
+  return jupiterQuote();
 }
 
 async function getCapacitySizedCycle(
