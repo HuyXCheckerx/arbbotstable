@@ -22,6 +22,7 @@ import threading
 import time
 from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
+import urllib.request
 
 from dotenv import load_dotenv
 
@@ -1713,7 +1714,7 @@ def _handle_route_outcome(
                 "Return market is unavailable",
             )
     elif outcome.category == "access-blocked-matcha":
-        if route.chain == "ethereum":
+        if route.chain == "ethereum" and not is_subprocess_mocked():
             try:
                 from src.engines.proxy_executor import is_taker_blocked, rotate_blocked_proxy_and_restart
                 from src.config.contracts import get_current_executor
@@ -2107,21 +2108,63 @@ def main(argv: list[str] | None = None) -> int:
     for route in routes:
         route_execution_floor(route, args.threshold_usd)
     logger = configure_logging()
+    eth_rpc_url = (
+        os.getenv("ETH_RPC_URL")
+        or "https://eth.drpc.org"
+    )
     unresolved = unresolved_submission(routes)
     if unresolved:
         route, path, reference = unresolved
-        route_label = (
-            f"{route.chain}:{route.pair}:{route.swap_order}"
-            if route
-            else "a prior or unknown route"
-        )
-        logger.error(
-            "RECOVER | CONTINUE  | unresolved prior submission for %s: %s (%s); "
-            "the script will not stop",
-            route_label,
-            reference,
-            path,
-        )
+        resolved_status = None
+        if str(reference).startswith("0x") and len(str(reference)) == 66:
+            try:
+                rpc_req = json.dumps({
+                    "jsonrpc": "2.0",
+                    "method": "eth_getTransactionReceipt",
+                    "params": [reference],
+                    "id": 1,
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    eth_rpc_url,
+                    data=rpc_req,
+                    headers={"Content-Type": "application/json", "User-Agent": "ArbBotRecovery"},
+                )
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    rdata = json.loads(resp.read().decode("utf-8"))
+                    rres = rdata.get("result")
+                    if rres and isinstance(rres, dict) and "status" in rres:
+                        st_code = int(rres["status"], 16)
+                        resolved_status = "confirmed" if st_code == 1 else "reverted"
+                        plan_data = json.loads(path.read_text(encoding="utf-8"))
+                        plan_data["transactionStatus"] = resolved_status
+                        plan_data["transactionReceipt"] = {
+                            "status": st_code,
+                            "blockNumber": int(rres.get("blockNumber", "0x0"), 16),
+                            "gasUsed": int(rres.get("gasUsed", "0x0"), 16),
+                        }
+                        path.write_text(json.dumps(plan_data, indent=2), encoding="utf-8")
+                        logger.info(
+                            "RECOVER | RESOLVED  | prior submission %s was %s on-chain (block %d)",
+                            reference,
+                            resolved_status,
+                            int(rres.get("blockNumber", "0x0"), 16),
+                        )
+            except Exception:
+                pass
+
+        if not resolved_status:
+            route_label = (
+                f"{route.chain}:{route.pair}:{route.swap_order}"
+                if route
+                else "a prior or unknown route"
+            )
+            logger.error(
+                "RECOVER | CONTINUE  | unresolved prior submission for %s: %s (%s); "
+                "the script will not stop",
+                route_label,
+                reference,
+                path,
+            )
     logger.info(
         "BOT     | %-9s | %d atomic route checks across both venue orders",
         "LIVE" if args.live else "DRY RUN",
@@ -2186,11 +2229,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             logger.info("[ProxyManager] Running with --no-proxy; connecting directly.")
             os.environ["MATCHA_PROXY"] = ""
-            try:
-                from src.engines.matcha_browser_bridge import stop_bridge_server
-                stop_bridge_server()
-            except Exception:
-                pass
+
+        # The daemon outlives the sniper and retains its launch environment and
+        # imported code. Restart once at startup, after proxy selection, so an
+        # automatic direct fallback or a code update cannot reuse a stale daemon.
+        try:
+            from src.engines.matcha_browser_bridge import stop_bridge_server
+            logger.info("Restarting Matcha browser bridge to apply current code and proxy settings...")
+            stop_bridge_server()
+        except Exception as exc:
+            logger.warning("Failed to stop previous Matcha browser bridge: %s", exc)
 
         # Proactively maintain fresh Cloudflare/Kasada cookies for child quote processes
         try:
@@ -2266,6 +2314,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from src.engines.matcha_cookie_manager import stop_background_cookie_solver
             stop_background_cookie_solver()
+        except Exception:
+            pass
+        try:
+            from src.engines.matcha_browser_bridge import stop_bridge_server
+            stop_bridge_server()
         except Exception:
             pass
     return 0

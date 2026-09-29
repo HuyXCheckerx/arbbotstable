@@ -5,6 +5,11 @@ cd /d "%~dp0"
 set "ARGS=%*"
 if "%~1"=="" set "ARGS=--live --confirm-live EXECUTE_PROFIT_SNIPER"
 
+rem Clean up any orphaned background bridge holding port 18234 from previous runs
+for /f "tokens=5" %%a in ('netstat -ano -p tcp ^| findstr ":18234" ^| findstr "LISTENING"') do (
+  taskkill /F /T /PID %%a >nul 2>nul
+)
+
 if exist "%~dp0venv\Scripts\python.exe" (
   "%~dp0venv\Scripts\python.exe" sniper.py %ARGS%
 ) else (
