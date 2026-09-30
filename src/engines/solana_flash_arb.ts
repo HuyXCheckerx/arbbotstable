@@ -1,7 +1,7 @@
 import "dotenv/config";
 
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1739,6 +1739,138 @@ function runJsonHelper<T>(
   });
 }
 
+const METAMATCHA_SERVE_PREFIX = "@@ARBBOT_METAMATCHA@@";
+
+interface PendingHelperRequest {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+/**
+ * A MetaMatcha helper kept running between quotes (`--serve`), used only by
+ * the warm engine worker. It answers one request at a time; a concurrent
+ * quote uses a one-shot helper instead so quotes still run in parallel.
+ */
+class PersistentJsonHelper {
+  private readonly child: ChildProcessWithoutNullStreams;
+  private buffer = "";
+  private nextId = 1;
+  private pending: { id: number; request: PendingHelperRequest } | undefined;
+  exited = false;
+
+  constructor(executable: string, helperPath: string) {
+    this.child = spawn(executable, [helperPath, "--serve"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    // Never keep a finished engine process alive for an idle helper.
+    this.child.unref();
+    for (const stream of [this.child.stdin, this.child.stdout, this.child.stderr]) {
+      (stream as unknown as { unref?: () => void }).unref?.();
+    }
+    this.child.stderr.resume();
+    this.child.stdout.setEncoding("utf8");
+    this.child.stdout.on("data", (chunk: string) => this.onData(chunk));
+    this.child.stdin.on("error", () => undefined);
+    this.child.once("error", (error) => this.fail(new Error(`Could not start MetaMatcha helper: ${error.message}`)));
+    this.child.once("close", (code) => this.fail(new Error(`MetaMatcha helper exited with code ${code}`)));
+  }
+
+  get busy(): boolean {
+    return this.pending !== undefined;
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk;
+    let newline = this.buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = this.buffer.slice(0, newline).trim();
+      this.buffer = this.buffer.slice(newline + 1);
+      newline = this.buffer.indexOf("\n");
+      if (!line.startsWith(METAMATCHA_SERVE_PREFIX) || !this.pending) continue;
+      let response: { id?: number; ok?: boolean; result?: unknown; error?: string };
+      try {
+        response = JSON.parse(line.slice(METAMATCHA_SERVE_PREFIX.length));
+      } catch (error) {
+        this.settle(undefined, new Error(`MetaMatcha helper returned invalid JSON: ${errorMessage(error)}`));
+        continue;
+      }
+      if (response.id !== this.pending.id) continue;
+      if (response.ok) this.settle(response.result);
+      else this.settle(undefined, new Error(response.error || "MetaMatcha quote failed"));
+    }
+  }
+
+  private settle(value: unknown, error?: Error): void {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = undefined;
+    clearTimeout(pending.request.timer);
+    if (error) pending.request.reject(error);
+    else pending.request.resolve(value);
+  }
+
+  private fail(error: Error): void {
+    this.exited = true;
+    this.settle(undefined, error);
+  }
+
+  request<T>(payload: JsonRecord, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const id = this.nextId++;
+      const timer = setTimeout(() => {
+        // Same as a one-shot helper: stop the one that overran.
+        this.kill();
+        this.fail(new Error(`MetaMatcha helper timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending = { id, request: { resolve: resolve as (value: unknown) => void, reject, timer } };
+      // The helper inherits the environment a one-shot spawn would get now.
+      this.child.stdin.write(`${JSON.stringify({ id, env: process.env, request: payload })}\n`);
+    });
+  }
+
+  kill(): void {
+    this.exited = true;
+    this.child.kill();
+  }
+}
+
+let persistentMatchaHelpersEnabled = false;
+let persistentMatchaHelper: PersistentJsonHelper | undefined;
+
+/** Called by the warm engine worker; one-shot CLI runs keep one-shot helpers. */
+export function enablePersistentMatchaHelper(enabled = true): void {
+  persistentMatchaHelpersEnabled = enabled;
+  if (!enabled) {
+    persistentMatchaHelper?.kill();
+    persistentMatchaHelper = undefined;
+  }
+}
+
+function runMatchaHelper<T>(
+  executable: string,
+  helperPath: string,
+  payload: JsonRecord,
+  timeoutMs: number,
+): Promise<T> {
+  if (!persistentMatchaHelpersEnabled) {
+    return runJsonHelper<T>(executable, helperPath, payload, timeoutMs);
+  }
+  if (persistentMatchaHelper?.exited) persistentMatchaHelper = undefined;
+  if (!persistentMatchaHelper) {
+    try {
+      persistentMatchaHelper = new PersistentJsonHelper(executable, helperPath);
+    } catch {
+      return runJsonHelper<T>(executable, helperPath, payload, timeoutMs);
+    }
+  }
+  if (persistentMatchaHelper.busy) {
+    return runJsonHelper<T>(executable, helperPath, payload, timeoutMs);
+  }
+  return persistentMatchaHelper.request<T>(payload, timeoutMs);
+}
+
 export async function getMetaMatchaQuote(
   config: Pick<
     Config,
@@ -1768,7 +1900,7 @@ export async function getMetaMatchaQuote(
   let lastError: unknown;
   for (let attempt = 1; attempt <= config.httpAttempts; attempt += 1) {
     try {
-      const quote = await runJsonHelper<JupiterQuote>(
+      const quote = await runMatchaHelper<JupiterQuote>(
         config.matchaPython,
         config.matchaHelperPath,
         {

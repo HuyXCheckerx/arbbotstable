@@ -23,6 +23,64 @@ def response(buy_amount: int, *, taker: str = "wallet", success: bool = True):
     }
 
 
+class MetaMatchaServeTests(unittest.TestCase):
+    def serve(self, lines):
+        import io
+        import json
+        import os
+
+        stdout = io.StringIO()
+        saved_environment = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved_environment)))
+        with patch.object(metamatcha.sys, "stdin", io.StringIO("".join(line + "\n" for line in lines))), \
+                patch.object(metamatcha.sys, "stdout", stdout):
+            self.assertEqual(metamatcha.serve(), 0)
+        prefix = metamatcha.SERVE_RESPONSE_PREFIX
+        return [json.loads(line[len(prefix):]) for line in stdout.getvalue().splitlines()
+                if line.startswith(prefix)], stdout.getvalue()
+
+    def test_answers_each_request_with_its_environment_and_a_fresh_session(self):
+        import json
+        import os
+
+        seen = []
+
+        def fake_fetch(request):
+            seen.append((request["amount"], os.environ.get("MATCHA_PROXY"), metamatcha._SHARED_SESSION))
+            metamatcha._SHARED_SESSION = object()
+            print("dependency chatter")
+            if request["amount"] == "13":
+                raise RuntimeError("HTTP 403: access denied")
+            return {"provider": "MetaMatcha", "inAmount": request["amount"]}
+
+        with patch.object(metamatcha, "fetch_quote", side_effect=fake_fetch):
+            responses, raw = self.serve([
+                json.dumps({"id": 1, "env": {"MATCHA_PROXY": "http://a"}, "request": {"amount": "5"}}),
+                "",
+                json.dumps({"id": 2, "env": {"MATCHA_PROXY": "http://b"}, "request": {"amount": "13"}}),
+                json.dumps({"id": 3, "request": "not an object"}),
+            ])
+
+        self.assertEqual(seen, [("5", "http://a", None), ("13", "http://b", None)])
+        self.assertEqual(responses, [
+            {"id": 1, "ok": True, "result": {"provider": "MetaMatcha", "inAmount": "5"}},
+            {"id": 2, "ok": False, "error": "MetaMatcha quote failed: HTTP 403: access denied"},
+            {"id": 3, "ok": False,
+             "error": "MetaMatcha quote failed: request must be a JSON object"},
+        ])
+        self.assertNotIn("dependency chatter", raw)
+
+    def test_serving_helper_leaves_cookie_solving_to_the_sniper(self):
+        from src.engines import matcha_cookie_manager
+
+        original = matcha_cookie_manager.trigger_background_solve
+        self.addCleanup(setattr, matcha_cookie_manager, "trigger_background_solve", original)
+        with patch.object(matcha_cookie_manager, "start_background_cookie_solver") as start:
+            self.serve([])
+            matcha_cookie_manager.trigger_background_solve()
+        start.assert_not_called()
+
+
 class MetaMatchaSolanaTests(unittest.TestCase):
     def test_json_access_denials_keep_status_and_provider_context(self):
         for status in (401, 403):

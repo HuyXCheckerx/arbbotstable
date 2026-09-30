@@ -109,7 +109,8 @@ async function runJob(engineMain: (argv: string[]) => Promise<void>, request: Wo
 }
 
 async function serve(): Promise<void> {
-  const { main: engineMain } = await import("./solana_flash_arb.js");
+  const { main: engineMain, enablePersistentMatchaHelper } = await import("./solana_flash_arb.js");
+  enablePersistentMatchaHelper();
   writeProtocol(`${RESPONSE_PREFIX}${JSON.stringify({ ready: true, pid: process.pid })}\n`);
 
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

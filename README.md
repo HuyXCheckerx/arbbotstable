@@ -613,6 +613,14 @@ sniper uses one-shot processes for ten minutes. Set
 `SNIPER_SOLANA_PERSISTENT_WORKERS=false` to always use one-shot processes.
 Worker startup diagnostics go to `logs/solana-worker.log`.
 
+Inside a warm worker, the MetaMatcha quote helper (`metamatcha_solana.py
+--serve`) also stays running, saving ~200 ms of Python startup per quote. Each
+quote sends the worker's current environment and gets a fresh HTTP session, so
+proxy and cookie changes apply as they would to a new process. A second quote
+requested while the helper is busy uses a one-shot helper, so quotes still run
+in parallel. A helper that overruns is killed and replaced. Warm helpers only
+read the cookie cache; the sniper process keeps solving cookies.
+
 The Ethereum worker subscribes to `newHeads` over WebSocket (`ETH_WS_URL`, or
 `ETH_RPC_URL` with `https` replaced by `wss`). The base-fee gate and the
 transaction builder use a pushed header while it is under 14 s old; otherwise

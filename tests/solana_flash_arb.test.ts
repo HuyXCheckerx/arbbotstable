@@ -23,6 +23,7 @@ import {
   formatRaw,
   getDFlowQuote,
   getMetaMatchaQuote,
+  enablePersistentMatchaHelper,
   intermediateTokenProgram,
   isBlockheightExpiry,
   isTwoHopJupiterRoute,
@@ -1337,3 +1338,116 @@ test("prerunCandidateQuotes automatically falls back from Marginfi to Kamino whe
 
 
 
+
+function servingMetaMatchaHelper(t: TestContext) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "metamatcha-serve-"));
+  const helperPath = path.join(directory, "helper.cjs");
+  const logPath = path.join(directory, "requests.log");
+  enablePersistentMatchaHelper();
+  t.after(() => {
+    enablePersistentMatchaHelper(false);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  // Serves when started with --serve; otherwise behaves as a one-shot helper.
+  fs.writeFileSync(helperPath, `
+    const fs = require("node:fs");
+    const readline = require("node:readline");
+    const logPath = ${JSON.stringify(logPath)};
+    const PREFIX = "@@ARBBOT_METAMATCHA@@";
+    function answer(request, env) {
+      fs.appendFileSync(logPath, JSON.stringify({ pid: process.pid, serve: process.argv.includes("--serve"), marker: env.FIXTURE_MARKER || "" }) + "\\n");
+      if (request.amount === "13") throw new Error("MetaMatcha quote failed: HTTP 403: access denied");
+      return {
+        provider: "MetaMatcha",
+        inputMint: request.inputMint,
+        outputMint: request.outputMint,
+        inAmount: request.amount,
+        outAmount: "10000001",
+        otherAmountThreshold: "10000001",
+        swapMode: "ExactIn",
+        slippageBps: request.slippageBps,
+        routePlan: [{ swapInfo: { label: "fixture" } }],
+        serializedTransaction: "Zml4dHVyZQ=="
+      };
+    }
+    if (process.argv.includes("--serve")) {
+      const lines = readline.createInterface({ input: process.stdin });
+      lines.on("line", (line) => {
+        const message = JSON.parse(line);
+        const delay = message.request.amount === "20000000" ? 300 : 0;
+        const respond = () => {
+          if (message.request.amount === "777") return; // never answers
+          let response;
+          try {
+            response = { id: message.id, ok: true, result: answer(message.request, message.env) };
+          } catch (error) {
+            response = { id: message.id, ok: false, error: error.message };
+          }
+          process.stdout.write("noise\\n" + PREFIX + JSON.stringify(response) + "\\n");
+        };
+        setTimeout(respond, delay);
+      });
+    } else {
+      const request = JSON.parse(fs.readFileSync(0, "utf8"));
+      process.stdout.write(JSON.stringify(answer(request, process.env)));
+    }
+  `);
+  return {
+    config: {
+      matchaApiBase: "https://unused.invalid",
+      matchaAggregators: ["0x"],
+      matchaPython: process.execPath,
+      matchaHelperPath: helperPath,
+      httpTimeoutMs: 1_000,
+      httpAttempts: 1,
+    },
+    requests: () => fs.existsSync(logPath)
+      ? fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+      : [],
+  };
+}
+
+test("a warm MetaMatcha helper serves repeated quotes with the current environment", async (t) => {
+  const fixture = servingMetaMatchaHelper(t);
+  process.env.FIXTURE_MARKER = "first";
+  t.after(() => delete process.env.FIXTURE_MARKER);
+  const first = await getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT);
+  process.env.FIXTURE_MARKER = "second";
+  const second = await getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT);
+  assert.equal(first.outAmount, "10000001");
+  assert.equal(second.inAmount, "10000000");
+  const requests = fixture.requests();
+  assert.deepEqual(requests.map((request) => request.marker), ["first", "second"]);
+  assert.ok(requests.every((request) => request.serve));
+  assert.equal(requests[0].pid, requests[1].pid);
+});
+
+test("a warm MetaMatcha helper keeps the one-shot error text", async (t) => {
+  const fixture = servingMetaMatchaHelper(t);
+  await assert.rejects(
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 13n, USDC_MINT),
+    { message: "MetaMatcha quote failed: HTTP 403: access denied" },
+  );
+});
+
+test("a concurrent quote uses a one-shot helper instead of waiting", async (t) => {
+  const fixture = servingMetaMatchaHelper(t);
+  const quotes = await Promise.all([
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 20_000_000n, USDC_MINT),
+    getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT),
+  ]);
+  assert.equal(quotes.length, 2);
+  assert.deepEqual(fixture.requests().map((request) => request.serve).sort(), [false, true]);
+});
+
+test("a warm MetaMatcha helper that overruns is replaced", async (t) => {
+  const fixture = servingMetaMatchaHelper(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const overrun = getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 777n, USDC_MINT);
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(120_000);
+  await assert.rejects(overrun, /MetaMatcha helper timed out after 120000ms/);
+  t.mock.timers.reset();
+  const quote = await getMetaMatchaQuote(fixture.config, PYUSD_MINT, USDG_MINT, 10_000_000n, USDC_MINT);
+  assert.equal(quote.provider, "MetaMatcha");
+});

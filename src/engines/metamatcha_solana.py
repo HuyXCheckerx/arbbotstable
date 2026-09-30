@@ -410,7 +410,69 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
     return best_quote
 
 
+SERVE_RESPONSE_PREFIX = "@@ARBBOT_METAMATCHA@@"
+
+
+def serve() -> int:
+    """Answer one JSON request per stdin line until stdin closes.
+
+    Used by the warm Solana engine worker to skip interpreter startup and
+    imports per quote. Each request carries the environment a one-shot helper
+    would inherit, and gets a fresh HTTP session so proxy and cookie changes
+    apply exactly as they would to a new process.
+    """
+    global _SHARED_SESSION
+    import contextlib
+
+    try:
+        from . import matcha_cookie_manager as cookie_manager
+    except ImportError:
+        try:
+            import matcha_cookie_manager as cookie_manager
+        except ImportError:
+            cookie_manager = None
+    if cookie_manager is not None:
+        # A one-shot helper exits before a solver it starts could finish; a
+        # long-lived one would keep a browser solver per process. The sniper
+        # process owns cookie solving, so helpers only read its cache.
+        cookie_manager.trigger_background_solve = lambda: None
+
+    protocol = sys.stdout
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        request_id = None
+        try:
+            message = json.loads(line)
+            request_id = message.get("id")
+            environment = message.get("env")
+            if isinstance(environment, dict):
+                os.environ.clear()
+                os.environ.update({str(k): str(v) for k, v in environment.items()})
+            request = message.get("request")
+            if not isinstance(request, dict):
+                raise ValueError("request must be a JSON object")
+            _SHARED_SESSION = None
+            # Anything a dependency prints must not corrupt the protocol.
+            with contextlib.redirect_stdout(sys.stderr):
+                result = fetch_quote(request)
+            response = {"id": request_id, "ok": True, "result": result}
+        except Exception as exc:
+            response = {
+                "id": request_id,
+                "ok": False,
+                "error": f"MetaMatcha quote failed: {exc}",
+            }
+        finally:
+            _SHARED_SESSION = None
+        protocol.write(SERVE_RESPONSE_PREFIX + json.dumps(response, separators=(",", ":")) + "\n")
+        protocol.flush()
+    return 0
+
+
 def main() -> int:
+    if "--serve" in sys.argv[1:]:
+        return serve()
     try:
         request = json.load(sys.stdin)
         if not isinstance(request, dict):
