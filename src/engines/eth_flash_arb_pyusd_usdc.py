@@ -2956,7 +2956,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ArbError(
             "route is below the maximum-gas net-profit floor: "
             f"{raw_to_signed_amount(predicted_net or 0)} {loan_symbol} < "
-            f"{raw_to_amount(effective_min_net_profit)} {loan_symbol}"
+            f"{raw_to_amount(effective_min_net_profit)} {loan_symbol} "
+            f"(gross profit: {raw_to_signed_amount(gross_profit)} {loan_symbol}, "
+            f"execution cost: {raw_to_amount(maximum_execution_cost)} {loan_symbol})"
         )
     if args.send:
         submit_transaction_plan(

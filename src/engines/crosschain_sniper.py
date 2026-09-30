@@ -739,6 +739,16 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
     if category == "unstable-capacity":
         return "Stable.com capacity changed repeatedly while the route was being sized"
     if category == "unprofitable":
+        if "maximum-gas net-profit floor" in lowered:
+            breakdown = re.search(
+                r"floor:\s*([-+\d.]+\s+[A-Z]+)\s*<\s*([-+\d.]+\s+[A-Z]+)(?:\s*\((.*?)\))?",
+                detail,
+                re.IGNORECASE,
+            )
+            if breakdown:
+                net_str, req_str = breakdown.group(1), breakdown.group(2)
+                notes = f" ({breakdown.group(3)})" if breakdown.group(3) else ""
+                return f"net {net_str} below required {req_str}{notes}"
         comparison = re.search(
             r"(?:floor:\s*|guaranteed net\s+)([-+\d.]+\s+[A-Z]+)\s+"
             r"(?:is below|<)\s+([-+\d.]+\s+[A-Z]+)",
@@ -950,8 +960,9 @@ def profit_metrics(route: Route, stdout: str, stderr: str = "") -> tuple[str | N
     patterns = {
         "gross": (
             r"Guaranteed gross result:\s*([-+\d.]+)",
-            r"guaranteed gross\s+([-+\d.]+)",
             r"Gross Profit:\s*([-+\d.]+)",
+            r"gross profit:\s*([-+\d.]+)",
+            r"guaranteed gross\s+([-+\d.]+)",
             r"quoted route is below (?:the )?on-chain profit floor:\s*([-+\d.]+)",
         ),
         "net": (
@@ -959,17 +970,18 @@ def profit_metrics(route: Route, stdout: str, stderr: str = "") -> tuple[str | N
             r"Predicted Net Profit:\s*([-+\d.]+)",
             r"predicted net\s+([-+\d.]+)",
             r"guaranteed net\s+([-+\d.]+)",
+            r"route is below the maximum-gas net-profit floor:\s*([-+\d.]+)",
         ),
     }
 
-    def first_match(candidates: tuple[str, ...]) -> str | None:
+    def last_match(candidates: tuple[str, ...]) -> str | None:
         for pattern in candidates:
-            match = re.search(pattern, combined, re.IGNORECASE)
-            if match:
-                return _profit_value(match.group(1))
+            matches = list(re.finditer(pattern, combined, re.IGNORECASE))
+            if matches:
+                return _profit_value(matches[-1].group(1))
         return None
 
-    return first_match(patterns["gross"]), first_match(patterns["net"])
+    return last_match(patterns["gross"]), last_match(patterns["net"])
 
 
 class SniperDashboardFeed:

@@ -43,6 +43,7 @@ for (const t of (MARGINFI_IDL as any)?.types ?? []) {
 }
 import {
   AddressLookupTableAccount,
+  AddressLookupTableProgram,
   Commitment,
   ComputeBudgetProgram,
   Connection,
@@ -677,6 +678,22 @@ export async function ensureSubAccountAtas(
     { mint: USDG_MINT, program: intermediateTokenProgram(USDG_MINT), name: "USDG" },
   ];
   const missingIxs: TransactionInstruction[] = [];
+
+  // Check sub-account SOL balance. Aggregators (like OKX/Phoenix) require the sub-taker to hold rent.
+  const subBal = await connection.getBalance(subKeypair.publicKey).catch(() => 0);
+  if (subBal < 5_000_000) {
+    console.log(
+      `Funding sub-account ${subKeypair.publicKey.toBase58()} with 0.005 SOL for rent buffer...`,
+    );
+    missingIxs.push(
+      SystemProgram.transfer({
+        fromPubkey: masterKeypair.publicKey,
+        toPubkey: subKeypair.publicKey,
+        lamports: 5_000_000n,
+      }),
+    );
+  }
+
   for (const { mint, program, name } of mints) {
     const ata = getAssociatedTokenAddressSync(mint, subKeypair.publicKey, false, program);
     const info = await connection.getAccountInfo(ata);
@@ -694,7 +711,6 @@ export async function ensureSubAccountAtas(
     }
   }
   if (!missingIxs.length) {
-    console.log("All sub-account ATAs already initialized.");
     return;
   }
   const latest = await connection.getLatestBlockhash("confirmed");
@@ -714,7 +730,73 @@ export async function ensureSubAccountAtas(
     },
     "confirmed",
   );
-  console.log(`Sub-account ATAs initialized successfully! Signature: ${sig}`);
+  console.log(`Sub-account setup initialized successfully! Signature: ${sig}`);
+}
+
+export async function ensureAltAccounts(
+  connection: Connection,
+  keypair: Keypair,
+  customAltAddress: PublicKey | undefined,
+  requiredAccounts: PublicKey[],
+): Promise<AddressLookupTableAccount | undefined> {
+  if (!customAltAddress) return undefined;
+  try {
+    const altRes = await connection.getAddressLookupTable(customAltAddress);
+    if (!altRes.value) return undefined;
+    const table = altRes.value;
+    if (!table.state.authority || !table.state.authority.equals(keypair.publicKey)) {
+      return table;
+    }
+    const existing = new Set(table.state.addresses.map((a) => a.toBase58()));
+    const missing = requiredAccounts.filter(
+      (a) => !existing.has(a.toBase58()) && !a.equals(keypair.publicKey),
+    );
+    if (!missing.length) return table;
+
+    const dedupMissing = Array.from(new Map(missing.map((m) => [m.toBase58(), m])).values());
+    console.log(
+      `[ALT Maintenance] Auto-adding ${dedupMissing.length} new accounts to custom Address Lookup Table...`,
+    );
+    while (dedupMissing.length > 0) {
+      const batch = dedupMissing.splice(0, 25);
+      const extendIx = AddressLookupTableProgram.extendLookupTable({
+        payer: keypair.publicKey,
+        authority: keypair.publicKey,
+        lookupTable: customAltAddress,
+        addresses: batch,
+      });
+      const latest = await connection.getLatestBlockhash("confirmed");
+      const msg = new TransactionMessage({
+        payerKey: keypair.publicKey,
+        recentBlockhash: latest.blockhash,
+        instructions: [
+          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
+          extendIx,
+        ],
+      }).compileToV0Message();
+      const tx = new VersionedTransaction(msg);
+      tx.sign([keypair]);
+      const sig = await connection.sendTransaction(tx);
+      await connection.confirmTransaction(
+        {
+          signature: sig,
+          blockhash: latest.blockhash,
+          lastValidBlockHeight: latest.lastValidBlockHeight,
+        },
+        "confirmed",
+      );
+      console.log(`[ALT Maintenance] Extended ALT: ${sig}`);
+      if (dedupMissing.length > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const refreshed = await connection.getAddressLookupTable(customAltAddress);
+    return refreshed.value ?? table;
+  } catch (err) {
+    console.warn("[ALT Maintenance] Auto-extend notice:", err);
+    return undefined;
+  }
 }
 
 function readConfig(cli: CliOptions): Config {
@@ -2301,13 +2383,12 @@ async function getSwapLeg(
     const withoutComputeBudget = decompiled.instructions.filter(
       (instruction) => !instruction.programId.equals(ComputeBudgetProgram.programId),
     );
-    const ataCreates = withoutComputeBudget.filter(
-      (instruction) =>
-        instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) &&
-        instruction.data.length === 1 &&
-        instruction.data[0] === 1 &&
-        instruction.keys.length >= 2,
-    );
+    const isAtaCreate = (instruction: TransactionInstruction) =>
+      instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) &&
+      (instruction.data.length === 0 ||
+        (instruction.data.length === 1 && (instruction.data[0] === 0 || instruction.data[0] === 1))) &&
+      instruction.keys.length >= 2;
+    const ataCreates = withoutComputeBudget.filter(isAtaCreate);
     const ataInfos = ataCreates.length
       ? await connection.getMultipleAccountsInfo(
           ataCreates.map((instruction) => instruction.keys[1].pubkey),
@@ -3275,7 +3356,7 @@ export async function prerunCandidateQuotes(
   for (const res of results) {
     if (res.executable) {
       console.log(
-        `  - ${res.aggregatorName}: PASSED (${res.executable.probeUnits.toLocaleString()} compute units, guaranteed gross +${formatRaw(res.grossProfitRaw)} ${config.loanSymbol})`,
+        `  - ${res.aggregatorName}: PASSED (${res.executable.probeUnits.toLocaleString()} compute units, candidate gross +${formatRaw(res.grossProfitRaw)} ${config.loanSymbol})`,
       );
     } else if (res.isPoisoned) {
       console.log(
@@ -3341,7 +3422,7 @@ export async function prerunCandidateQuotes(
   const winning = validCandidates[0];
   if (results.length > 1) {
     console.log(
-      `[Atomic Prerun] Selected best executable quote: ${winning.aggregatorName} (guaranteed gross +${formatRaw(winning.grossProfitRaw)} ${config.loanSymbol})`,
+      `[Atomic Prerun] Selected best executable quote: ${winning.aggregatorName} (candidate gross +${formatRaw(winning.grossProfitRaw)} ${config.loanSymbol})`,
     );
   }
   return winning;
@@ -4114,7 +4195,7 @@ async function main(): Promise<void> {
     config.maximumLoanAmountRaw,
   );
 
-  console.log(`Guaranteed gross result: ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol}`);
+  console.log(`Initial quoted gross result: ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol}`);
   if (loanAmountRaw < config.maximumLoanAmountRaw) {
     console.log(
       `Scaled minimum profit required: ${formatRaw(effectiveMinGrossRaw)} ${config.loanSymbol} (scaled proportionally from ${formatRaw(config.minimumGrossProfitRaw)} ${config.loanSymbol} base for ${formatRaw(loanAmountRaw)}/${formatRaw(config.maximumLoanAmountRaw)} principal)`,
@@ -4144,6 +4225,25 @@ async function main(): Promise<void> {
   const customLookupTables = config.customLookupTableAddresses.length
     ? await fetchLookupTables(connection, config.customLookupTableAddresses)
     : [];
+
+  if (config.customLookupTableAddresses.length > 0 && customLookupTables.length > 0) {
+    const coreAccounts = [
+      ...(config.subKeypair ? [config.subKeypair.publicKey] : []),
+      new PublicKey("DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH"),
+      new PublicKey("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"),
+      new PublicKey("proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u"),
+      new PublicKey("Sett1erwx2eqT5A8uvu8GBxDFT2W5TNnhirL7hLmb8m"),
+      new PublicKey("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"),
+      new PublicKey("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms"),
+      new PublicKey("GVJfHJsvrsWZmVj2JVQ3KyY1n7azyi8Z2FdBPxucUe58"),
+      new PublicKey("Cn1qKVjUdtMMp7KrLxhrMkVSPbmU3q64VLdaz911n2Wx"),
+      new PublicKey("EXMcKF76kmBUH8xZ5fi1jv3ezh3eVQCeL4rQbpjCRxvF"),
+      new PublicKey("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"),
+      new PublicKey("7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF"),
+      new PublicKey("9DrvZvyWh1HuAoZxvYWMvkf2XCzryCpGgHqrMjyDWpmo"),
+    ];
+    await ensureAltAccounts(connection, config.keypair, config.customLookupTableAddresses[0], coreAccounts);
+  }
   const latest = await connection.getLatestBlockhash(config.commitment);
 
   if (isTwoHop && secondJupiterQuote) {
@@ -4366,6 +4466,7 @@ async function main(): Promise<void> {
   if (kaminoFeeRaw > 0n) {
     console.log(`Kamino flash loan fee: ${formatRaw(kaminoFeeRaw)} ${config.loanSymbol}`);
   }
+  console.log(`Guaranteed gross result: ${formatRaw(cycle.grossProfitRaw)} ${config.loanSymbol}`);
   console.log(`Guaranteed net result: ${formatRaw(netProfitRaw)} ${config.loanSymbol}`);
 
   const stableFromSymbol = stableInputSymbol(

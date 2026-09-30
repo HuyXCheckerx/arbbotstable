@@ -19,6 +19,7 @@ import {
 } from "@solana/spl-token";
 import { Project0Client, getConfig, AssetTag } from "@0dotxyz/p0-ts-sdk";
 import bs58 from "bs58";
+import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
@@ -182,6 +183,60 @@ async function main(): Promise<void> {
     console.warn("Marginfi dynamic discovery failed; proceeding with base accounts:", err);
   }
 
+  // 4.1 Kamino Core & Reserves
+  const KAMINO_PROGRAM_ID = new PublicKey("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+  const KAMINO_MARKET_ID = new PublicKey("7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF");
+  const KAMINO_AUTHORITY = new PublicKey("9DrvZvyWh1HuAoZxvYWMvkf2XCzryCpGgHqrMjyDWpmo");
+  accountsToInclude.push(KAMINO_PROGRAM_ID, KAMINO_MARKET_ID, KAMINO_AUTHORITY);
+
+  const kaminoReserves = [
+    // PYUSD
+    new PublicKey("2gc9Dm1eB6UgVYFBUN9bWks6Kes9PbWSaPaa9DqyvEiN"),
+    new PublicKey("Gm2itCNPBpBSSrgCA194pmErjwHAFVpvBBFvpdTF5LuJ"),
+    new PublicKey("BcLJRx7GbyX2Jj8RFpYDnEE47Tm36wSskLnm7ALarEC1"),
+    // USDG
+    new PublicKey("ESCkPWKHmgNE7Msf77n9yzqJd5kQVWWGy3o5Mgxhvavp"),
+    new PublicKey("DGBo8HmL7pBWBZLGePjHQ73JKRE37HVZ7ZbjA2FYUZHZ"),
+    new PublicKey("39M8hy7EUypjxsHqsZQmNQqXGpknCwoCXzF7r8WMBbAs"),
+    // USDC
+    new PublicKey("D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59"),
+    new PublicKey("Bgq7trRgVMeq33yt235zM2onQ4bRDBsY5EWiTetF4qw6"),
+    new PublicKey("BbDUrk1bVtSixgQsPLBJFZEF7mwGstnD5joA1WzYvYFX"),
+    // USDT
+    new PublicKey("H3t6qZ1JkguCNTi9uzVKqQ7dvt2cum4XiXWom6Gn5e5S"),
+    new PublicKey("2Eff8Udy2G2gzNcf2619AnTx3xM4renEv4QrHKjS1o9N"),
+    new PublicKey("ARCZqsnUpvPffquPjZR3sxpvScLQdbfZ5BGf3SZvyij7"),
+  ];
+  accountsToInclude.push(...kaminoReserves);
+
+  // 4.2 DEX Aggregators & Manifest Orderbook Markets
+  accountsToInclude.push(
+    new PublicKey("DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH"), // DFlow
+    new PublicKey("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"), // Jupiter v6
+    new PublicKey("proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u"), // OKX DEX router
+    new PublicKey("Sett1erwx2eqT5A8uvu8GBxDFT2W5TNnhirL7hLmb8m"), // 0x Settler
+    new PublicKey("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"), // Whirlpool
+    new PublicKey("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms"), // Manifest
+    new PublicKey("GVJfHJsvrsWZmVj2JVQ3KyY1n7azyi8Z2FdBPxucUe58"), // Manifest PYUSD/USDC
+    new PublicKey("Cn1qKVjUdtMMp7KrLxhrMkVSPbmU3q64VLdaz911n2Wx"), // Manifest PYUSD/USDG
+    new PublicKey("EXMcKF76kmBUH8xZ5fi1jv3ezh3eVQCeL4rQbpjCRxvF"), // Manifest USDC/USDG
+  );
+
+  // 4.3 Sub-Takers & their ATAs (Indices 1 to 20)
+  for (let idx = 1; idx <= 20; idx++) {
+    const seed = createHash("sha256")
+      .update(wallet.secretKey)
+      .update(Buffer.from(`matcha_sub_taker_v${idx}`))
+      .digest();
+    const subKp = Keypair.fromSeed(new Uint8Array(seed));
+    accountsToInclude.push(subKp.publicKey);
+    for (const mint of [USDC_MINT, PYUSD_MINT, USDG_MINT]) {
+      const prog = tokenProgramForMint(mint);
+      const subAta = getAssociatedTokenAddressSync(mint, subKp.publicKey, false, prog);
+      accountsToInclude.push(subAta);
+    }
+  }
+
   // 5. Deduplicate and remove wallet itself (signers cannot be indexed via ALT)
   const uniqueMap = new Map<string, PublicKey>();
   for (const acc of accountsToInclude) {
@@ -254,6 +309,10 @@ async function main(): Promise<void> {
     });
     const sig = await sendAndConfirm(connection, wallet, [extendIx]);
     console.log(`Extend Tx confirmed: ${sig}`);
+    if (addressesToAdd.length > 0) {
+      console.log("Waiting 2.5s for slot commit before next batch...");
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
   }
 
   console.log("Waiting 2 slots for lookup table activation on-chain...");
