@@ -264,6 +264,35 @@ test("does not retry a definitive Jupiter HTTP 400", async () => {
   }
 });
 
+for (const status of [429, 500]) {
+  test(`caps HTTP ${status} Retry-After sleeps at ten seconds`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response("temporarily unavailable", {
+          status,
+          headers: { "retry-after": "3600" },
+        })
+        : new Response(JSON.stringify({ quote: "fresh" }));
+    });
+    const quote = fetchJson(
+      "https://api.jup.ag/swap/v1/quote",
+      {},
+      { httpTimeoutMs: 60_000, httpAttempts: 2 },
+      "Jupiter quote",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls, 1);
+    t.mock.timers.tick(9_999);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    assert.deepEqual(await quote, { quote: "fresh" });
+    assert.equal(calls, 2);
+  });
+}
+
 function metaMatchaHelperFixture(t: TestContext, failures: string[]) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "metamatcha-quote-test-"));
   const helperPath = path.join(directory, "helper.cjs");
@@ -398,9 +427,54 @@ test("does not treat one competitor's denial or a rate limit as a MetaMatcha den
 
 test("a recorded MetaMatcha denial expires after its cooldown", () => {
   recordMetaMatchaDenial("MetaMatcha /api/competitions returned HTTP 403", 1_000);
-  const cooldownMs = 3_600_000;
+  const cooldownMs = 10_000;
   assert.equal(metaMatchaDenialRemainingMs(1_000), cooldownMs);
   assert.equal(metaMatchaDenialRemainingMs(1_000 + cooldownMs), 0);
+});
+
+test("caps configured MetaMatcha denial cooldowns while retaining shorter settings", (t) => {
+  const previous = process.env.SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS;
+  t.after(() => {
+    if (previous === undefined) delete process.env.SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS;
+    else process.env.SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS = previous;
+  });
+  for (const [setting, expected] of [["3600", 10_000], ["5", 5_000], ["0", 0], ["invalid", 10_000], ["Infinity", 10_000], ["-1", 10_000]] as const) {
+    process.env.SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS = setting;
+    recordMetaMatchaDenial("HTTP 403", 1_000);
+    assert.equal(metaMatchaDenialRemainingMs(1_000), expected, setting);
+    assert.equal(metaMatchaDenialRemainingMs(11_000), 0, setting);
+  }
+});
+
+test("expires old persisted hour-long MetaMatcha denials using their original start time", () => {
+  const statePath = path.join(runtimeStateDir, "solana-metamatcha-denial.json");
+  fs.writeFileSync(statePath, JSON.stringify({
+    until: 3_601_000,
+    recordedAt: new Date(1_000).toISOString(),
+  }));
+  assert.equal(metaMatchaDenialRemainingMs(21_000), 0);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).until, 11_000);
+});
+
+test("migrates a recent persisted MetaMatcha denial without extending it on later checks", () => {
+  const statePath = path.join(runtimeStateDir, "solana-metamatcha-denial.json");
+  fs.writeFileSync(statePath, JSON.stringify({
+    until: 3_601_000,
+    recordedAt: new Date(1_000).toISOString(),
+  }));
+  assert.equal(metaMatchaDenialRemainingMs(6_000), 5_000);
+  assert.equal(metaMatchaDenialRemainingMs(9_000), 2_000);
+  assert.equal(metaMatchaDenialRemainingMs(11_000), 0);
+});
+
+test("persists a bounded MetaMatcha denial migration when the saved start time is missing or invalid", () => {
+  const statePath = path.join(runtimeStateDir, "solana-metamatcha-denial.json");
+  for (const recordedAt of [undefined, "invalid", new Date(3_600_000).toISOString()]) {
+    fs.writeFileSync(statePath, JSON.stringify({ until: 3_601_000, recordedAt }));
+    assert.equal(metaMatchaDenialRemainingMs(1_000), 10_000);
+    assert.equal(metaMatchaDenialRemainingMs(6_000), 5_000);
+    assert.equal(metaMatchaDenialRemainingMs(11_000), 0);
+  }
 });
 
 test("reads token amounts from SPL and Token-2022 account data", () => {
@@ -1333,7 +1407,6 @@ test("prerunCandidateQuotes automatically falls back from Marginfi to Kamino whe
   assert.equal(winning.probeUnits, 185_000);
   assert.ok(callCount >= 2, "Expected at least one Marginfi attempt followed by Kamino attempt");
 });
-
 
 
 

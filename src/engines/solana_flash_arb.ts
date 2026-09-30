@@ -1028,19 +1028,35 @@ function writeRuntimeState(name: string, value: unknown): void {
 }
 
 const METAMATCHA_DENIAL_STATE = "solana-metamatcha-denial.json";
+const MAX_AUTOMATIC_PAUSE_MS = 10_000;
 const METAMATCHA_ACCESS_DENIAL =
   /\bHTTP\s+(?:401|403)\b|Vercel Security Checkpoint|access blocked by Vercel|x-vercel-mitigated=challenge/i;
 
 function metaMatchaDenialCooldownMs(): number {
-  const seconds = Number(process.env.SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS ?? "3600");
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : 3_600_000;
+  const seconds = Number(process.env.SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS ?? "10");
+  return Number.isFinite(seconds) && seconds >= 0
+    ? Math.min(MAX_AUTOMATIC_PAUSE_MS, seconds * 1_000)
+    : MAX_AUTOMATIC_PAUSE_MS;
 }
 
 /** Milliseconds until MetaMatcha may be asked again after an access denial. */
 export function metaMatchaDenialRemainingMs(now = Date.now()): number {
-  const state = readRuntimeState<{ until?: number }>(METAMATCHA_DENIAL_STATE);
+  const state = readRuntimeState<{ until?: number; recordedAt?: string }>(METAMATCHA_DENIAL_STATE);
   const until = Number(state?.until ?? 0);
-  return Number.isFinite(until) ? Math.max(0, until - now) : 0;
+  if (!Number.isFinite(until) || until <= now) return 0;
+  const recordedAt = Date.parse(state?.recordedAt ?? "");
+  const startedAt = Number.isFinite(recordedAt) ? Math.min(now, recordedAt) : now;
+  const cappedUntil = Math.min(until, startedAt + metaMatchaDenialCooldownMs());
+  if (cappedUntil !== until) {
+    // Migrate old hour-long blocks once. Persist the deadline so a file without
+    // recordedAt cannot create a fresh ten-second pause on every subprocess.
+    writeRuntimeState(METAMATCHA_DENIAL_STATE, {
+      ...state,
+      until: cappedUntil,
+      recordedAt: new Date(startedAt).toISOString(),
+    });
+  }
+  return Math.max(0, cappedUntil - now);
 }
 
 export function recordMetaMatchaDenial(detail: string, now = Date.now()): void {
@@ -1130,7 +1146,7 @@ export async function fetchJson<T>(
       lastError instanceof HttpResponseError &&
       (lastError.message.includes("HTTP 500") || lastError.message.includes("HTTP 520"));
     const delayBase = isServerError ? 1000 : 400;
-    const delayMs = Math.min(30_000, Math.max(retryAfterMs ?? 0, attempt * delayBase));
+    const delayMs = Math.min(MAX_AUTOMATIC_PAUSE_MS, Math.max(retryAfterMs ?? 0, attempt * delayBase));
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   throw new Error(`${description} failed: ${errorMessage(lastError)}`);
@@ -1810,7 +1826,7 @@ export async function getMetaMatchaQuote(
       }
       if (/\bHTTP\s+429\b/i.test(errorMessage(error))) break;
       if (attempt < config.httpAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(MAX_AUTOMATIC_PAUSE_MS, 250 * attempt)));
       }
     }
   }

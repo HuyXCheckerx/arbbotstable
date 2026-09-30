@@ -213,8 +213,9 @@ duplicate sniper processes. Confirmed execution is logged only after the chain
 returns a successful receipt. An ambiguous submission pauses only the affected
 chain briefly while the other chain and the process continue; an Ethereum
 transaction absent from the node with an unused nonce is classified as dropped.
-Transient provider failures use exponential backoff, while unavailable markets
-and insufficient pools receive route cooldowns.
+Transient provider failures use backoff capped at ten seconds. Unavailable markets
+and flash-loan funding shortages receive cooldowns with the same ceiling. Stable.com
+pool shortages remain in the balance-monitoring `WATCHING` state.
 Every line uses an operator-facing state such as `CHECK`, `NO TRADE`, `PAUSED`,
 `READY`, or `CONFIRMED`, followed by the complete venue-labeled route and its
 actual order.
@@ -222,10 +223,10 @@ actual order.
 MetaMatcha HTTP 401/403 responses, including plain JSON `Forbidden` errors,
 and Vercel Security Checkpoint challenges (including HTTP 429)
 pause all routes using that provider on the affected chain for
-`SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS` (default: 3600). The Solana helper
+`SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS` (default and maximum: 10 seconds). The Solana helper
 does not immediately retry an access denial. Checks resume after the cooldown;
 the cooldown itself does not restore provider access. Ordinary HTTP 429 rate
-limits use transient backoff and honor `Retry-After` as a minimum wait. Neither
+limits use transient backoff capped at 10 seconds, including `Retry-After`. Neither
 engine immediately repeats a rate-limited competition request.
 
 The PC failure investigated on September 8 was a Vercel browser challenge at
@@ -617,4 +618,11 @@ validation, reserve rules, sizing, profit checks, simulation, or transaction gua
 pauses Stable capacity checks. Market `no-route` defaults to a ten-second retry
 (`SNIPER_NO_ROUTE_COOLDOWN_SECONDS` / `--no-route-cooldown-seconds` can override it).
 Concurrent failures of one provider share a backoff window; a failure after that
-window expires increases backoff. Provider Retry-After delays are still respected.
+window expires increases backoff up to a hard ten-second ceiling, including provider
+Retry-After hints. Old environment or CLI values above ten seconds are capped.
+This ceiling also applies to access denials, flash-loan funding shortages, reverted
+transactions, unresolved submission retries, and post-execution cooldowns. Completed
+parallel results share one cooldown rather than adding a wait for each result. It caps
+scheduled waiting, not network requests, transaction confirmation, or the time
+needed to finish an active route check. Gas/profit/confirmation guards still apply
+when the bot rechecks; repeated failures can therefore continue to prevent trades.

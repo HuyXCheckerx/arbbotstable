@@ -598,8 +598,8 @@ class CrosschainSniperTests(unittest.TestCase):
     def test_stop_request_has_an_explicit_cli_flag(self):
         self.assertTrue(parse_args(["--request-stop"]).request_stop)
 
-    def test_provider_access_block_uses_a_long_default_cooldown(self):
-        self.assertEqual(parse_args([]).provider_access_cooldown_seconds, 3600)
+    def test_provider_access_block_defaults_to_ten_seconds(self):
+        self.assertEqual(parse_args([]).provider_access_cooldown_seconds, 10)
 
     def test_plain_metamatcha_denials_pause_with_chain_specific_guidance(self):
         for chain, detail in METAMATCHA_FORBIDDEN_ERRORS.items():
@@ -703,19 +703,64 @@ class CrosschainSniperTests(unittest.TestCase):
             self.assertEqual(outcome.category, "transient-matcha")
             self.assertEqual(outcome.retry_after_seconds, 900)
             self.assertNotIn("retry-after", outcome.detail)
-            self.assertEqual(backoff.remaining(("metamatcha:ethereum",)), 900)
-            self.assertEqual(dashboard.record_cooldown.call_args.args[1], 900)
+            self.assertEqual(backoff.remaining(("metamatcha:ethereum",)), 10)
+            self.assertEqual(dashboard.record_cooldown.call_args.args[1], 10)
 
-    def test_retry_after_does_not_shorten_existing_or_exponential_backoff(self):
+    def test_retry_after_and_exponential_backoff_obey_hard_ceiling(self):
         backoff = AdaptiveBackoff()
         with patch("crosschain_sniper.time.monotonic", return_value=100):
             backoff.block("provider", 900)
-            self.assertEqual(backoff.fail("provider", 30, 300, minimum_seconds=10), 900)
-            self.assertEqual(backoff.remaining(("provider",)), 900)
-            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 30)
-            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 30)
+            self.assertEqual(backoff.fail("provider", 30, 300, minimum_seconds=10), 10)
+            self.assertEqual(backoff.remaining(("provider",)), 10)
+            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 10)
+            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 10)
         with patch("crosschain_sniper.time.monotonic", return_value=131):
-            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 60)
+            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 10)
+
+    def test_all_route_pause_categories_obey_ten_seconds_with_legacy_settings(self):
+        from crosschain_sniper import _handle_route_outcome
+        policy = CooldownPolicy(30, 300, 3600, 300, 300, 30, 60)
+        self.assertTrue(all(value <= 10 for value in vars(policy).values()))
+        for category in ("submitted", "transient-stable", "transient-jupiter", "transient-matcha",
+                         "transient-rpc", "no-route", "access-blocked-matcha", "flash-liquidity",
+                         "reverted", "confirmed"):
+            with self.subTest(category=category), patch("crosschain_sniper.time.monotonic", return_value=100):
+                route = Route("solana", "USDC/USDG")
+                deadlines, backoff, dashboard, stop = {}, AdaptiveBackoff(), Mock(), Mock()
+                stop.wait.return_value = False
+                _handle_route_outcome(route, Decimal("1"),
+                    Outcome(category == "confirmed", "test", category, retry_after_seconds=900),
+                    chain="solana", cooldown_policy=policy, backoff=backoff,
+                    route_deadlines=deadlines, dashboard=dashboard, logger=Mock(),
+                    cooldown_seconds=120, stop=stop)
+                self.assertTrue(all(deadline <= 110 for deadline in deadlines.values()))
+                self.assertTrue(all(deadline <= 110 for deadline in backoff._deadlines.values()))
+                for call in dashboard.record_cooldown.call_args_list:
+                    self.assertLessEqual(call.args[1], 10)
+                for call in stop.wait.call_args_list:
+                    self.assertLessEqual(call.args[0], 10)
+
+    def test_parallel_successes_share_one_pause_instead_of_stacking_sleeps(self):
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = True
+        routes = selected_routes(["solana"], ["USDC/USDG", "USDC/PYUSD", "USDG/PYUSD"], ["stable-first"])
+        with patch("crosschain_sniper.run_route", return_value=Outcome(True, "confirmed", "confirmed")) as run, \
+                patch("crosschain_sniper.time.monotonic", return_value=100):
+            worker("solana", routes, live=False, base_threshold=Decimal("5"),
+                   interval_seconds=60, cooldown_seconds=120, timeout_seconds=300,
+                   cooldown_policy=CooldownPolicy(30, 300, 3600, 300, 300, 30, 60),
+                   backoff=AdaptiveBackoff(), once=False, stop=stop, logger=Mock(), parallel_scanning=True)
+        self.assertEqual(run.call_count, 3)
+        stop.wait.assert_called_once_with(10)
+
+    def test_short_retry_settings_stay_short_and_backoff_caps_after_growth(self):
+        backoff = AdaptiveBackoff()
+        for now, expected in ((100, 2), (103, 4), (108, 8), (117, 10), (128, 10)):
+            with patch("crosschain_sniper.time.monotonic", return_value=now):
+                self.assertEqual(backoff.fail("rpc:solana", 2, 300), expected)
+        with patch("crosschain_sniper.time.monotonic", return_value=200):
+            self.assertEqual(backoff.block("rpc:ethereum", 3), 3)
 
     def test_vercel_checkpoint_uses_the_access_cooldown_for_its_chain(self):
         policy = CooldownPolicy(30, 300, 3600, 300, 300, 30, 60)
@@ -744,7 +789,7 @@ class CrosschainSniperTests(unittest.TestCase):
                     )
                     self.assertEqual(engine.call_count, 1)
                     self.assertEqual(dashboard.record_result.call_args.args[2].category, "access-blocked-matcha")
-                    self.assertEqual(backoff.remaining((f"metamatcha:{chain}",)), 3600)
+                    self.assertEqual(backoff.remaining((f"metamatcha:{chain}",)), 10)
                     other_chain = "ethereum" if chain == "solana" else "solana"
                     self.assertLessEqual(backoff.remaining((f"metamatcha:{other_chain}",)), 0)
 
@@ -794,7 +839,7 @@ class CrosschainSniperTests(unittest.TestCase):
                     self.assertEqual(outcome.category, "access-blocked-matcha")
                     self.assertFalse(outcome.executed)
                     self.assertEqual(
-                        backoff.remaining((f"metamatcha:{chain}",)), 3600,
+                        backoff.remaining((f"metamatcha:{chain}",)), 10,
                     )
                     other_chain = "solana" if chain == "ethereum" else "ethereum"
                     self.assertLessEqual(
@@ -803,7 +848,7 @@ class CrosschainSniperTests(unittest.TestCase):
 
                     worker(chain, routes, **kwargs)
                     self.assertEqual(engine.call_count, 1)
-                    monotonic.return_value = 3701
+                    monotonic.return_value = 111
                     worker(chain, routes, **kwargs)
                     self.assertEqual(engine.call_count, 2)
 

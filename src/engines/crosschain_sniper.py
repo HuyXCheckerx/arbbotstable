@@ -46,6 +46,7 @@ LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("4")
 SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("0.01")
 TOKEN_QUANTUM = Decimal("0.000001")
+MAX_PAUSE_SECONDS = 10.0
 ROUTE_TOKENS = ("USDC", "USDG", "PYUSD")
 DEFAULT_SWAP_ORDERS = ("dex-first", "stable-first")
 DEFAULT_ROUTE_PAIRS = tuple(
@@ -153,6 +154,11 @@ class Outcome:
     retry_after_seconds: float | None = None
 
 
+def bounded_pause(seconds: float) -> float:
+    """Hard ceiling for bot scheduling, including legacy settings and Retry-After."""
+    return min(MAX_PAUSE_SECONDS, max(0.0, seconds))
+
+
 @dataclass(frozen=True)
 class CooldownPolicy:
     transient_base_seconds: float
@@ -162,6 +168,10 @@ class CooldownPolicy:
     capacity_seconds: float
     unstable_capacity_seconds: float
     reverted_seconds: float
+
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            object.__setattr__(self, name, bounded_pause(getattr(self, name)))
 
 
 class AdaptiveBackoff:
@@ -181,10 +191,12 @@ class AdaptiveBackoff:
             )
 
     def block(self, key: str, seconds: float) -> float:
+        seconds = bounded_pause(seconds)
         with self._lock:
-            deadline = time.monotonic() + seconds
-            self._deadlines[key] = max(self._deadlines.get(key, 0.0), deadline)
-        return seconds
+            now = time.monotonic()
+            self._deadlines[key] = min(now + MAX_PAUSE_SECONDS,
+                max(self._deadlines.get(key, 0.0), now + seconds))
+            return self._deadlines[key] - now
 
     def fail(
         self,
@@ -195,12 +207,14 @@ class AdaptiveBackoff:
     ) -> float:
         if not math.isfinite(minimum_seconds) or minimum_seconds < 0:
             minimum_seconds = 0.0
+        minimum_seconds = bounded_pause(minimum_seconds)
         with self._lock:
             now = time.monotonic()
             remaining = self._deadlines.get(key, 0.0) - now
             if remaining > 0:
                 # Concurrent routes observing the same outage share one window.
-                self._deadlines[key] = max(self._deadlines[key], now + minimum_seconds)
+                self._deadlines[key] = min(now + MAX_PAUSE_SECONDS,
+                    max(self._deadlines[key], now + minimum_seconds))
                 return self._deadlines[key] - now
             failures = self._failures.get(key, 0) + 1
             self._failures[key] = failures
@@ -211,7 +225,7 @@ class AdaptiveBackoff:
             now = time.monotonic()
             self._deadlines[key] = max(
                 self._deadlines.get(key, 0.0),
-                now + max(delay, minimum_seconds),
+                now + bounded_pause(max(delay, minimum_seconds)),
             )
             return self._deadlines[key] - now
 
@@ -1148,6 +1162,7 @@ class SniperDashboardFeed:
             self._write_locked()
 
     def record_cooldown(self, route: Route, seconds: float, reason: str) -> None:
+        seconds = bounded_pause(seconds)
         if seconds <= 0:
             return
         with self._lock:
@@ -1735,6 +1750,7 @@ def _handle_route_outcome(
     stop: threading.Event,
 ) -> bool:
     """Process outcome, update metrics/backoff, and return True if execution stop/cooldown is triggered."""
+    cooldown_seconds = bounded_pause(cooldown_seconds)
     if outcome.category in {"submitted", "reverted", "failure"}:
         level = logging.ERROR
     elif outcome.executed:
@@ -1778,7 +1794,7 @@ def _handle_route_outcome(
         }[outcome.category]
         is_conn_reset = "connection reset" in outcome.detail.lower()
         if is_conn_reset and outcome.category == "transient-matcha":
-            delay = 5.0
+            delay = backoff.block(dependency, 5.0)
         else:
             delay = backoff.fail(
                 dependency,
@@ -1807,8 +1823,8 @@ def _handle_route_outcome(
 
     if outcome.category == "no-route":
         dependency = dex_market_key(route)
-        delay = outcome.retry_after_seconds or cooldown_policy.no_route_seconds
-        backoff.block(dependency, delay)
+        delay = backoff.block(dependency,
+            outcome.retry_after_seconds or cooldown_policy.no_route_seconds)
         route_deadlines[route.key] = time.monotonic() + delay
         logger.info(
             "PAUSE   | %-17s | %.0fs | return market unavailable",
@@ -1886,9 +1902,9 @@ def _handle_route_outcome(
             cooldown_seconds,
             "Post-execution cooldown",
         )
-    if outcome.executed and stop.wait(cooldown_seconds):
-        return True
-    return False
+    # The worker waits once after settling the batch. Sleeping here would add
+    # a cooldown for every completed parallel result plus the scan interval.
+    return stop.is_set()
 
 
 def worker(
@@ -1910,6 +1926,8 @@ def worker(
     eth_rpc_url: str = "https://eth.drpc.org",
     parallel_scanning: bool | None = None,
 ) -> None:
+    interval_seconds = bounded_pause(interval_seconds)
+    cooldown_seconds = bounded_pause(cooldown_seconds)
     if parallel_scanning is None:
         parallel_scanning = (
             os.getenv("SNIPER_PARALLEL_SCANNING", "true").lower()
@@ -1922,6 +1940,7 @@ def worker(
     route_deadlines: dict[str, float] = {}
     groups = arbitrage_groups(routes)
     funding_blocked_until: dict[str, float] = {}
+    post_execution_until = 0.0
 
     def publish_standby(active: list[Route]) -> None:
         if not dashboard:
@@ -1934,6 +1953,9 @@ def worker(
                     dashboard.mark_standby(route, preferred)
 
     def settle(route: Route, floor: Decimal, outcome: Outcome) -> bool:
+        nonlocal post_execution_until
+        if outcome.executed:
+            post_execution_until = max(post_execution_until, time.monotonic() + cooldown_seconds)
         if outcome.category in {"capacity", "unstable-capacity"}:
             liquidity.arm(route)
         else:
@@ -2040,7 +2062,8 @@ def worker(
 
         if once:
             return
-        if stop.wait(interval_seconds):
+        wait_seconds = bounded_pause(max(interval_seconds, post_execution_until - time.monotonic()))
+        if stop.wait(wait_seconds):
             return
 
 
@@ -2099,7 +2122,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--cooldown-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_COOLDOWN_SECONDS", "15")),
+        default=float(os.getenv("SNIPER_COOLDOWN_SECONDS", "10")),
     )
     parser.add_argument(
         "--route-timeout-seconds",
@@ -2109,17 +2132,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--transient-backoff-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_TRANSIENT_BACKOFF_SECONDS", "30")),
+        default=float(os.getenv("SNIPER_TRANSIENT_BACKOFF_SECONDS", "10")),
     )
     parser.add_argument(
         "--max-transient-backoff-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_MAX_TRANSIENT_BACKOFF_SECONDS", "300")),
+        default=float(os.getenv("SNIPER_MAX_TRANSIENT_BACKOFF_SECONDS", "10")),
     )
     parser.add_argument(
         "--provider-access-cooldown-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS", "3600")),
+        default=float(os.getenv("SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS", "10")),
     )
     parser.add_argument(
         "--no-route-cooldown-seconds",
@@ -2129,17 +2152,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--capacity-cooldown-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_CAPACITY_COOLDOWN_SECONDS", "300")),
+        default=float(os.getenv("SNIPER_CAPACITY_COOLDOWN_SECONDS", "10")),
     )
     parser.add_argument(
         "--unstable-capacity-cooldown-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_UNSTABLE_CAPACITY_COOLDOWN_SECONDS", "30")),
+        default=float(os.getenv("SNIPER_UNSTABLE_CAPACITY_COOLDOWN_SECONDS", "10")),
     )
     parser.add_argument(
         "--reverted-cooldown-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_REVERTED_COOLDOWN_SECONDS", "60")),
+        default=float(os.getenv("SNIPER_REVERTED_COOLDOWN_SECONDS", "10")),
     )
     parser.add_argument(
         "--eth-max-base-fee-gwei",
@@ -2223,6 +2246,11 @@ def main(argv: list[str] | None = None) -> int:
     for name, value in cooldown_values.items():
         if not math.isfinite(value) or value < 0:
             raise SniperError(f"{name} must be finite and non-negative")
+    args.interval_seconds = bounded_pause(args.interval_seconds)
+    args.cooldown_seconds = bounded_pause(args.cooldown_seconds)
+    for name in cooldown_values:
+        attribute = name[2:].replace("-", "_")
+        setattr(args, attribute, bounded_pause(getattr(args, attribute)))
     if args.max_transient_backoff_seconds < args.transient_backoff_seconds:
         raise SniperError(
             "--max-transient-backoff-seconds cannot be below "
@@ -2237,6 +2265,7 @@ def main(argv: list[str] | None = None) -> int:
     for route in routes:
         route_execution_floor(route, args.threshold_usd)
     logger = configure_logging()
+    logger.info("RULE    | Automatic retry pauses are capped at %.0fs", MAX_PAUSE_SECONDS)
     eth_rpc_url = (
         os.getenv("ETH_RPC_URL")
         or "https://eth.drpc.org"
