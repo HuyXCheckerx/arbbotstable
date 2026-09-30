@@ -329,6 +329,7 @@ interface Config {
   rpcFallbacks: string[];
   keypair: Keypair;
   subKeypair?: Keypair;
+  subTakerIndex: number;
   dexProvider: "metamatcha" | "dflow" | "jupiter";
   dflowApiBase: string;
   matchaApiBase: string;
@@ -782,7 +783,10 @@ function readConfig(cli: CliOptions): Config {
   }
   const rpcFallbacks = allRpcCandidates.slice(1);
   const keypair = loadKeypair(requiredEnv("SOLANA_PRIVATE_KEY"));
-  const subTakerIndex = envInt("SOL_FLASH_ARB_SUB_TAKER_INDEX", 1, 1);
+  const stateIndex = readRuntimeState<{ index: number }>("solana-sub-taker-index.json")?.index;
+  const configuredSubTakerIndex = envInt("SOL_FLASH_ARB_SUB_TAKER_INDEX", 1, 1);
+  const subTakerIndex =
+    typeof stateIndex === "number" && stateIndex >= 1 ? stateIndex : configuredSubTakerIndex;
   const useSubTaker = process.env.SOL_FLASH_ARB_USE_SUB_TAKER !== "false";
   const subKeypair = useSubTaker ? deriveSubAccountKeypair(keypair, subTakerIndex) : undefined;
   return {
@@ -790,6 +794,7 @@ function readConfig(cli: CliOptions): Config {
     rpcFallbacks,
     keypair,
     subKeypair,
+    subTakerIndex,
     dexProvider,
     dflowApiBase: (
       process.env.SOL_FLASH_ARB_DFLOW_BASE_URL || "https://dev-quote-api.dflow.net"
@@ -1065,6 +1070,54 @@ export function recordMetaMatchaDenial(detail: string, now = Date.now()): void {
     recordedAt: new Date(now).toISOString(),
     detail: detail.slice(0, 300),
   });
+}
+
+export function clearMetaMatchaDenial(): void {
+  try {
+    const target = runtimeStatePath(METAMATCHA_DENIAL_STATE);
+    if (fs.existsSync(target)) {
+      fs.unlinkSync(target);
+    }
+  } catch {
+    // Ignore error
+  }
+}
+
+export function updateSubTakerEnv(index: number): void {
+  try {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const envPath = path.join(root, ".env");
+    if (fs.existsSync(envPath)) {
+      let content = fs.readFileSync(envPath, "utf8");
+      if (/^SOL_FLASH_ARB_SUB_TAKER_INDEX=.*$/m.test(content)) {
+        content = content.replace(
+          /^SOL_FLASH_ARB_SUB_TAKER_INDEX=.*$/m,
+          `SOL_FLASH_ARB_SUB_TAKER_INDEX=${index}`,
+        );
+      } else {
+        content = `${content.trimEnd()}\nSOL_FLASH_ARB_SUB_TAKER_INDEX=${index}\n`;
+      }
+      fs.writeFileSync(envPath, content, "utf8");
+    }
+  } catch (err) {
+    console.warn(`Could not update SOL_FLASH_ARB_SUB_TAKER_INDEX in .env: ${errorMessage(err)}`);
+  }
+}
+
+export function rotateSubTaker(config: Config): number {
+  const currentIndex = config.subTakerIndex ?? 0;
+  const nextIndex = currentIndex > 0 ? currentIndex + 1 : 1;
+  config.subTakerIndex = nextIndex;
+  config.subKeypair = deriveSubAccountKeypair(config.keypair, nextIndex);
+  process.env.SOL_FLASH_ARB_SUB_TAKER_INDEX = String(nextIndex);
+  writeRuntimeState("solana-sub-taker-index.json", {
+    index: nextIndex,
+    subTaker: config.subKeypair.publicKey.toBase58(),
+    updatedAt: new Date().toISOString(),
+  });
+  updateSubTakerEnv(nextIndex);
+  clearMetaMatchaDenial();
+  return nextIndex;
 }
 
 const MARGINFI_BANK_STATE = "solana-marginfi-banks.json";
@@ -1920,29 +1973,46 @@ async function getDexQuote(
   const jupiterQuote = () =>
     getJupiterQuote(config, inputMint, outputMint, amountRaw, requestNumber, overrideMaxAccounts);
   if (config.dexProvider === "metamatcha") {
-    try {
-      const taker = config.subKeypair ? config.subKeypair.publicKey : wallet;
-      return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, taker);
-    } catch (error) {
-      if (fallbackToDflow) {
-        console.warn(
-          `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to DFlow DEX...`,
-        );
-        try {
-          return await getDFlowQuote(config, inputMint, outputMint, amountRaw);
-        } catch (dflowError) {
-          if (!fallbackToJupiter) throw dflowError;
+    const maxRotations = 3;
+    for (let rotation = 0; rotation <= maxRotations; rotation++) {
+      try {
+        const taker = config.subKeypair ? config.subKeypair.publicKey : wallet;
+        return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, taker);
+      } catch (error) {
+        const msg = errorMessage(error);
+        const isForbidden =
+          /\b(?:403|Forbidden)\b/i.test(msg) || METAMATCHA_ACCESS_DENIAL.test(msg);
+        const isCompetitorDenial = /request failures:/i.test(msg);
+        if (isForbidden && !isCompetitorDenial && rotation < maxRotations) {
+          const oldTaker = config.subKeypair
+            ? config.subKeypair.publicKey.toBase58()
+            : wallet.toBase58();
+          const nextIndex = rotateSubTaker(config);
           console.warn(
-            `DFlow quote unavailable (${errorMessage(dflowError)}); falling back to Jupiter DEX...`,
+            `MetaMatcha 403/Forbidden for taker ${oldTaker}. Auto-rotated to sub-taker #${nextIndex} (${config.subKeypair?.publicKey.toBase58()}). Retrying quote...`,
           );
-          return await jupiterQuote();
+          continue;
         }
+        if (fallbackToDflow) {
+          console.warn(
+            `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to DFlow DEX...`,
+          );
+          try {
+            return await getDFlowQuote(config, inputMint, outputMint, amountRaw);
+          } catch (dflowError) {
+            if (!fallbackToJupiter) throw dflowError;
+            console.warn(
+              `DFlow quote unavailable (${errorMessage(dflowError)}); falling back to Jupiter DEX...`,
+            );
+            return await jupiterQuote();
+          }
+        }
+        if (!fallbackToJupiter) throw error;
+        console.warn(
+          `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to Jupiter DEX...`,
+        );
+        return await jupiterQuote();
       }
-      if (!fallbackToJupiter) throw error;
-      console.warn(
-        `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to Jupiter DEX...`,
-      );
-      return await jupiterQuote();
     }
   }
   if (config.dexProvider === "dflow") {

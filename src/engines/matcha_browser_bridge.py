@@ -314,7 +314,7 @@ def fetch_bridge_quotes(
 QUOTE_SCRIPT = r"""async (args) => {
     const { chain, payload, aggregators } = args;
     const headers = { 'content-type': 'application/json', 'x-fetch-native': '1' };
-    if (chain === 'ethereum' && payload.taker) headers['x-taker'] = payload.taker.toLowerCase();
+    if (payload.taker) headers['x-taker'] = chain === 'ethereum' ? payload.taker.toLowerCase() : payload.taker;
     async function failure(response, endpoint) {
         const safe = name => {
             const value = response.headers.get(name) || '';

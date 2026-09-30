@@ -636,7 +636,7 @@ def unresolved_submission(
 
 def concise_failure(stdout: str, stderr: str, returncode: int) -> str:
     combined = "\n".join(part for part in (stderr, stdout) if part)
-    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    lines = [line.strip() for line in combined.splitlines() if line.strip() and not line.strip().startswith("Node.js v")]
     for idx, line in enumerate(lines):
         if line.startswith("ERROR:"):
             header = line[6:].strip()

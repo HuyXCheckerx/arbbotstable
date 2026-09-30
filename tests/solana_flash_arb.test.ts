@@ -61,6 +61,8 @@ import {
   stableTermsFromStatus,
   metaMatchaDenialRemainingMs,
   recordMetaMatchaDenial,
+  clearMetaMatchaDenial,
+  rotateSubTaker,
   stableCapacity,
   tokenAccountAmountRaw,
   type JupiterQuote,
@@ -1407,6 +1409,29 @@ test("prerunCandidateQuotes automatically falls back from Marginfi to Kamino whe
   assert.equal(winning.probeUnits, 185_000);
   assert.ok(callCount >= 2, "Expected at least one Marginfi attempt followed by Kamino attempt");
 });
+
+test("rotateSubTaker increments subTakerIndex, updates subKeypair, and clears denial state", () => {
+  const masterKeypair = Keypair.generate();
+  const mockConfig: any = {
+    keypair: masterKeypair,
+    subKeypair: deriveSubAccountKeypair(masterKeypair, 1),
+    subTakerIndex: 1,
+  };
+
+  recordMetaMatchaDenial("HTTP 403: Forbidden");
+  assert.ok(metaMatchaDenialRemainingMs() > 0);
+
+  const newIndex = rotateSubTaker(mockConfig);
+  assert.equal(newIndex, 2);
+  assert.equal(mockConfig.subTakerIndex, 2);
+  const expectedSubKeypair = deriveSubAccountKeypair(masterKeypair, 2);
+  assert.equal(
+    mockConfig.subKeypair.publicKey.toBase58(),
+    expectedSubKeypair.publicKey.toBase58(),
+  );
+  assert.equal(metaMatchaDenialRemainingMs(), 0);
+});
+
 
 
 
