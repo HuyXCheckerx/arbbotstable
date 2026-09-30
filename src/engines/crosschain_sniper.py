@@ -29,6 +29,13 @@ from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# sniper.py executes this file with runpy, which does not add its directory to
+# sys.path or establish a package. Use the same absolute package imports for
+# that launcher, direct script execution, and python -m execution.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from src.engines.stable_liquidity_monitor import StableLiquidityMonitor
+
 LOG_DIR = PROJECT_ROOT / "logs"
 PLAN_DIR = LOG_DIR / "sniper-plans"
 LOCK_PATH = LOG_DIR / ".crosschain-sniper.lock"
@@ -1910,10 +1917,6 @@ def worker(
             and not once
         )
 
-    try:
-        from .stable_liquidity_monitor import StableLiquidityMonitor
-    except ImportError:
-        from stable_liquidity_monitor import StableLiquidityMonitor
     liquidity = StableLiquidityMonitor(chain, eth_rpc_url if chain == "ethereum"
         else os.getenv("SOLANA_RPC_URL", "").split(",")[0].strip())
     route_deadlines: dict[str, float] = {}
