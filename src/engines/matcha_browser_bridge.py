@@ -320,7 +320,8 @@ QUOTE_SCRIPT = r"""async (args) => {
             const value = response.headers.get(name) || '';
             return /^[a-zA-Z0-9._|:= -]{1,160}$/.test(value) ? value : '';
         };
-        const body = (await response.text()).toLowerCase();
+        let body = '';
+        try { body = (await response.text()).toLowerCase(); } catch(e) {}
         const denial = ['vercel security checkpoint', 'kasada', 'forbidden', 'unauthorized', 'rate limit']
             .find(marker => body.includes(marker)) || '';
         return {status: response.status, endpoint, denial,
@@ -331,9 +332,14 @@ QUOTE_SCRIPT = r"""async (args) => {
     if (chain === 'ethereum') {
         try { await fetch('https://meta.matcha.xyz/api/gas?chainId=1', {signal: AbortSignal.timeout(8000)}); } catch(e) {}
     }
-    const compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
-        method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000)
-    });
+    let compRes;
+    try {
+        compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
+            method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(14000)
+        });
+    } catch (e) {
+        return {error: `Competition fetch failed: ${e && (e.message || e.name || String(e))}`};
+    }
     if (!compRes.ok) return {provider_error: await failure(compRes, '/api/competitions')};
     let comp;
     try { comp = await compRes.json(); }
@@ -374,6 +380,8 @@ class _BridgeServerState:
         self.fatal_error: str | None = None
         self.proxy_url: str = os.getenv("MATCHA_PROXY", "").strip()
         self.configured_proxy = proxy_fingerprint(self.proxy_url)
+        self.last_heartbeat: float = time.monotonic()
+        self.worker_thread: threading.Thread | None = None
 
 
 def _run_playwright_worker(state: _BridgeServerState) -> None:
@@ -422,10 +430,44 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
             try:
                 context = browser.new_context(viewport={"width": 1280, "height": 800})
 
+                def _inject_context_cookies() -> int:
+                    try:
+                        from .matcha_cookie_manager import get_valid_cookies
+                    except ImportError:
+                        try:
+                            from matcha_cookie_manager import get_valid_cookies
+                        except ImportError:
+                            return 0
+                    try:
+                        cookies = get_valid_cookies(non_blocking=True)
+                        if cookies:
+                            pw_cookies = [
+                                {
+                                    "name": c["name"],
+                                    "value": c["value"],
+                                    "domain": c.get("domain") or ".matcha.xyz",
+                                    "path": c.get("path") or "/",
+                                }
+                                for c in cookies
+                                if c.get("name") and c.get("value")
+                            ]
+                            if pw_cookies:
+                                context.add_cookies(pw_cookies)
+                                return len(pw_cookies)
+                    except Exception as e:
+                        logger.debug("[MatchaBridge] Cookie injection notice: %s", e)
+                    return 0
+
+                injected = _inject_context_cookies()
+                if injected:
+                    logger.info("[MatchaBridge] Injected %d cached clearance cookies into browser context", injected)
+
                 page_eth = context.new_page()
+                page_eth.set_default_timeout(18000)
                 Stealth().apply_stealth_sync(page_eth)
 
                 page_sol = context.new_page()
+                page_sol.set_default_timeout(18000)
                 Stealth().apply_stealth_sync(page_sol)
 
                 logger.info("[MatchaBridge] Warming Ethereum tab...")
@@ -530,6 +572,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         continue
                     page = page_eth if chain == "ethereum" else page_sol
 
+                    state.last_heartbeat = time.monotonic()
                     try:
                         t0 = time.perf_counter()
                         res = page.evaluate(
@@ -543,6 +586,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                             # Only a real browser challenge warrants reloading, not a deny or 429.
                             if detail.get("mitigation") == "challenge":
                                 try:
+                                    _inject_context_cookies()
                                     page.reload(wait_until="domcontentloaded", timeout=25000)
                                 except Exception:
                                     pass
@@ -553,7 +597,18 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     except Exception as exc:
                         logger.error("[MatchaBridge] Evaluate error on [%s]: %s", chain, exc)
                         result_box["error"] = str(exc)
+                        # Page state is likely corrupted, challenged, or timed out. Auto-recover immediately.
+                        try:
+                            _inject_context_cookies()
+                            page.reload(wait_until="domcontentloaded", timeout=20000)
+                        except Exception as reload_err:
+                            logger.warning("[MatchaBridge] Page reload recovery failed on [%s]: %s", chain, reload_err)
+                            try:
+                                page.goto(f"https://meta.matcha.xyz/{chain}", wait_until="domcontentloaded", timeout=25000)
+                            except Exception:
+                                pass
                     finally:
+                        state.last_heartbeat = time.monotonic()
                         event.set()
                         state.queue.task_done()
             finally:
@@ -620,7 +675,9 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                         pass
                     return
 
-                ready = state.ready_eth.is_set() and state.ready_sol.is_set()
+                is_stuck = state.queue.qsize() > 0 and (time.monotonic() - state.last_heartbeat > 30.0)
+                thread_dead = state.worker_thread is not None and not state.worker_thread.is_alive()
+                ready = state.ready_eth.is_set() and state.ready_sol.is_set() and not state.fatal_error and not is_stuck and not thread_dead
                 status = 200 if ready else 503
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -717,6 +774,7 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
         daemon=True,
         name="MatchaPlaywrightWorker",
     )
+    state.worker_thread = worker_thread
     worker_thread.start()
 
     logger.info("[MatchaBridge] Server running at http://%s:%d (PID %d)", host, port, os.getpid())

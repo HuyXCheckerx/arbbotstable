@@ -55,6 +55,7 @@ DEFAULT_ROUTE_PAIRS = tuple(
     for counter in ROUTE_TOKENS
     if loan != counter
 )
+_consecutive_bridge_failures: int = 0
 
 
 class SniperError(RuntimeError):
@@ -1750,6 +1751,7 @@ def _handle_route_outcome(
     stop: threading.Event,
 ) -> bool:
     """Process outcome, update metrics/backoff, and return True if execution stop/cooldown is triggered."""
+    global _consecutive_bridge_failures
     cooldown_seconds = bounded_pause(cooldown_seconds)
     if outcome.category in {"submitted", "reverted", "failure"}:
         level = logging.ERROR
@@ -1816,10 +1818,31 @@ def _handle_route_outcome(
                 delay,
                 f"Temporary {dependency_label(dependency)} failure{suffix}",
             )
+
+        lowered_detail = outcome.detail.lower()
+        if outcome.category == "transient-matcha" and any(
+            x in lowered_detail for x in ("evaluation timeout", "page.evaluate", "local-status=504", "local-status=500")
+        ):
+            _consecutive_bridge_failures += 1
+            if _consecutive_bridge_failures >= 3:
+                _consecutive_bridge_failures = 0
+                logger.warning(
+                    "[MatchaBridge] %d consecutive bridge failures detected; restarting bridge daemon...",
+                    3,
+                )
+                try:
+                    from src.engines.matcha_browser_bridge import stop_bridge_server, ensure_bridge_running
+                    stop_bridge_server()
+                    ensure_bridge_running(timeout=45.0)
+                except Exception as exc:
+                    logger.warning("[MatchaBridge] Bridge auto-restart error: %s", exc)
+        elif outcome.category != "transient-matcha":
+            _consecutive_bridge_failures = 0
     else:
         backoff.succeed(f"stable:{route.chain}")
         backoff.succeed(f"rpc:{route.chain}")
         backoff.succeed(dex_provider_key(route))
+        _consecutive_bridge_failures = 0
 
     if outcome.category == "no-route":
         dependency = dex_market_key(route)

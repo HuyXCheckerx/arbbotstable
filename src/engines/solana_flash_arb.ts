@@ -1980,10 +1980,16 @@ async function getDexQuote(
         return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, taker);
       } catch (error) {
         const msg = errorMessage(error);
-        const isForbidden =
-          /\b(?:403|Forbidden)\b/i.test(msg) || METAMATCHA_ACCESS_DENIAL.test(msg);
+        const isVercelChallenge =
+          /vercel security checkpoint|mitigation=challenge|x-vercel-mitigated/i.test(msg);
         const isCompetitorDenial = /request failures:/i.test(msg);
-        if (isForbidden && !isCompetitorDenial && rotation < maxRotations) {
+        const isTakerForbidden =
+          /\b403\b/i.test(msg) &&
+          /\bforbidden\b/i.test(msg) &&
+          !isVercelChallenge &&
+          !isCompetitorDenial;
+
+        if (isTakerForbidden && rotation < maxRotations) {
           const oldTaker = config.subKeypair
             ? config.subKeypair.publicKey.toBase58()
             : wallet.toBase58();
