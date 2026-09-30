@@ -189,6 +189,12 @@ class AdaptiveBackoff:
         if not math.isfinite(minimum_seconds) or minimum_seconds < 0:
             minimum_seconds = 0.0
         with self._lock:
+            now = time.monotonic()
+            remaining = self._deadlines.get(key, 0.0) - now
+            if remaining > 0:
+                # Concurrent routes observing the same outage share one window.
+                self._deadlines[key] = max(self._deadlines[key], now + minimum_seconds)
+                return self._deadlines[key] - now
             failures = self._failures.get(key, 0) + 1
             self._failures[key] = failures
             delay = min(
@@ -521,6 +527,8 @@ def failure_category(detail: str) -> str:
         "pool capacity is below" in lowered
         or "usable capacity" in lowered and "below" in lowered
         or "pool has no remaining" in lowered
+        or ("stable" in lowered and "insufficient_pool_balance" in lowered
+            and not re.search(r"\b(?:http\s+)?429\b", lowered))
     ):
         return "capacity"
     transient = (
@@ -746,6 +754,8 @@ def dry_run_detail(route: Route, stdout: str, elapsed: float) -> str:
 
 
 def outcome_label(outcome: Outcome) -> str:
+    if outcome.category in {"capacity", "unstable-capacity"}:
+        return "WATCHING"
     if outcome.category == "confirmed":
         return "CONFIRMED"
     if outcome.category == "submitted":
@@ -1117,6 +1127,7 @@ class SniperDashboardFeed:
                 "submitted" if outcome.category == "submitted" else
                 "ready" if outcome.category == "eligible" else
                 "no_trade" if outcome.category == "unprofitable" else
+                "watching" if outcome.category in {"capacity", "unstable-capacity"} else
                 "paused" if outcome.category in self._PAUSED_CATEGORIES else
                 "errors"
             )
@@ -1843,36 +1854,10 @@ def _handle_route_outcome(
                 cooldown_policy.capacity_seconds,
                 f"{route.loan} flash loan cannot be funded",
             )
-    elif outcome.category == "capacity":
-        route_deadlines[route.key] = (
-            time.monotonic() + cooldown_policy.capacity_seconds
-        )
-        logger.info(
-            "PAUSE   | %-17s | %.0fs | insufficient Stable.com capacity",
-            route.display,
-            cooldown_policy.capacity_seconds,
-        )
-        if dashboard:
-            dashboard.record_cooldown(
-                route,
-                cooldown_policy.capacity_seconds,
-                "Insufficient Stable.com capacity",
-            )
-    elif outcome.category == "unstable-capacity":
-        route_deadlines[route.key] = (
-            time.monotonic() + cooldown_policy.unstable_capacity_seconds
-        )
-        logger.info(
-            "PAUSE   | %-17s | %.0fs | Stable.com capacity is changing",
-            route.display,
-            cooldown_policy.unstable_capacity_seconds,
-        )
-        if dashboard:
-            dashboard.record_cooldown(
-                route,
-                cooldown_policy.unstable_capacity_seconds,
-                "Stable.com capacity is changing",
-            )
+    elif outcome.category in {"capacity", "unstable-capacity"}:
+        route_deadlines.pop(route.key, None)
+        logger.info("WATCH   | %s | monitoring Stable.com %s payout balance and backend readiness",
+                    route.display, route.stable_to)
     elif outcome.category == "reverted":
         route_deadlines[route.key] = (
             time.monotonic() + cooldown_policy.reverted_seconds
@@ -1925,6 +1910,12 @@ def worker(
             and not once
         )
 
+    try:
+        from .stable_liquidity_monitor import StableLiquidityMonitor
+    except ImportError:
+        from stable_liquidity_monitor import StableLiquidityMonitor
+    liquidity = StableLiquidityMonitor(chain, eth_rpc_url if chain == "ethereum"
+        else os.getenv("SOLANA_RPC_URL", "").split(",")[0].strip())
     route_deadlines: dict[str, float] = {}
     groups = arbitrage_groups(routes)
     funding_blocked_until: dict[str, float] = {}
@@ -1940,6 +1931,10 @@ def worker(
                     dashboard.mark_standby(route, preferred)
 
     def settle(route: Route, floor: Decimal, outcome: Outcome) -> bool:
+        if outcome.category in {"capacity", "unstable-capacity"}:
+            liquidity.arm(route)
+        else:
+            liquidity.clear(route)
         stop_requested = _handle_route_outcome(
             route,
             floor,
@@ -1962,6 +1957,7 @@ def worker(
     def is_due(route: Route) -> bool:
         return (
             route_deadlines.get(route.key, 0.0) <= time.monotonic()
+            and liquidity.due(route)
             and backoff.remaining(dependency_keys(route)) <= 0
         )
 
@@ -2015,6 +2011,8 @@ def worker(
                     return
                 continue
 
+        if backoff.remaining((f"rpc:{chain}",)) <= 0:
+            liquidity.poll()
         current = active_routes(groups, funding_blocked_until, time.monotonic())
         publish_standby(current)
         if run_checks(current):
@@ -2123,7 +2121,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-route-cooldown-seconds",
         type=float,
-        default=float(os.getenv("SNIPER_NO_ROUTE_COOLDOWN_SECONDS", "300")),
+        default=float(os.getenv("SNIPER_NO_ROUTE_COOLDOWN_SECONDS", "10")),
     )
     parser.add_argument(
         "--capacity-cooldown-seconds",
@@ -2346,8 +2344,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         watcher.start()
 
+        # The proxy, cookie and bridge machinery only serves MetaMatcha quotes.
+        uses_matcha = (
+            "solana" in args.chains
+            and os.getenv("SOL_FLASH_ARB_DEX_PROVIDER", "metamatcha").strip().lower() == "metamatcha"
+        ) or (
+            "ethereum" in args.chains
+            and os.getenv("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower() == "matcha"
+        )
+
         # Proactively verify or purchase working residential proxy before solving cookies
-        if not args.no_proxy:
+        if not uses_matcha:
+            logger.info("No chain uses MetaMatcha; skipping proxy, cookie and bridge setup.")
+            os.environ["MATCHA_PROXY"] = ""
+        elif not args.no_proxy:
             try:
                 from scripts.manage_proxyisp import setup_sniper_proxy
                 active_proxy = setup_sniper_proxy(logger=logger)
@@ -2360,37 +2370,38 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("[ProxyManager] Running with --no-proxy; connecting directly.")
             os.environ["MATCHA_PROXY"] = ""
 
-        # The daemon outlives the sniper and retains its launch environment and
-        # imported code. Restart once at startup, after proxy selection, so an
-        # automatic direct fallback or a code update cannot reuse a stale daemon.
-        try:
-            from src.engines.matcha_browser_bridge import stop_bridge_server
-            logger.info("Restarting Matcha browser bridge to apply current code and proxy settings...")
-            stop_bridge_server()
-        except Exception as exc:
-            logger.warning("Failed to stop previous Matcha browser bridge: %s", exc)
+        if uses_matcha:
+            # The daemon outlives the sniper and retains its launch environment and
+            # imported code. Restart once at startup, after proxy selection, so an
+            # automatic direct fallback or a code update cannot reuse a stale daemon.
+            try:
+                from src.engines.matcha_browser_bridge import stop_bridge_server
+                logger.info("Restarting Matcha browser bridge to apply current code and proxy settings...")
+                stop_bridge_server()
+            except Exception as exc:
+                logger.warning("Failed to stop previous Matcha browser bridge: %s", exc)
 
-        # Proactively maintain fresh Cloudflare/Kasada cookies for child quote processes
-        try:
-            from src.engines.matcha_cookie_manager import (
-                ensure_vps_cookies,
-                get_valid_cookies,
-                start_background_cookie_solver,
-            )
-            logger.info("Ensuring valid MetaMatcha browser session cookies...")
-            ensure_vps_cookies(logger_instance=logger)
-            get_valid_cookies()
-            start_background_cookie_solver()
-        except Exception as exc:
-            logger.warning("Failed to initialize MetaMatcha cookie session: %s", exc)
+            # Proactively maintain fresh Cloudflare/Kasada cookies for child quote processes
+            try:
+                from src.engines.matcha_cookie_manager import (
+                    ensure_vps_cookies,
+                    get_valid_cookies,
+                    start_background_cookie_solver,
+                )
+                logger.info("Ensuring valid MetaMatcha browser session cookies...")
+                ensure_vps_cookies(logger_instance=logger)
+                get_valid_cookies()
+                start_background_cookie_solver()
+            except Exception as exc:
+                logger.warning("Failed to initialize MetaMatcha cookie session: %s", exc)
 
-        # Proactively ensure warm Matcha browser bridge daemon is ready
-        try:
-            from src.engines.matcha_browser_bridge import ensure_bridge_running
-            logger.info("Ensuring Matcha browser bridge daemon is ready...")
-            ensure_bridge_running(timeout=45.0)
-        except Exception as exc:
-            logger.warning("Failed to initialize Matcha browser bridge: %s", exc)
+            # Proactively ensure warm Matcha browser bridge daemon is ready
+            try:
+                from src.engines.matcha_browser_bridge import ensure_bridge_running
+                logger.info("Ensuring Matcha browser bridge daemon is ready...")
+                ensure_bridge_running(timeout=45.0)
+            except Exception as exc:
+                logger.warning("Failed to initialize Matcha browser bridge: %s", exc)
 
         threads = []
         for chain in args.chains:

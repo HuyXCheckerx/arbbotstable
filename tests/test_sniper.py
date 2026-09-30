@@ -713,6 +713,8 @@ class CrosschainSniperTests(unittest.TestCase):
             self.assertEqual(backoff.fail("provider", 30, 300, minimum_seconds=10), 900)
             self.assertEqual(backoff.remaining(("provider",)), 900)
             self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 30)
+            self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 30)
+        with patch("crosschain_sniper.time.monotonic", return_value=131):
             self.assertEqual(backoff.fail("another-provider", 30, 300, minimum_seconds=10), 60)
 
     def test_vercel_checkpoint_uses_the_access_cooldown_for_its_chain(self):

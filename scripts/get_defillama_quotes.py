@@ -1,20 +1,15 @@
-"""Get Ethereum stablecoin quotes from LlamaSwap. Never signs or submits swaps.
+"""Get quotes through the normal LlamaSwap browser UI, without your API key.
 
-Request contract observed in swap.defillama.com's frontend: POST
-/dexAggregatorQuote with protocol/chain/from/to/amount/api_key query parameters
-and the adapter's extra options as JSON. This is a frontend API, not the Pro data API.
+Keeps one browser session open in watch mode. Never connects a wallet or trades.
 """
 from __future__ import annotations
 
 import argparse
 from decimal import Decimal, InvalidOperation
 import json
-import os
 from pathlib import Path
-import re
 import sys
 
-from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[1]
 API = "https://swap-api.defillama.com/dexAggregatorQuote"
@@ -94,13 +89,21 @@ def main(argv=None):
     parser.add_argument("--buy", choices=TOKENS, default="PYUSD")
     parser.add_argument("--amount", default="100", help="Human token amount, e.g. 100 or 0.5")
     parser.add_argument("--protocol", action="append", help='Repeat to compare adapters; defaults: "1inch", "Matcha/0x v2"')
-    parser.add_argument("--taker", help="Public Ethereum address; defaults to ETH_EXECUTOR_ADDRESS or a dummy address")
     parser.add_argument("--slippage", default="0.1", help="Percentage, e.g. 0.1 = 0.1 percent")
-    parser.add_argument("--output", type=Path, help="Save quotes and unsigned response data to JSON")
-    parser.add_argument("--json", action="store_true", help="Print the complete sanitized report")
+    parser.add_argument("--output", type=Path, help="Save the latest quote report to JSON")
+    parser.add_argument("--json", action="store_true", help="Print quote reports as JSON")
+    parser.add_argument("--watch", action="store_true", help="Keep the browser alive; the site refreshes quotes automatically")
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument("--headful", dest="headful", action="store_true", help="Show the browser (default; verified working)")
+    display.add_argument("--headless", dest="headful", action="store_false", help="Hide the browser; may encounter access challenges")
+    parser.set_defaults(headful=True)
+    parser.add_argument("--interval", type=int, default=30, help="Seconds between watch reports (minimum 10)")
+    parser.add_argument("--timeout", type=int, default=45, help="Seconds to collect initial quote responses")
     args = parser.parse_args(argv)
+    if args.interval < 10 or args.timeout < 1:
+        parser.error("Interval must be at least 10 seconds and timeout must be positive")
     try:
-        amount_raw = raw_amount(args.amount)
+        raw_amount(args.amount)
         slippage = Decimal(args.slippage)
         if not slippage.is_finite() or not 0 < slippage <= 50:
             raise ValueError("Slippage must be greater than 0 and at most 50 percent")
@@ -108,39 +111,48 @@ def main(argv=None):
         parser.error(str(exc) if str(exc) else "Invalid slippage")
     if args.sell == args.buy:
         parser.error("Choose different sell and buy tokens")
-    local = dotenv_values(ROOT / ".env.defillama")
-    general = dotenv_values(ROOT / ".env")
-    key = os.getenv("DEFILLAMA_SWAP_API_KEY") or local.get("DEFILLAMA_SWAP_API_KEY") or general.get("DEFILLAMA_SWAP_API_KEY")
-    if not key:
-        parser.error("Set DEFILLAMA_SWAP_API_KEY in .env.defillama or your environment")
-    taker = args.taker or general.get("ETH_EXECUTOR_ADDRESS") or "0x000000000000000000000000000000000000dead"
-    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", taker):
-        parser.error("Taker must be a public Ethereum address")
-    from curl_cffi import requests
-    session = requests.Session(impersonate="chrome", trust_env=False, proxies={"http": "", "https": ""})
-    session.headers.update({"accept": "application/json", "origin": "https://swap.defillama.com",
-                            "referer": "https://swap.defillama.com/"})
-    quotes = []
     try:
-        for protocol in dict.fromkeys(args.protocol or ["1inch", "Matcha/0x v2"]):
-            quotes.append(get_quote(session, key=key, protocol=protocol, sell=args.sell, buy=args.buy,
-                                    amount_raw=amount_raw, taker=taker, slippage=slippage))
-    finally:
-        session.close()
-    report = {"chain": "ethereum", "sell": args.sell, "buy": args.buy, "amount_in": args.amount,
-              "taker": taker, "quotes": quotes, "note": "Quotes only; no transactions signed or submitted"}
-    rendered = json.dumps(redact(report, key), indent=2)
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered + "\n", encoding="utf-8")
-    if args.json:
-        print(rendered)
-    else:
-        print(f"Ethereum | {args.amount} {args.sell} -> {args.buy} | quotes only")
-        for quote in quotes:
-            result = f"{quote['amount_out']} {args.buy}" if quote['status'] == 'quoted' else quote.get('error', 'No quote returned')
-            print(f"{quote['protocol']:<18} {quote['status']:<10} {result}")
-    return 0 if any(q["status"] == "quoted" for q in quotes) else 1
+        from scripts.defillama_browser import BrowserQuotes
+    except ModuleNotFoundError:
+        from defillama_browser import BrowserQuotes
+    protocols = list(dict.fromkeys(args.protocol or ["1inch", "Matcha/0x v2"]))
+    success = False
+    try:
+        with BrowserQuotes(tokens=TOKENS, sell=args.sell, buy=args.buy, amount=args.amount,
+                           slippage=slippage, protocols=protocols,
+                           state_path=ROOT / ".local/llamaswap/browser-state.json",
+                           headful=args.headful) as browser:
+            delay = args.timeout
+            while True:
+                quotes = browser.snapshot(delay)
+                success = any(q["status"] == "quoted" for q in quotes)
+                report = {"chain": "ethereum", "sell": args.sell, "buy": args.buy,
+                          "amount_in": args.amount, "quotes": quotes,
+                          "note": "Unconnected-wallet website quotes; no transactions signed or submitted"}
+                rendered = json.dumps(report, indent=2)
+                if args.output:
+                    args.output.parent.mkdir(parents=True, exist_ok=True)
+                    args.output.write_text(rendered + "\n", encoding="utf-8")
+                if args.json:
+                    print(rendered, flush=True)
+                else:
+                    print(f"Ethereum | {args.amount} {args.sell} -> {args.buy} | browser session | quotes only", flush=True)
+                    for quote in quotes:
+                        result = (f"{quote['amount_out']} {args.buy}" if quote['status'] == 'quoted'
+                                  else quote.get('error', 'No quote returned'))
+                        print(f"{quote['protocol']:<18} {quote['status']:<10} {result}"
+                              f" | {quote.get('updated_at', 'waiting')}"
+                              f"{' | refreshing' if quote.get('refreshing') else ''}", flush=True)
+                if not args.watch:
+                    break
+                delay = args.interval
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        # Browser errors can contain URLs with the site's internal integration key.
+        print(f"Browser session failed ({type(exc).__name__}); try --headful to inspect the website", file=sys.stderr)
+        return 1
+    return 0 if success else 1
 
 
 if __name__ == "__main__":

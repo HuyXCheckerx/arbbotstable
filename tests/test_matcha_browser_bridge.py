@@ -294,6 +294,42 @@ class BrowserBridgeTests(unittest.TestCase):
         self.assertFalse(state.ready_eth.is_set())
         self.assertFalse(state.ready_sol.is_set())
 
+    def test_uncleared_tabs_fail_explicitly_instead_of_idling_forever(self):
+        state = bridge._BridgeServerState()
+        browser = Mock()
+        page = browser.new_context.return_value.new_page.return_value
+        page.title.return_value = "Security checkpoint"
+        with self.runtime(browser, []), patch.object(bridge.time, "sleep"), \
+                patch.dict("os.environ", {"MATCHA_PROXY": ""}), self.assertLogs(bridge.logger, level="ERROR"):
+            bridge._run_playwright_worker(state)
+        self.assertFalse(state.is_running)
+        self.assertIn("warm-up exhausted", state.fatal_error)
+        page.evaluate.assert_not_called()
+        browser.close.assert_called_once()
+
+    def test_expired_queued_quote_is_skipped_before_next_live_quote(self):
+        state = bridge._BridgeServerState()
+        expired_event, expired = threading.Event(), {"deadline": 0.0}
+        live_event, live = threading.Event(), {}
+        state.queue.put(("ethereum", {"old": True}, ["0x"], expired_event, expired))
+        state.queue.put(("solana", {"live": True}, ["Jupiter"], live_event, live))
+        browser = Mock()
+        page = browser.new_context.return_value.new_page.return_value
+        page.title.return_value = "MetaMatcha"
+        def evaluate(*args):
+            state.is_running = False
+            return {"quotes": {}}
+        page.evaluate.side_effect = evaluate
+        with self.runtime(browser, []), patch.object(bridge.time, "sleep"), \
+                patch.dict("os.environ", {"MATCHA_PROXY": ""}):
+            bridge._run_playwright_worker(state)
+        self.assertTrue(expired_event.is_set())
+        self.assertIn("expired in queue", expired["error"])
+        self.assertTrue(live_event.is_set())
+        page.evaluate.assert_called_once()
+        self.assertEqual(page.evaluate.call_args.args[1]["payload"], {"live": True})
+        self.assertEqual(state.queue.unfinished_tasks, 0)
+
     def test_startup_failure_reports_error_and_releases_waiters(self):
         state = bridge._BridgeServerState()
         event, result = threading.Event(), {}

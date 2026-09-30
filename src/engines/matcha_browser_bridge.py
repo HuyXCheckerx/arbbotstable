@@ -28,7 +28,7 @@ PID_FILE = PROJECT_ROOT / ".matcha_bridge.pid"
 LOCK_FILE = PROJECT_ROOT / ".matcha_bridge.lock"
 DEFAULT_PORT = 18234
 DEFAULT_HOST = "127.0.0.1"
-BRIDGE_VERSION = 4
+BRIDGE_VERSION = 5
 # Diagnostic instances on another port must not share lifecycle files.
 if os.getenv("MATCHA_BRIDGE_PORT", str(DEFAULT_PORT)) != str(DEFAULT_PORT):
     _port = int(os.environ["MATCHA_BRIDGE_PORT"])
@@ -499,6 +499,12 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                             state.ready_sol.set()
                             break
 
+                if not (state.ready_eth.is_set() and state.ready_sol.is_set()):
+                    raise RuntimeError(
+                        "Browser warm-up exhausted without both tabs becoming ready; "
+                        "check provider access and proxy connectivity"
+                    )
+
                 last_health_check = time.monotonic()
                 while state.is_running:
                     try:
@@ -517,6 +523,11 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         continue
 
                     chain, payload, aggregators, event, result_box = task
+                    if time.monotonic() >= result_box.get("deadline", float("inf")):
+                        result_box["error"] = "Matcha bridge request expired in queue"
+                        event.set()
+                        state.queue.task_done()
+                        continue
                     page = page_eth if chain == "ethereum" else page_sol
 
                     try:
@@ -580,6 +591,15 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
     class BridgeHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
             pass  # Suppress access logs for high-frequency quoting
+
+        def send_quote_response(self, status: int, data: dict[str, Any]) -> None:
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(data).encode("utf-8"))
+            except (ConnectionError, OSError):
+                logger.debug("[MatchaBridge] Quote client disconnected before response")
 
         def do_GET(self) -> None:
             if self.path == "/health":
@@ -658,25 +678,21 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
             aggregators = req_data.get("aggregators", ["0x"] if chain == "ethereum" else ["Jupiter"])
 
             event = threading.Event()
-            result_box: dict[str, Any] = {}
+            result_box: dict[str, Any] = {"deadline": time.monotonic() + 23.0}
             state.queue.put((chain, payload, aggregators, event, result_box))
 
-            if not event.wait(timeout=25.0):
-                self.send_response(504)
-                self.end_headers()
-                self.wfile.write(b'{"error": "Matcha bridge evaluation timeout"}')
+            if not event.wait(timeout=23.0):
+                # The client waits 25 seconds. Leave room to deliver this error,
+                # and prevent abandoned work from being evaluated later.
+                result_box["deadline"] = 0.0
+                self.send_quote_response(504, {"error": "Matcha bridge evaluation timeout"})
                 return
 
             if "error" in result_box:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": result_box["error"]}).encode("utf-8"))
+                self.send_quote_response(500, {"error": result_box["error"]})
                 return
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(result_box["result"]).encode("utf-8"))
+            self.send_quote_response(200, result_box["result"])
 
     try:
         server = ThreadingHTTPServer((host, port), BridgeHandler)

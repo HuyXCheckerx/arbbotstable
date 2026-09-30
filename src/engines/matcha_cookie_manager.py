@@ -463,11 +463,8 @@ def get_valid_cookies(
     if cached is not None and not force_refresh:
         return cached
 
-    # If on a VPS and cookies are missing or empty, force synchronous solve so workers never run cookie-less
-    if is_vps() and is_cookie_file_missing_or_empty(CACHE_FILE):
-        logger.info("[CookieManager] VPS detected with missing/empty cookies. Executing synchronous solve...")
-        non_blocking = False
-
+    # Quote workers must remain non-blocking on every host. Startup callers that
+    # need to wait for cookies can explicitly request non_blocking=False.
     # In non-blocking mode, signal background solver and return cached cookies immediately
     if non_blocking:
         trigger_background_solve()

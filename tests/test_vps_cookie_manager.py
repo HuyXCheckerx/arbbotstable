@@ -92,17 +92,24 @@ class VpsCookieManagerTests(unittest.TestCase):
             self.assertEqual(cookies[0]["value"], "existing_val")
             mock_solve.assert_not_called()
 
-    def test_get_valid_cookies_forces_sync_solve_on_vps_when_missing(self):
-        mock_cookies = [{"name": "_vcrcs", "value": "val456", "domain": "meta.matcha.xyz"}]
+    def test_missing_vps_cookies_do_not_block_quote_workers(self):
+        with patch.object(cm, "CACHE_FILE", self.test_cache), \
+             patch.object(cm, "is_vps", return_value=True), \
+             patch.object(cm, "trigger_background_solve") as background, \
+             patch.object(cm, "_solve_challenge") as solve:
+            self.assertEqual(cm.get_valid_cookies(non_blocking=True), [])
+            background.assert_called_once()
+            solve.assert_not_called()
+
+    def test_explicit_blocking_cookie_request_still_waits(self):
+        cookies = [{"name": "_vcrcs", "value": "test", "domain": "meta.matcha.xyz"}]
         with patch.object(cm, "CACHE_FILE", self.test_cache), \
              patch.object(cm, "LOCK_FILE", self.test_lock), \
-             patch.object(cm, "is_vps", return_value=True), \
-             patch.object(cm, "_solve_challenge", return_value=mock_cookies) as mock_solve:
-            
-            # Non-blocking is requested, but because it's on VPS and cache is empty, it must solve synchronously
-            cookies = cm.get_valid_cookies(non_blocking=True)
-            self.assertEqual(len(cookies), 1)
-            mock_solve.assert_called_once()
+             patch.object(cm, "_solve_challenge", return_value=cookies) as solve, \
+             patch.object(cm, "trigger_background_solve") as background:
+            self.assertEqual(cm.get_valid_cookies(non_blocking=False), cookies)
+            solve.assert_called_once()
+            background.assert_not_called()
 
 
 if __name__ == "__main__":

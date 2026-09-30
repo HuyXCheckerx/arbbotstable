@@ -2,26 +2,32 @@
 
 ## Standalone LlamaSwap quotes
 
-`scripts/get_defillama_quotes.py` queries `swap-api.defillama.com` for Ethereum
-USDC, USDG, and PYUSD quotes. It uses the request format observed in LlamaSwap's
-frontend (`POST /dexAggregatorQuote`), which is separate from the documented
-DefiLlama Pro data API. Authentication compatibility depends on that service.
-
-Put `DEFILLAMA_SWAP_API_KEY=YOUR_KEY` in `.env.defillama` (Git-ignored), or set it
-as an environment variable. The script uses only a public taker address; it never
-signs, approves, or submits transactions and does not change sniper settings.
+`scripts/get_defillama_quotes.py` opens the normal LlamaSwap website, selects an
+Ethereum stablecoin pair, enables “Hide IP” to use `swap-api.defillama.com`, and
+reads the website's quote responses. It does not use your API key. The website
+manages its own internal request configuration. No wallet is connected, so these
+are indicative website quotes, not executable quotes for your bot's taker.
 
 ```bash
 python scripts/get_defillama_quotes.py --sell USDG --buy PYUSD --amount 100
-python scripts/get_defillama_quotes.py --sell PYUSD --buy USDC --amount 1000 --protocol "1inch" --output logs/llama-quotes.json
+python scripts/get_defillama_quotes.py --headful --watch --interval 30 --output logs/llama-quotes.json
 ```
 
-The defaults compare `1inch` and `Matcha/0x v2`. `--amount` is in tokens, and
-`--slippage 0.1` means 0.1 percent. Use `--taker 0x...` to override the configured
-public executor. `--json` includes sanitized unsigned quote data. No quotes means
-exit status 1. A Cloudflare challenge is reported separately from API errors;
-it does not establish that a key is valid or invalid. Keys and authenticated URLs
-are omitted from error output.
+Watch mode keeps the same browser/context open while the website automatically
+refreshes. `--interval` controls reporting, not the site's request frequency.
+Cookies and local storage are saved in the Git-ignored
+`.local/llamaswap/browser-state.json` with owner-only file permissions and reused
+on the next run. Treat this file as private. The browser controls connection reuse;
+a persistent session does not guarantee a permanently open TCP connection.
+
+Defaults display `1inch` and `Matcha/0x v2`; `--protocol` filters reported adapters,
+while the website may request other adapters too. `--timeout 45` controls the first
+collection window. Reports include timestamps so earlier quotes are identifiable.
+`--json` prints reports; no usable quote exits with status 1 (Ctrl+C: 130).
+The browser is visible by default: this mode returned real quotes across repeated
+requests in testing. `--headless` is available, but the headless test failed despite
+obtaining a clearance cookie. Cookies alone do not guarantee endpoint access.
+The script never signs, approves, or submits transactions, or changes sniper settings.
 
 Ethereum and Solana stablecoin arbitrage bot with a live operational dashboard.
 The profit sniper checks both venue orders between Stable.com and MetaMatcha on
@@ -592,3 +598,23 @@ The container must include `git`, Python, pip, and outbound GitHub access. If Pt
 - Logs are written under `logs/` and should be rotated by the host.
 - `bot_state.db` uses SQLite transactions and write-ahead logging so the dashboard never reads a partially written update.
 - The two exchange legs are separate transactions. Use strict notional limits and supervise the bot until atomic execution or a bounded-loss unwind policy is implemented.
+
+### Liquidity monitoring in start_sniper
+
+Stable.com capacity shortages and capacity changes now show `WATCHING`, without
+setting a route cooldown. The scheduler batches on-chain payout-token balance
+reads for waiting routes (at most once every two seconds during scan loops).
+It watches the token Stable sends, so a Stable USDG → PYUSD leg watches PYUSD.
+A balance increase makes the route eligible on the next scan. An unchanged balance
+or unavailable monitoring RPC still permits a full route check every ten seconds;
+this catches backend readiness after a refill without requiring another transfer.
+Long-running route checks can delay the next scheduler pass.
+
+On-chain balances only trigger a fresh check. They do not replace backend order
+validation, reserve rules, sizing, profit checks, simulation, or transaction guards.
+`--capacity-cooldown-seconds` still applies to flash-loan funding shortages;
+`--unstable-capacity-cooldown-seconds` is retained for CLI compatibility but no longer
+pauses Stable capacity checks. Market `no-route` defaults to a ten-second retry
+(`SNIPER_NO_ROUTE_COOLDOWN_SECONDS` / `--no-route-cooldown-seconds` can override it).
+Concurrent failures of one provider share a backoff window; a failure after that
+window expires increases backoff. Provider Retry-After delays are still respected.

@@ -57,5 +57,63 @@ class DefillamaQuoteTests(unittest.TestCase):
                 raw_amount(amount)
 
 
-if __name__ == "__main__":
+class BrowserQuoteTests(unittest.TestCase):
+    def test_identity_excludes_keys_and_unrelated_hosts(self):
+        from scripts.defillama_browser import quote_identity
+        self.assertIsNone(quote_identity('https://example.com/dexAggregatorQuote?protocol=1inch'))
+        value = quote_identity(API + '?protocol=1inch&api_key=secret&amount=100')
+        self.assertEqual(value['protocol'], '1inch')
+        self.assertNotIn('secret', str(value))
+
+    def test_browser_response_never_exports_provider_payload(self):
+        from scripts.defillama_browser import quote_result
+        value = quote_result('1inch', 200, {}, {'amountReturned': '100123456', 'url': '?api_key=secret'})
+        self.assertEqual(value['amount_out'], '100.123456')
+        self.assertNotIn('secret', str(value))
+        self.assertEqual(quote_result('1inch', 403, {'cf-mitigated': 'challenge'}, {})['status'], 'error')
+        self.assertEqual(quote_result('1inch', 200, {}, {'amountReturned': 'NaN'})['status'], 'no_quote')
+
+    def test_session_refresh_preserves_previous_quote_and_filters_pair(self):
+        from scripts.defillama_browser import BrowserQuotes
+        from urllib.parse import urlencode
+        browser = BrowserQuotes(tokens=TOKENS, sell='USDG', buy='PYUSD', amount='100',
+            slippage='0.1', protocols=['1inch'], state_path='/unused')
+        browser.page = Mock()
+        request = Mock(url=API + '?' + urlencode({'protocol': '1inch', 'from': TOKENS['USDG'],
+                                                'to': TOKENS['PYUSD'], 'amount': '100000000'}))
+        browser.request(request)
+        response = Mock(url=request.url, status=200, headers={})
+        response.json.return_value = {'amountReturned': '100123456'}
+        browser.response(response)
+        first = browser.snapshot(1)[0]
+        browser.request(request)
+        second = browser.snapshot(1)[0]
+        self.assertEqual(first['amount_out'], second['amount_out'])
+        self.assertEqual(first['updated_at'], second['updated_at'])
+        self.assertTrue(second['refreshing'])
+        browser.failed(request)
+        self.assertEqual(browser.snapshot(1)[0]['status'], 'error')
+        self.assertIsNone(browser.identity(request.url.replace('100000000', '200000000')))
+
+
+    def test_watch_uses_one_context_and_defaults_to_visible_browser(self):
+        from scripts.get_defillama_quotes import main
+        from unittest.mock import patch
+        import contextlib
+        import io
+        with patch('scripts.defillama_browser.BrowserQuotes') as factory:
+            session = factory.return_value.__enter__.return_value
+            session.snapshot.side_effect = [[{'protocol': '1inch', 'status': 'quoted',
+                                             'amount_out': '99.98'}], KeyboardInterrupt()]
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = main(['--watch', '--timeout', '1'])
+            self.assertEqual(result, 130)
+            factory.assert_called_once()
+            self.assertTrue(factory.call_args.kwargs['headful'])
+            self.assertNotIn('key', factory.call_args.kwargs)
+            self.assertEqual(session.snapshot.call_count, 2)
+            factory.return_value.__exit__.assert_called_once()
+
+
+if __name__ == '__main__':
     unittest.main()

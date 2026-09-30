@@ -105,7 +105,7 @@ def render_dashboard(snapshot: dict, *, width: int, height: int, elapsed: float 
     counts = Text(
         f" Checks {summary.get('checks', 0)}  Ready {summary.get('ready', 0)}  "
         f"Conf {summary.get('confirmed', 0)}  Pending {summary.get('submitted', 0)}  "
-        f"No trade {summary.get('no_trade', 0)}  Pause {summary.get('paused', 0)}  Err {summary.get('errors', 0)}",
+        f"No trade {summary.get('no_trade', 0)}  Watch {summary.get('watching', 0)}  Pause {summary.get('paused', 0)}  Err {summary.get('errors', 0)}",
         style="dim", overflow="ellipsis", no_wrap=True,
     )
     side_by_side = width >= 136 and len({r['chain'] for r in routes}) > 1
@@ -133,7 +133,7 @@ def render_dashboard(snapshot: dict, *, width: int, height: int, elapsed: float 
         table.add_column("Status", min_width=10, no_wrap=True)
         table.add_column("Age", justify="right", width=5, no_wrap=True)
         styles = {"CHECKING": "cyan", "READY": "bold green", "CONFIRMED": "bold green",
-                  "PAUSED": "yellow", "ERROR": "bold red", "REVERTED": "bold red",
+                  "WATCHING": "cyan", "PAUSED": "yellow", "ERROR": "bold red", "REVERTED": "bold red",
                   "STOPPED": "bold magenta", "DROPPED": "yellow"}
         for row in visible:
             state = str(row.get("state", "WAITING"))
