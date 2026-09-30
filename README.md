@@ -599,6 +599,26 @@ The container must include `git`, Python, pip, and outbound GitHub access. If Pt
 - `bot_state.db` uses SQLite transactions and write-ahead logging so the dashboard never reads a partially written update.
 - The two exchange legs are separate transactions. Use strict notional limits and supervise the bot until atomic execution or a bounded-loss unwind policy is implemented.
 
+### Warm Solana engines and pushed Ethereum blocks
+
+Solana route checks run in warm Node processes, one per route, instead of a
+new `tsx` process per check. This removes ~1.5 s of startup and SDK imports per
+check and reuses keep-alive connections to RPC and quote endpoints. Each check
+still gets the same arguments and environment as a one-shot process, and the
+engine keeps cross-check state in `logs/`, so results are unchanged. Workers are
+prestarted for each arbitrage's preferred route, restart after 500 checks or
+10 idle minutes, and are killed on timeout. A worker that exits mid-check is
+reported from its plan file and never re-run. If a worker cannot start, the
+sniper uses one-shot processes for ten minutes. Set
+`SNIPER_SOLANA_PERSISTENT_WORKERS=false` to always use one-shot processes.
+Worker startup diagnostics go to `logs/solana-worker.log`.
+
+The Ethereum worker subscribes to `newHeads` over WebSocket (`ETH_WS_URL`, or
+`ETH_RPC_URL` with `https` replaced by `wss`). The base-fee gate and the
+transaction builder use a pushed header while it is under 14 s old; otherwise
+they make the same HTTP request as before. Gas estimation, priority fee,
+nonce, and base-fee reads now run concurrently: one round trip instead of four.
+
 ### Liquidity monitoring in start_sniper
 
 Stable.com capacity shortages and capacity changes now show `WATCHING`, without

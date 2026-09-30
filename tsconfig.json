@@ -9,5 +9,9 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["solana_flash_arb.ts", "tests/solana_flash_arb.test.ts"]
+  "include": [
+    "solana_flash_arb.ts",
+    "src/engines/solana_engine_worker.ts",
+    "tests/solana_flash_arb.test.ts"
+  ]
 }

@@ -918,6 +918,38 @@ class CrosschainSniperTests(unittest.TestCase):
             # 0x77359400 = 2000000000 wei = 2.0 Gwei
             self.assertEqual(fee, Decimal("2.0"))
 
+    def test_gas_gate_prefers_pushed_base_fee_and_falls_back_to_http(self):
+        import crosschain_sniper
+
+        stream = Mock()
+        kwargs = dict(
+            live=False,
+            base_threshold=Decimal("4"),
+            interval_seconds=2,
+            cooldown_seconds=15,
+            timeout_seconds=30,
+            cooldown_policy=CooldownPolicy(30, 300, 3600, 10, 300, 30, 60),
+            backoff=AdaptiveBackoff(),
+            once=True,
+            stop=threading.Event(),
+            logger=Mock(),
+            eth_max_base_fee_gwei=Decimal("10"),
+        )
+        with patch.object(crosschain_sniper.eth_head_stream, "current", return_value=stream), \
+                patch("crosschain_sniper.fetch_ethereum_base_fee_gwei") as fetch, \
+                patch("crosschain_sniper.run_route") as run:
+            stream.base_fee_gwei.return_value = Decimal("50")
+            worker("ethereum", [Route("ethereum", "USDC/USDG")], **kwargs)
+            fetch.assert_not_called()
+            run.assert_not_called()
+
+            # No fresh pushed header: the existing HTTP read decides.
+            stream.base_fee_gwei.return_value = None
+            fetch.return_value = Decimal("50")
+            worker("ethereum", [Route("ethereum", "USDC/USDG")], **kwargs)
+            fetch.assert_called_once()
+            run.assert_not_called()
+
     def test_is_subprocess_mocked_detection(self):
         self.assertFalse(is_subprocess_mocked())
         with patch("crosschain_sniper.subprocess.run"):

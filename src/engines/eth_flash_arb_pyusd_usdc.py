@@ -2154,22 +2154,48 @@ def prepare_transaction(
         "chainId": CHAIN_ID,
     }
 
-    try:
-        estimated_gas = call.estimate_gas(tx_params)
-    except Exception as exc:
+    def estimate() -> int:
         try:
-            call.call(tx_params)
-        except Exception as call_exc:
-            raise classify_atomic_simulation_error(call_exc) from call_exc
-        raise classify_atomic_simulation_error(exc) from exc
+            return call.estimate_gas(tx_params)
+        except Exception as exc:
+            try:
+                call.call(tx_params)
+            except Exception as call_exc:
+                raise classify_atomic_simulation_error(call_exc) from call_exc
+            raise classify_atomic_simulation_error(exc) from exc
+
+    def latest_base_fee() -> int | None:
+        # The sniper's newHeads subscription already holds the latest header.
+        stream_module = sys.modules.get("src.core.eth_head_stream")
+        stream = stream_module.current() if stream_module else None
+        pushed = stream.base_fee_wei() if stream else None
+        if pushed is not None:
+            return pushed
+        return web3.eth.get_block("latest").get("baseFeePerGas")
+
+    # These reads are independent, so pay one round trip instead of four. The
+    # simulation result still decides first, exactly as when run in sequence.
+    pool = ThreadPoolExecutor(max_workers=4)
+    try:
+        estimate_future = pool.submit(estimate)
+        base_fee_future = pool.submit(latest_base_fee)
+        priority_fee_future = pool.submit(lambda: web3.eth.max_priority_fee)
+        nonce_future = pool.submit(
+            web3.eth.get_transaction_count, web3.to_checksum_address(operator)
+        )
+        estimated_gas = estimate_future.result()
+        base_fee = base_fee_future.result()
+        priority_fee = priority_fee_future.result()
+        nonce = nonce_future.result()
+    finally:
+        # A failed simulation should not wait for the other reads.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     gas_limit = int(
         (Decimal(estimated_gas) * gas_limit_multiplier).to_integral_value(
             rounding=ROUND_CEILING
         )
     )
-    latest_block = web3.eth.get_block("latest")
-    base_fee = latest_block.get("baseFeePerGas")
     if base_fee is None:
         raise ArbError("RPC block header did not include baseFeePerGas")
 
@@ -2181,7 +2207,6 @@ def prepare_transaction(
                 f"--max-base-fee-gwei limit {max_base_fee_gwei:.3f} Gwei"
             )
 
-    priority_fee = web3.eth.max_priority_fee
     computed_max_fee = (base_fee * 2) + priority_fee
     if max_fee_gwei_override is not None:
         override_wei = int(
@@ -2198,7 +2223,6 @@ def prepare_transaction(
     else:
         max_fee_per_gas = computed_max_fee
 
-    nonce = web3.eth.get_transaction_count(web3.to_checksum_address(operator))
     tx_params.update(
         {
             "nonce": nonce,

@@ -3665,8 +3665,8 @@ export async function broadcastJitoOrFallback(
   return { signature, method: "standard-rpc" };
 }
 
-async function main(): Promise<void> {
-  const cli = parseCli(process.argv.slice(2));
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  const cli = parseCli(argv);
   const config = readConfig(cli);
   if (config.provider === "solend") {
     throw new Error(

@@ -34,6 +34,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # that launcher, direct script execution, and python -m execution.
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from src.core import eth_head_stream
+from src.engines.solana_worker_pool import (
+    SolanaWorkerPool,
+    WorkerDied,
+    WorkerUnavailable,
+    persistent_workers_enabled,
+)
 from src.engines.stable_liquidity_monitor import StableLiquidityMonitor
 
 LOG_DIR = PROJECT_ROOT / "logs"
@@ -1362,6 +1369,35 @@ def run_ethereum_route_direct(
         )
 
 
+SOLANA_WORKERS = SolanaWorkerPool(PROJECT_ROOT, LOG_DIR / "solana-worker.log")
+
+
+def solana_worker_argv(route: Route, invocation: Invocation) -> list[str] | None:
+    """Engine arguments for a warm worker, or None to start a one-shot process."""
+    if (
+        route.chain != "solana"
+        or is_subprocess_mocked()
+        or not persistent_workers_enabled()
+        or not SOLANA_WORKERS.available()
+    ):
+        return None
+    script = str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts")
+    try:
+        return list(invocation.command[invocation.command.index(script) + 1:])
+    except ValueError:
+        return None
+
+
+def fresh_plan_text(route: Route, since_wall: float) -> str:
+    plan_path = PLAN_DIR / f"{route.key}.json"
+    try:
+        if plan_path.stat().st_mtime >= since_wall:
+            return plan_path.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return ""
+
+
 def run_route(
     route: Route,
     *,
@@ -1392,19 +1428,41 @@ def run_route(
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0  # SW_HIDE
     try:
-        result = subprocess.run(
-            invocation.command,
-            cwd=PROJECT_ROOT,
-            env=invocation.environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-            creationflags=creationflags,
-            startupinfo=startupinfo,
-        )
+        result = None
+        worker_argv = solana_worker_argv(route, invocation)
+        if worker_argv is not None:
+            try:
+                result = SOLANA_WORKERS.run(
+                    route.key,
+                    worker_argv,
+                    invocation.environment,
+                    timeout_seconds,
+                )
+            except WorkerUnavailable:
+                result = None
+            except WorkerDied as exc:
+                # The check may have broadcast before the worker died, so it is
+                # never re-run; a plan it wrote carries any transaction status.
+                result = subprocess.CompletedProcess(
+                    invocation.command,
+                    1,
+                    stdout=fresh_plan_text(route, started_wall),
+                    stderr=f"ERROR: {exc}",
+                )
+        if result is None:
+            result = subprocess.run(
+                invocation.command,
+                cwd=PROJECT_ROOT,
+                env=invocation.environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
     except subprocess.TimeoutExpired as exc:
         captured = "\n".join(
             (
@@ -1999,7 +2057,11 @@ def worker(
 
     while not stop.is_set():
         if chain == "ethereum" and eth_max_base_fee_gwei is not None:
-            current_base_fee = fetch_ethereum_base_fee_gwei(eth_rpc_url, timeout=5.0)
+            head_stream = eth_head_stream.current()
+            # Pushed newHeads skip an HTTP round trip (and fallback timeouts).
+            current_base_fee = head_stream.base_fee_gwei() if head_stream else None
+            if current_base_fee is None:
+                current_base_fee = fetch_ethereum_base_fee_gwei(eth_rpc_url, timeout=5.0)
             if current_base_fee is not None and current_base_fee > eth_max_base_fee_gwei:
                 logger.info(
                     "PAUSE   | %-17s | %.0fs | current base fee (%.3f Gwei) exceeds limit (%.3f Gwei); waiting for lower gas...",
@@ -2406,6 +2468,16 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 logger.warning("Failed to initialize Matcha browser bridge: %s", exc)
 
+        if "ethereum" in args.chains and not is_subprocess_mocked():
+            eth_head_stream.start(eth_rpc_url)
+        solana_routes = [route for route in routes if route.chain == "solana"]
+        if solana_routes and persistent_workers_enabled() and not is_subprocess_mocked():
+            # Preferred route of each arbitrage; its standby starts on demand.
+            SOLANA_WORKERS.prewarm(
+                [group[0].key for group in arbitrage_groups(solana_routes)],
+                dict(os.environ),
+            )
+
         threads = []
         for chain in args.chains:
             env_pairs = (
@@ -2454,6 +2526,8 @@ def main(argv: list[str] | None = None) -> int:
                 thread.join()
         stop.set()
         watcher.join(timeout=1)
+        SOLANA_WORKERS.close()
+        eth_head_stream.stop()
         dashboard.stop()
         try:
             from src.engines.matcha_cookie_manager import stop_background_cookie_solver
