@@ -1863,9 +1863,14 @@ def _handle_route_outcome(
             if _consecutive_bridge_failures >= 3:
                 _consecutive_bridge_failures = 0
                 logger.warning(
-                    "[MatchaBridge] %d consecutive bridge failures detected; restarting bridge daemon...",
+                    "[MatchaBridge] %d consecutive bridge failures detected; verifying proxy health and restarting bridge daemon...",
                     3,
                 )
+                try:
+                    from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
+                    check_and_rotate_proxy_if_needed(logger=logger, verify_current=True)
+                except Exception as exc:
+                    logger.debug("[ProxyManager] Proxy rotation on bridge failure error: %s", exc)
                 try:
                     from src.engines.matcha_browser_bridge import stop_bridge_server, ensure_bridge_running
                     stop_bridge_server()
@@ -2132,6 +2137,23 @@ def watch_for_stop_request(stop: threading.Event, logger: logging.Logger) -> Non
             logger.info("SAFETY  | STOPPING  | cooperative stop requested")
             stop.set()
             return
+
+
+def proxy_lifecycle_guardian(
+    stop: threading.Event,
+    logger: logging.Logger,
+    check_interval: float = 300.0,
+) -> None:
+    """Continuously monitors proxy expiration and health in the background.
+    Preemptively rotates proxy before 24h expiration or upon IP failure.
+    """
+    logger.info("[ProxyGuardian] Background proxy lifecycle guardian started (interval: %.0fs)", check_interval)
+    while not stop.wait(check_interval):
+        try:
+            from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
+            check_and_rotate_proxy_if_needed(logger=logger, min_remaining_seconds=600.0)
+        except Exception as exc:
+            logger.debug("[ProxyGuardian] Proxy check error: %s", exc)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2493,6 +2515,15 @@ def main(argv: list[str] | None = None) -> int:
                 ensure_bridge_running(timeout=45.0)
             except Exception as exc:
                 logger.warning("Failed to initialize Matcha browser bridge: %s", exc)
+
+            if not args.no_proxy and os.getenv("PROXYISP_API_KEY", "").strip():
+                guardian_thread = threading.Thread(
+                    target=proxy_lifecycle_guardian,
+                    name="proxy-guardian",
+                    args=(stop, logger),
+                    daemon=True,
+                )
+                guardian_thread.start()
 
         threads = []
         for chain in args.chains:

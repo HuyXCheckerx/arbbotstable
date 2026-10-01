@@ -320,6 +320,35 @@ def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
     has_vcrcs = any(c.get("name") == "_vcrcs" for c in cookies)
     has_cf = any(c.get("name") == "cf_clearance" for c in cookies)
 
+    # Check if proxy rotation is needed before direct fallback
+    if proxy_url and not (has_vcrcs or has_cf):
+        logger.warning(
+            "[CookieManager] Proxy failed to collect clearance cookies; checking if proxy rotation is needed..."
+        )
+        if os.getenv("PROXYISP_API_KEY", "").strip():
+            try:
+                from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
+                rotated = check_and_rotate_proxy_if_needed(logger=logger, verify_current=True, reload_bridge=False)
+                if rotated and rotated != proxy_url:
+                    logger.info("[CookieManager] Rotated to fresh proxy: %s. Retrying clearance solve...", rotated)
+                    p = urlparse(rotated)
+                    scheme = p.scheme or "http"
+                    rotated_kwargs = dict(launch_kwargs)
+                    rotated_kwargs["proxy"] = {
+                        "server": f"{scheme}://{p.hostname}:{p.port}",
+                        **({"username": p.username, "password": p.password} if p.username else {}),
+                    }
+                    if "--no-proxy-server" in rotated_kwargs.get("args", []):
+                        rotated_kwargs["args"] = [a for a in rotated_kwargs["args"] if a != "--no-proxy-server"]
+                    rotated_cookies = _execute_browser_solve(rotated_kwargs)
+                    if any(c.get("name") in ("_vcrcs", "cf_clearance") for c in rotated_cookies):
+                        cookies = rotated_cookies
+                        has_vcrcs = any(c.get("name") == "_vcrcs" for c in cookies)
+                        has_cf = any(c.get("name") == "cf_clearance" for c in cookies)
+                        proxy_url = rotated
+            except Exception as rot_exc:
+                logger.debug("[CookieManager] Proxy auto-rotation on cookie failure error: %s", rot_exc)
+
     # Fall back to direct connection if proxy failed to acquire clearance tokens
     if proxy_url and not (has_vcrcs or has_cf):
         logger.warning(

@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import ssl
 import sys
+import threading
 import time
 from typing import Any
 import urllib.error
@@ -503,6 +504,7 @@ def setup_sniper_proxy(
     log_info = logger.info if logger else print
     log_warn = logger.warning if logger else print
 
+    load_dotenv(env_path)
     if not api_key:
         api_key = os.getenv("PROXYISP_API_KEY", "").strip()
     if not api_key:
@@ -586,6 +588,162 @@ def setup_sniper_proxy(
         log_warn(f"[ProxyManager] Failed to purchase new residential proxy: {exc}. Disabling proxy to connect directly.")
         update_env_proxy("", env_path=env_path)
         return ""
+
+
+_rotation_lock = threading.Lock()
+
+
+def check_and_rotate_proxy_if_needed(
+    api_key: str | None = None,
+    logger: logging.Logger | None = None,
+    env_path: Path = ENV_FILE,
+    min_remaining_seconds: float = 600.0,
+    force: bool = False,
+    verify_current: bool = False,
+    reload_bridge: bool = True,
+) -> str | None:
+    """Runtime check and automated rotation for the active proxy:
+    1. If PROXYISP_API_KEY is missing, do nothing.
+    2. Check remaining lifetime and expiration of proxies on ProxyISP.
+    3. If active proxy is expired, expiring soon (<= min_remaining_seconds),
+       banned/failing connectivity, or force=True:
+       - Look for another active, unexpired proxy in the account that passes is_proxy_working().
+       - If none found or all expiring, auto-buy a new 1-day residential proxy from ProxyISP (auto_renew=False).
+       - Update .env and os.environ["MATCHA_PROXY"].
+       - Invalidate stale cookies.
+       - Reload Matcha browser bridge daemon so quotes immediately transition to the new proxy IP.
+       - Trigger background cookie solver.
+       - Return new proxy URL.
+    4. If active proxy is healthy and has sufficient remaining time, return current proxy URL.
+    """
+    with _rotation_lock:
+        log_info = logger.info if logger else print
+        log_warn = logger.warning if logger else print
+
+        load_dotenv(env_path)
+        if not api_key:
+            api_key = os.getenv("PROXYISP_API_KEY", "").strip()
+        if not api_key:
+            return os.getenv("MATCHA_PROXY")
+
+        current_proxy = os.getenv("MATCHA_PROXY", "").strip()
+
+        try:
+            status = get_proxies_status(api_key)
+        except Exception as exc:
+            log_warn(f"[ProxyManager] Error querying ProxyISP status during rotation check: {exc}")
+            return current_proxy
+
+        proxies = status.get("proxies", [])
+        curr_p = None
+        for p in proxies:
+            if p.get("proxy_url") == current_proxy:
+                curr_p = p
+                break
+
+        needs_rotation = False
+        reason = ""
+
+        if force:
+            needs_rotation = True
+            reason = "forced rotation requested"
+        elif not current_proxy:
+            needs_rotation = True
+            reason = "no active proxy configured in environment"
+        elif curr_p is None:
+            if verify_current and not is_proxy_working(current_proxy):
+                needs_rotation = True
+                reason = "current proxy not found in account and failed connectivity test"
+        elif curr_p.get("is_expired"):
+            needs_rotation = True
+            reason = f"current proxy {curr_p.get('name')} has expired"
+        elif curr_p.get("remaining_seconds", 0) <= min_remaining_seconds:
+            rem_str = curr_p.get("remaining_str", "0m")
+            needs_rotation = True
+            reason = f"current proxy {curr_p.get('name')} expires in {rem_str} (<= {min_remaining_seconds:.0f}s threshold)"
+        elif verify_current:
+            if not is_proxy_working(current_proxy):
+                needs_rotation = True
+                reason = f"current proxy {curr_p.get('name')} failed connectivity / MetaMatcha access (potential ban)"
+
+        if not needs_rotation:
+            return current_proxy
+
+        log_warn(f"[ProxyManager] Rotating proxy: {reason}")
+
+        # Check if an alternative active proxy in the account is available and working
+        working_proxy = None
+        for p in proxies:
+            p_url = p.get("proxy_url")
+            if not p_url or p_url == current_proxy:
+                continue
+            if p.get("is_expired") or p.get("remaining_seconds", 0) <= min_remaining_seconds:
+                continue
+            log_info(f"[ProxyManager] Testing alternative active proxy {p.get('name')} ({p_url})...")
+            if is_proxy_working(p_url):
+                working_proxy = p_url
+                log_info(f"[ProxyManager] Alternative proxy {p.get('name')} is WORKING! Switching to this proxy.")
+                break
+
+        if working_proxy:
+            update_env_proxy(working_proxy, env_path=env_path)
+            new_selected = working_proxy
+        else:
+            # Need to buy a new 1-day residential proxy
+            log_info("[ProxyManager] No alternative working proxy available. Purchasing new 1-day VN residential proxy...")
+            balance = status.get("balance_vnd", 0.0)
+            if balance < VN_RESIDENTIAL_DAILY_PRICE_VND:
+                log_warn(
+                    f"[ProxyManager] Insufficient balance ({balance:,.1f} VND) to auto-buy proxy "
+                    f"(requires {VN_RESIDENTIAL_DAILY_PRICE_VND:,.1f} VND). Cannot rotate."
+                )
+                return current_proxy
+
+            try:
+                known_ids = {p.get("id") for p in proxies if p.get("id")}
+                order = buy_residential_proxy(api_key, days=1, auto_renew=False)
+                order_no = order.get("order_number", "Unknown")
+                log_info(f"[ProxyManager] Order submitted: {order_no} (Status: {order.get('status')})")
+
+                new_p = wait_for_new_proxy(api_key, known_ids, timeout=35.0)
+                if not new_p:
+                    log_warn(f"[ProxyManager] Proxy allocation timed out for order {order_no}. Cannot complete rotation.")
+                    return current_proxy
+
+                disable_proxy_autorenew(api_key, new_p.get("id"))
+                new_url = format_proxy_url(new_p)
+                log_info(f"[ProxyManager] Successfully purchased and provisioned new proxy: {new_p.get('name')} -> {new_url}")
+
+                update_env_proxy(new_url, env_path=env_path)
+                new_selected = new_url
+            except Exception as exc:
+                log_warn(f"[ProxyManager] Failed to purchase new residential proxy: {exc}")
+                return current_proxy
+
+        # Invalidate old cookies
+        if COOKIE_FILE.exists():
+            try:
+                COOKIE_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # Reload bridge daemon and background cookie solver
+        if reload_bridge:
+            try:
+                from src.engines.matcha_browser_bridge import stop_bridge_server, ensure_bridge_running
+                log_info("[ProxyManager] Restarting Matcha browser bridge with fresh proxy IP...")
+                stop_bridge_server()
+                ensure_bridge_running(timeout=45.0)
+            except Exception as exc:
+                log_warn(f"[ProxyManager] Bridge restart warning after proxy rotation: {exc}")
+
+        try:
+            from src.engines.matcha_cookie_manager import trigger_background_solve
+            trigger_background_solve()
+        except Exception:
+            pass
+
+        return new_selected
 
 
 def ensure_active_proxy(
@@ -687,6 +845,7 @@ def main() -> None:
     parser.add_argument("--buy", type=int, metavar="DAYS", help="Explicitly purchase 1 VN residential proxy for N days")
     parser.add_argument("--force-renew", action="store_true", help="Force purchase a new residential proxy immediately")
     parser.add_argument("--auto-select", action="store_true", help="Find a working proxy or renew if none work")
+    parser.add_argument("--rotate-if-needed", action="store_true", help="Verify active proxy and rotate if expired, banned, or expiring soon")
 
     args = parser.parse_args()
 
@@ -694,6 +853,12 @@ def main() -> None:
     if not api_key:
         print("[ERROR] PROXYISP_API_KEY not found in environment or .env")
         sys.exit(1)
+
+    # Runtime rotate if needed
+    if args.rotate_if_needed:
+        rotated = check_and_rotate_proxy_if_needed(api_key, verify_current=True)
+        print(f"\nActive Proxy: {rotated}")
+        return
 
     # Sniper start routine
     if args.sniper_start:

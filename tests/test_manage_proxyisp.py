@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from scripts.manage_proxyisp import (
     VN_RESIDENTIAL_DAILY_PRICE_VND,
     buy_residential_proxy,
+    check_and_rotate_proxy_if_needed,
     disable_proxy_autorenew,
     ensure_active_proxy,
     format_proxy_url,
@@ -278,6 +279,146 @@ class TestManageProxyISP(unittest.TestCase):
         result = disable_proxy_autorenew("fake_key", "proxy_123")
         self.assertTrue(result)
         mock_api_request.assert_called()
+
+    @patch("scripts.manage_proxyisp.update_env_proxy")
+    @patch("scripts.manage_proxyisp.get_proxies_status")
+    def test_check_and_rotate_no_op_when_sufficient_time(self, mock_status, mock_update_env):
+        mock_status.return_value = {
+            "balance_vnd": 10000.0,
+            "proxies": [
+                {
+                    "id": "p1",
+                    "name": "Proxy 1",
+                    "proxy_url": "http://u1:pw1@1.1.1.1:8000",
+                    "is_expired": False,
+                    "remaining_seconds": 3600.0,  # 1 hour remaining
+                    "remaining_str": "1h 0m",
+                }
+            ],
+        }
+        with patch.dict("os.environ", {"MATCHA_PROXY": "http://u1:pw1@1.1.1.1:8000"}):
+            res = check_and_rotate_proxy_if_needed("fake_key", min_remaining_seconds=600.0, reload_bridge=False)
+            self.assertEqual(res, "http://u1:pw1@1.1.1.1:8000")
+            mock_update_env.assert_not_called()
+
+    @patch("scripts.manage_proxyisp.is_proxy_working")
+    @patch("scripts.manage_proxyisp.update_env_proxy")
+    @patch("scripts.manage_proxyisp.get_proxies_status")
+    def test_check_and_rotate_switches_to_alternative_when_expiring(
+        self, mock_status, mock_update_env, mock_is_working
+    ):
+        mock_status.return_value = {
+            "balance_vnd": 10000.0,
+            "proxies": [
+                {
+                    "id": "p1",
+                    "name": "Proxy 1",
+                    "proxy_url": "http://u1:pw1@1.1.1.1:8000",
+                    "is_expired": False,
+                    "remaining_seconds": 120.0,  # 2m left <= 600s
+                    "remaining_str": "2m",
+                },
+                {
+                    "id": "p2",
+                    "name": "Proxy 2",
+                    "proxy_url": "http://u2:pw2@2.2.2.2:8000",
+                    "is_expired": False,
+                    "remaining_seconds": 80000.0,  # nearly 24h left
+                    "remaining_str": "22h 13m",
+                },
+            ],
+        }
+        mock_is_working.return_value = True
+        mock_update_env.return_value = True
+
+        with patch.dict("os.environ", {"MATCHA_PROXY": "http://u1:pw1@1.1.1.1:8000"}):
+            res = check_and_rotate_proxy_if_needed("fake_key", min_remaining_seconds=600.0, reload_bridge=False)
+            self.assertEqual(res, "http://u2:pw2@2.2.2.2:8000")
+            mock_update_env.assert_called_once_with("http://u2:pw2@2.2.2.2:8000", env_path=unittest.mock.ANY)
+
+    @patch("scripts.manage_proxyisp.disable_proxy_autorenew")
+    @patch("scripts.manage_proxyisp.wait_for_new_proxy")
+    @patch("scripts.manage_proxyisp.buy_residential_proxy")
+    @patch("scripts.manage_proxyisp.update_env_proxy")
+    @patch("scripts.manage_proxyisp.get_proxies_status")
+    def test_check_and_rotate_buys_new_when_all_expiring(
+        self, mock_status, mock_update_env, mock_buy, mock_wait, mock_disable_renew
+    ):
+        mock_status.return_value = {
+            "balance_vnd": 5000.0,
+            "proxies": [
+                {
+                    "id": "p1",
+                    "name": "Proxy 1",
+                    "proxy_url": "http://u1:pw1@1.1.1.1:8000",
+                    "is_expired": True,
+                    "remaining_seconds": 0.0,
+                    "remaining_str": "EXPIRED",
+                }
+            ],
+        }
+        mock_buy.return_value = {"order_number": "ORD-ROT-1", "status": "completed"}
+        mock_wait.return_value = {
+            "id": "p_rot_new",
+            "name": "Rotated Residential Proxy",
+            "host": "7.7.7.7",
+            "port": 7777,
+            "username": "rot_u",
+            "password": "rot_p",
+            "expiresAt": "2026-09-25T12:00:00",
+        }
+        mock_update_env.return_value = True
+
+        with patch.dict("os.environ", {"MATCHA_PROXY": "http://u1:pw1@1.1.1.1:8000"}):
+            res = check_and_rotate_proxy_if_needed("fake_key", min_remaining_seconds=600.0, reload_bridge=False)
+            self.assertEqual(res, "http://rot_u:rot_p@7.7.7.7:7777")
+            mock_buy.assert_called_once_with("fake_key", days=1, auto_renew=False)
+            mock_wait.assert_called_once()
+            mock_disable_renew.assert_called_once_with("fake_key", "p_rot_new")
+            mock_update_env.assert_called_once_with("http://rot_u:rot_p@7.7.7.7:7777", env_path=unittest.mock.ANY)
+
+    @patch("scripts.manage_proxyisp.is_proxy_working")
+    @patch("scripts.manage_proxyisp.disable_proxy_autorenew")
+    @patch("scripts.manage_proxyisp.wait_for_new_proxy")
+    @patch("scripts.manage_proxyisp.buy_residential_proxy")
+    @patch("scripts.manage_proxyisp.update_env_proxy")
+    @patch("scripts.manage_proxyisp.get_proxies_status")
+    def test_check_and_rotate_on_ban_detection(
+        self, mock_status, mock_update_env, mock_buy, mock_wait, mock_disable_renew, mock_is_working
+    ):
+        mock_status.return_value = {
+            "balance_vnd": 5000.0,
+            "proxies": [
+                {
+                    "id": "p1",
+                    "name": "Proxy 1",
+                    "proxy_url": "http://u1:pw1@1.1.1.1:8000",
+                    "is_expired": False,
+                    "remaining_seconds": 50000.0,  # 14 hours remaining
+                    "remaining_str": "14h",
+                }
+            ],
+        }
+        # Current proxy fails connectivity (e.g. banned by Vercel)
+        mock_is_working.return_value = False
+        mock_buy.return_value = {"order_number": "ORD-ROT-2", "status": "completed"}
+        mock_wait.return_value = {
+            "id": "p_clean",
+            "name": "Clean Proxy",
+            "host": "6.6.6.6",
+            "port": 6666,
+            "username": "clean_u",
+            "password": "clean_p",
+            "expiresAt": "2026-09-25T14:00:00",
+        }
+        mock_update_env.return_value = True
+
+        with patch.dict("os.environ", {"MATCHA_PROXY": "http://u1:pw1@1.1.1.1:8000"}):
+            res = check_and_rotate_proxy_if_needed(
+                "fake_key", min_remaining_seconds=600.0, verify_current=True, reload_bridge=False
+            )
+            self.assertEqual(res, "http://clean_u:clean_p@6.6.6.6:6666")
+            mock_buy.assert_called_once_with("fake_key", days=1, auto_renew=False)
 
 
 if __name__ == "__main__":
