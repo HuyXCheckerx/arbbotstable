@@ -297,7 +297,7 @@ def selected_routes(
 
 # Outcomes meaning the loan token cannot be borrowed right now, so the
 # equivalent route that borrows the other token should be checked instead.
-FUNDING_UNAVAILABLE_CATEGORIES = frozenset({"flash-liquidity", "marginfi-utilization"})
+FUNDING_UNAVAILABLE_CATEGORIES = frozenset({"flash-liquidity", "flash-conflict", "marginfi-utilization"})
 
 
 def arbitrage_groups(routes: list[Route]) -> list[list[Route]]:
@@ -305,7 +305,15 @@ def arbitrage_groups(routes: list[Route]) -> list[list[Route]]:
     groups: dict[str, list[Route]] = {}
     for route in routes:
         groups.setdefault(route.arbitrage_key, []).append(route)
-    return list(groups.values())
+    result = []
+    for group in groups.values():
+        # On Ethereum, prefer Morpho-funded loans (USDC, PYUSD) over Uniswap v4 (USDG)
+        sorted_group = sorted(
+            group,
+            key=lambda r: (1 if r.chain == "ethereum" and r.loan == "USDG" else 0),
+        )
+        result.append(sorted_group)
+    return result
 
 
 def active_routes(
@@ -531,6 +539,12 @@ def failure_category(detail: str) -> str:
     ) or ("flash liquidity is" in lowered and "below requested" in lowered):
         return "flash-liquidity"
     if (
+        "poolmanager" in lowered
+        or "alreadyunlocked" in lowered
+        or "conflicts with this matcha route" in lowered
+    ):
+        return "flash-conflict"
+    if (
         "no_routes_found" in lowered
         or "no routes found" in lowered
         or "no executable simulated quote" in lowered
@@ -539,9 +553,6 @@ def failure_category(detail: str) -> str:
         or "exceeds solana 1232-byte size limit" in lowered
         or "does not support loan token" in lowered
         or "unsupported loan token" in lowered
-        or "poolmanager" in lowered
-        or "alreadyunlocked" in lowered
-        or "conflicts with this matcha route" in lowered
     ):
         return "no-route"
     if "6026" in lowered or "illegalutilizationratio" in lowered or "utilization ratio" in lowered:
@@ -694,7 +705,7 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         if "does not support loan token" in lowered or "unsupported loan token" in lowered:
             return f"{route.chain.title()} executor does not support {route.loan}/{route.intermediate}"
         return f"{route.dex_name} has no executable {dex_leg} route right now"
-    if category == "flash-liquidity":
+    if category in {"flash-liquidity", "flash-conflict"}:
         return f"{route.loan} flash loan cannot be funded right now: {detail}"
     if category == "marginfi-utilization":
         return (
