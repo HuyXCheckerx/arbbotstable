@@ -141,6 +141,39 @@ def _stop_bridge_server_locked(base_url: str | None = None) -> bool:
             except Exception:
                 pass
 
+    if sys.platform == "win32":
+        try:
+            port_to_check = DEFAULT_PORT
+            if base_url:
+                try:
+                    parsed_port = urllib.parse.urlsplit(base_url).port
+                    if parsed_port:
+                        port_to_check = parsed_port
+                except Exception:
+                    pass
+            creation_flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            netstat_out = subprocess.check_output(
+                ["netstat", "-ano", "-p", "tcp"],
+                text=True,
+                creationflags=creation_flags,
+            )
+            port_str = f":{port_to_check}"
+            for line in netstat_out.splitlines():
+                if port_str in line and "LISTENING" in line:
+                    parts = line.strip().split()
+                    if parts:
+                        listen_pid = parts[-1]
+                        if listen_pid.isdigit() and int(listen_pid) != os.getpid():
+                            subprocess.run(
+                                ["taskkill", "/F", "/T", "/PID", listen_pid],
+                                capture_output=True,
+                                check=False,
+                                creationflags=creation_flags,
+                            )
+                            stopped = True
+        except Exception:
+            pass
+
     if stopped:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -192,8 +225,12 @@ def _spawn_bridge() -> subprocess.Popen:
     return proc
 
 
+_last_bridge_recycle: float = 0.0
+
+
 def ensure_bridge_running(timeout: float = 50.0) -> bool:
     """A warming/busy daemon is not dead. Only confirmed mismatches are replaced."""
+    global _last_bridge_recycle
     base_url = get_bridge_base_url()
     deadline = time.monotonic() + timeout
     if is_bridge_ready(base_url):
@@ -212,10 +249,17 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                     if not _stop_bridge_server_locked(base_url):
                         return False
                     status = {}
-                # Fatal startup errors need intervention, not an endless restart loop.
+                # If worker reported an error, recycle the crashed daemon so it doesn't wedge forever
                 if status.get("error"):
-                    logger.warning("[MatchaBridge] Worker reported a startup error; see bridge log")
-                    return False
+                    now = time.monotonic()
+                    if now - _last_bridge_recycle >= 15.0:
+                        logger.warning("[MatchaBridge] Worker reported an error (%s); recycling daemon...", status.get("error"))
+                        _last_bridge_recycle = now
+                        _stop_bridge_server_locked(base_url)
+                        status = {}
+                    else:
+                        logger.warning("[MatchaBridge] Worker reported a startup error; see bridge log")
+                        return False
                 proc = None
                 if not status.get("running") and not _recorded_pid():
                     try:
@@ -231,6 +275,12 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                     if status.get("ready") and _compatible(status):
                         return True
                     if status.get("error"):
+                        now = time.monotonic()
+                        if now - _last_bridge_recycle >= 15.0:
+                            logger.warning("[MatchaBridge] Worker reported error during launch (%s); recycling daemon...", status.get("error"))
+                            _last_bridge_recycle = now
+                            _stop_bridge_server_locked(base_url)
+                            status = {}
                         return False
                     time.sleep(min(0.25, max(0, deadline - time.monotonic())))
                 logger.warning("[MatchaBridge] Worker is not ready yet; leaving it running")
@@ -463,11 +513,11 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     logger.info("[MatchaBridge] Injected %d cached clearance cookies into browser context", injected)
 
                 page_eth = context.new_page()
-                page_eth.set_default_timeout(18000)
+                page_eth.set_default_timeout(45000)
                 Stealth().apply_stealth_sync(page_eth)
 
                 page_sol = context.new_page()
-                page_sol.set_default_timeout(18000)
+                page_sol.set_default_timeout(45000)
                 Stealth().apply_stealth_sync(page_sol)
 
                 logger.info("[MatchaBridge] Warming Ethereum tab...")
@@ -675,7 +725,7 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                         pass
                     return
 
-                is_stuck = state.queue.qsize() > 0 and (time.monotonic() - state.last_heartbeat > 30.0)
+                is_stuck = state.queue.qsize() > 0 and (time.monotonic() - state.last_heartbeat > 60.0)
                 thread_dead = state.worker_thread is not None and not state.worker_thread.is_alive()
                 ready = state.ready_eth.is_set() and state.ready_sol.is_set() and not state.fatal_error and not is_stuck and not thread_dead
                 status = 200 if ready else 503

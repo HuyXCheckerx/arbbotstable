@@ -2063,11 +2063,11 @@ async function getDexQuote(
       } catch (error) {
         const msg = errorMessage(error);
         const isVercelChallenge =
-          /vercel security checkpoint|mitigation=challenge|x-vercel-mitigated/i.test(msg);
+          /vercel security checkpoint|mitigation=challenge|x-vercel-mitigated\s*[:=]\s*challenge/i.test(msg);
         const isCompetitorDenial = /request failures:/i.test(msg);
         const isTakerForbidden =
-          /\b403\b/i.test(msg) &&
-          /\bforbidden\b/i.test(msg) &&
+          (/\b403\b/i.test(msg) || /denial=forbidden/i.test(msg)) &&
+          /forbidden/i.test(msg) &&
           !isVercelChallenge &&
           !isCompetitorDenial;
 

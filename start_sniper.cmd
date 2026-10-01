@@ -2,6 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
+if "%NODE_OPTIONS%"=="" set "NODE_OPTIONS=--max-old-space-size=512"
+
 set "ARGS=%*"
 if "%~1"=="" set "ARGS=--live --confirm-live EXECUTE_PROFIT_SNIPER"
 

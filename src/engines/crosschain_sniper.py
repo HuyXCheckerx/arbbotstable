@@ -407,6 +407,9 @@ def build_route_invocation(
                 "SOL_FLASH_ARB_MATCHA_PYTHON": sys.executable,
             }
         )
+        existing_node_opts = environment.get("NODE_OPTIONS", "")
+        if "--max-old-space-size" not in existing_node_opts:
+            environment["NODE_OPTIONS"] = f"{existing_node_opts} --max-old-space-size=512".strip()
         if (
             route.dex_name == "Jupiter"
             and {route.stable_from, route.stable_to} == {"USDG", "PYUSD"}
@@ -587,7 +590,13 @@ def failure_category(detail: str) -> str:
         or "official 0x" in lowered
     ):
         return "transient-matcha"
-    if transient:
+    if (
+        transient
+        or "0xc0000409" in lowered
+        or "heap out of memory" in lowered
+        or "status 3221226505" in lowered
+        or "engine process aborted" in lowered
+    ):
         return "transient-rpc"
     if "below" in lowered or "no executable opportunity" in lowered:
         return "unprofitable"
@@ -636,8 +645,21 @@ def unresolved_submission(
 
 
 def concise_failure(stdout: str, stderr: str, returncode: int) -> str:
+    if returncode in (3221226505, -1073740791, 0xC0000409):
+        lowered_err = (stderr or "").lower()
+        if "heap out of memory" in lowered_err or "allocation failed" in lowered_err:
+            return "Node.js JavaScript heap out of memory (process aborted with 0xC0000409)"
+        return "engine process aborted (exit status 0xC0000409 / out of memory)"
+
     combined = "\n".join(part for part in (stderr, stdout) if part)
-    lines = [line.strip() for line in combined.splitlines() if line.strip() and not line.strip().startswith("Node.js v")]
+    lines = [
+        line.strip()
+        for line in combined.splitlines()
+        if line.strip()
+        and not line.strip().startswith("Node.js v")
+        and not line.strip().startswith("==== C stack trace")
+        and not re.match(r"^\s*\d+:\s+[0-9A-Fa-f]{8,16}\b", line.strip())
+    ]
     for idx, line in enumerate(lines):
         if line.startswith("ERROR:"):
             header = line[6:].strip()
@@ -731,6 +753,8 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
             f"check provider access or {alternative}"
         )
     if category == "transient-rpc":
+        if "out of memory" in lowered or "0xc0000409" in lowered:
+            return "engine process temporarily ran out of memory; recovering"
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
         return f"{route.chain.title()} RPC is temporarily unavailable{suffix}"
