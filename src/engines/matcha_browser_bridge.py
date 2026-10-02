@@ -388,7 +388,14 @@ QUOTE_SCRIPT = r"""async (args) => {
             method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(14000)
         });
     } catch (e) {
-        return {error: `Competition fetch failed: ${e && (e.message || e.name || String(e))}`};
+        let errDesc = 'network connection failure';
+        if (e) {
+            errDesc = e.message || e.name || '';
+            if (!errDesc || errDesc === '[object Event]') {
+                errDesc = e.type ? `Event(${e.type})` : (e.target && e.target.status ? `HTTP ${e.target.status}` : 'connection reset/aborted');
+            }
+        }
+        return {error: `Competition fetch failed: ${errDesc}`};
     }
     if (!compRes.ok) return {provider_error: await failure(compRes, '/api/competitions')};
     let comp;
@@ -411,7 +418,11 @@ QUOTE_SCRIPT = r"""async (args) => {
             } else {
                 quotes[agg] = await response.json();
             }
-        } catch(e) { quotes[agg] = {error: 'Quote transport or JSON parsing failed'}; }
+        } catch(e) {
+            let quoteErr = 'Quote transport or JSON parsing failed';
+            if (e && (e.message || e.name)) quoteErr += ` (${e.message || e.name})`;
+            quotes[agg] = {error: quoteErr};
+        }
     }));
     if (failures.length && !Object.values(quotes).some(q => q && !q.error)) {
         return {provider_error: failures.find(f => [401,403].includes(f.status)) || failures[0]};

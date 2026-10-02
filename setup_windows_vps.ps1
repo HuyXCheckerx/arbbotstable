@@ -12,8 +12,29 @@ function Refresh-EnvPath {
     $env:Path = "$machine;$user"
 }
 
+# 0. Virtual Memory / Paging File (prevents WinError 1455 when running headless Chromium)
+Write-Host "`n[0/6] Checking Windows Virtual Memory / Paging File..." -ForegroundColor Yellow
+try {
+    $sys = Get-CimInstance Win32_ComputerSystem
+    $pf = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
+    if (-not $pf -or ($pf.InitialSize -lt 4096 -and -not $sys.AutomaticManagedPagefile)) {
+        Write-Host "Configuring managed paging file (min 4096MB, max 8192MB) on C:..." -ForegroundColor Cyan
+        $sys | Set-CimInstance -Property @{AutomaticManagedPagefile = $false}
+        if ($pf) {
+            $pf | Set-CimInstance -Property @{InitialSize = 4096; MaximumSize = [Math]::Max(8192, $pf.MaximumSize)}
+        } else {
+            New-CimInstance -ClassName Win32_PageFileSetting -Property @{Name = 'C:\pagefile.sys'; InitialSize = 4096; MaximumSize = 8192} | Out-Null
+        }
+        Write-Host "  [OK] Pagefile configured (4096MB - 8192MB)." -ForegroundColor Green
+    } else {
+        Write-Host "  [OK] Virtual memory / paging file is adequately configured." -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  Note: Could not adjust pagefile settings (requires Administrator rights): $_" -ForegroundColor DarkGray
+}
+
 # 1. Check / Install Git, Python, Node.js
-Write-Host "`n[1/5] Checking core runtime dependencies..." -ForegroundColor Yellow
+Write-Host "`n[1/6] Checking core runtime dependencies..." -ForegroundColor Yellow
 
 # Git
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -57,7 +78,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 }
 
 # 2. Locate or Clone Project Repository
-Write-Host "`n[2/5] Locating project workspace..." -ForegroundColor Yellow
+Write-Host "`n[2/6] Locating project workspace..." -ForegroundColor Yellow
 
 $repoDir = $PSScriptRoot
 if (-not (Test-Path "$repoDir\requirements.txt")) {
@@ -77,7 +98,7 @@ Set-Location $repoDir
 Write-Host "Working directory: $repoDir" -ForegroundColor Cyan
 
 # 3. Python Virtual Environment
-Write-Host "`n[3/5] Configuring Python Virtual Environment..." -ForegroundColor Yellow
+Write-Host "`n[3/6] Configuring Python Virtual Environment..." -ForegroundColor Yellow
 
 if (-not (Test-Path "$repoDir\venv\Scripts\python.exe")) {
     Write-Host 'Creating virtual environment in .\venv...' -ForegroundColor Cyan
@@ -95,7 +116,7 @@ Write-Host 'Installing Playwright Chromium browser...' -ForegroundColor Cyan
 & $venvPython -m playwright install chromium
 
 # 4. Node.js Dependencies
-Write-Host "`n[4/5] Installing Node.js dependencies..." -ForegroundColor Yellow
+Write-Host "`n[4/6] Installing Node.js dependencies..." -ForegroundColor Yellow
 $appdataNpm = "$env:APPDATA\npm"
 if (-not (Test-Path $appdataNpm)) {
     New-Item -ItemType Directory -Path $appdataNpm -Force | Out-Null
@@ -109,7 +130,7 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
 }
 
 # 5. Environment Config (.env)
-Write-Host "`n[5/5] Checking configuration (.env)..." -ForegroundColor Yellow
+Write-Host "`n[5/6] Checking configuration (.env)..." -ForegroundColor Yellow
 if (-not (Test-Path "$repoDir\.env")) {
     if (Test-Path "$repoDir\.env.example") {
         Copy-Item "$repoDir\.env.example" "$repoDir\.env"
