@@ -53,7 +53,14 @@ class BrowserBridgeTests(unittest.TestCase):
         api.sync_playwright = sync_playwright
         stealth = ModuleType("playwright_stealth")
         stealth.Stealth = Mock()
-        return patch.dict(sys.modules, {"playwright.sync_api": api, "playwright_stealth": stealth})
+        @contextmanager
+        def isolated_runtime():
+            # Browser unit tests must not start the real background cookie solver.
+            from src.engines import matcha_cookie_manager as cookies
+            with patch.dict(sys.modules, {"playwright.sync_api": api, "playwright_stealth": stealth}), \
+                    patch.object(cookies, "get_valid_cookies", return_value=[]):
+                yield
+        return isolated_runtime()
 
     def ready_status(self, **overrides):
         return {"version": bridge.BRIDGE_VERSION, "configured_proxy": bridge.proxy_fingerprint(),
@@ -143,6 +150,35 @@ class BrowserBridgeTests(unittest.TestCase):
             self.assertTrue(bridge._compatible({"version": bridge.BRIDGE_VERSION,
                                                "configured_proxy": state.configured_proxy}))
             self.assertNotIn("secret", state.configured_proxy)
+
+    def test_cookie_direct_fallback_preserves_proxy_and_warming_daemon(self):
+        from src.engines import matcha_cookie_manager as cookies
+        proxy = "http://proxy.test:80"
+        clearance = [{"name": "_vcrcs", "value": "test"}]
+        browser = Mock()
+        context = browser.new_context.return_value
+        context.cookies.side_effect = [[]] * 31 + [clearance, clearance]
+        context.new_page.return_value.title.side_effect = ["Security checkpoint"] * 30 + ["MetaMatcha"]
+        with self.runtime(browser, []), patch.object(cookies.time, "sleep"), \
+                patch.dict("os.environ", {"MATCHA_PROXY": proxy, "PROXYISP_API_KEY": ""}), \
+                patch.object(bridge, "stop_bridge_server") as stop:
+            self.assertEqual(cookies._solve_challenge(), clearance)
+            self.assertEqual(bridge.proxy_fingerprint(), bridge.proxy_fingerprint(proxy))
+            stop.assert_not_called()
+        self.assertEqual(browser.close.call_count, 2)
+
+    def test_proxy_fallback_warmup_is_not_recycled_after_150_seconds(self):
+        status = self.ready_status(ready=False, uptime=200.0)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(bridge, "LOCK_FILE", Path(directory) / "lock"), \
+                patch.object(bridge, "get_bridge_status", return_value=status), \
+                patch.object(bridge, "_recorded_pid", return_value=123), \
+                patch.object(bridge, "_spawn_bridge") as start, \
+                patch.object(bridge, "_stop_bridge_server_locked") as stop, \
+                patch.object(bridge.time, "monotonic", side_effect=[0, 0, 0, 0, 6]):
+            self.assertFalse(bridge.ensure_bridge_running(timeout=5))
+            start.assert_not_called()
+            stop.assert_not_called()
 
     def test_startup_failure_is_not_an_http_403(self):
         with patch.object(bridge, "ensure_bridge_running", return_value=False):

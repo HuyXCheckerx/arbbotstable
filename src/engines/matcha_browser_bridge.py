@@ -28,7 +28,10 @@ PID_FILE = PROJECT_ROOT / ".matcha_bridge.pid"
 LOCK_FILE = PROJECT_ROOT / ".matcha_bridge.lock"
 DEFAULT_PORT = 18234
 DEFAULT_HOST = "127.0.0.1"
-BRIDGE_VERSION = 5
+BRIDGE_VERSION = 6
+# Four 45s navigations, 40s + 30s clearance polling, and browser
+# launch/settling overhead when proxy warmup requires direct fallback.
+WARMUP_TIMEOUT_SECONDS = 300.0
 # Diagnostic instances on another port must not share lifecycle files.
 if os.getenv("MATCHA_BRIDGE_PORT", str(DEFAULT_PORT)) != str(DEFAULT_PORT):
     _port = int(os.environ["MATCHA_BRIDGE_PORT"])
@@ -274,7 +277,7 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                 elif status.get("is_stuck"):
                     logger.warning("[MatchaBridge] Worker is stuck in queue; recycling daemon...")
                     needs_recycle = True
-                elif status.get("running") and not status.get("ready") and status.get("uptime", 0) > 150.0 and timeout >= 5.0:
+                elif status.get("running") and not status.get("ready") and status.get("uptime", 0) > WARMUP_TIMEOUT_SECONDS and timeout >= 5.0:
                     logger.warning("[MatchaBridge] Worker has been running for %.1fs without becoming ready; recycling daemon...", status.get("uptime", 0))
                     needs_recycle = True
 
@@ -845,7 +848,9 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                         pass
                     return
 
-                is_stuck = state.queue.qsize() > 0 and (time.monotonic() - state.last_heartbeat > 60.0)
+                # Queued requests during startup do not mean the worker is stuck.
+                warmed = state.ready_eth.is_set() and state.ready_sol.is_set()
+                is_stuck = warmed and state.queue.qsize() > 0 and (time.monotonic() - state.last_heartbeat > 60.0)
                 thread_dead = state.worker_thread is not None and not state.worker_thread.is_alive()
                 ready = state.ready_eth.is_set() and state.ready_sol.is_set() and not state.fatal_error and not is_stuck and not thread_dead
                 status = 200 if ready else 503
