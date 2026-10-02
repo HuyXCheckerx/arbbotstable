@@ -211,6 +211,13 @@ def _recorded_pid() -> int | None:
         return None
 
 
+def _recorded_pid_age() -> float:
+    try:
+        return time.time() - PID_FILE.stat().st_mtime
+    except (OSError, ValueError):
+        return 999999.0
+
+
 def _spawn_bridge() -> subprocess.Popen:
     creationflags = 0
     startupinfo = None
@@ -267,7 +274,7 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                 elif status.get("is_stuck"):
                     logger.warning("[MatchaBridge] Worker is stuck in queue; recycling daemon...")
                     needs_recycle = True
-                elif status.get("running") and not status.get("ready") and status.get("uptime", 0) > 40.0 and timeout >= 5.0:
+                elif status.get("running") and not status.get("ready") and status.get("uptime", 0) > 150.0 and timeout >= 5.0:
                     logger.warning("[MatchaBridge] Worker has been running for %.1fs without becoming ready; recycling daemon...", status.get("uptime", 0))
                     needs_recycle = True
 
@@ -277,10 +284,16 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                     status = {}
 
                 # If port is unreachable and timeout is for real launch (>= 5s),
-                # clear any ghost PID so spawn proceeds without getting blocked.
+                # only clear ghost PID if it has been wedged without opening port for >= 25s.
                 if status.get("unreachable") and timeout >= 5.0 and _recorded_pid():
-                    _stop_bridge_server_locked(base_url)
-                    status = {}
+                    if _recorded_pid_age() >= 25.0:
+                        logger.warning(
+                            "[MatchaBridge] Stale unreachable daemon detected (PID %s, age %.1fs); cleaning up...",
+                            _recorded_pid(),
+                            _recorded_pid_age(),
+                        )
+                        _stop_bridge_server_locked(base_url)
+                        status = {}
 
                 proc = None
                 if not status.get("running") and not _recorded_pid():
@@ -343,12 +356,9 @@ def fetch_bridge_quotes(
     timeout: float = 25.0,
 ) -> dict[str, Any]:
     """Fetch quotes via the Matcha browser bridge."""
-    if not ensure_bridge_running(timeout=30.0):
-        try:
-            stop_bridge_server()
-        except Exception:
-            pass
-        raise BridgeUnavailableError("Matcha bridge temporarily failed to become ready; see logs/matcha_browser_bridge.log")
+    if not is_bridge_ready():
+        if not ensure_bridge_running(timeout=10.0):
+            raise BridgeUnavailableError("Matcha bridge temporarily failed to become ready; see logs/matcha_browser_bridge.log")
 
     chain_name = "ethereum" if chain in ("ethereum", "1", 1) else "solana"
     url = f"{get_bridge_base_url()}/{chain_name}/quote"
@@ -381,11 +391,6 @@ def fetch_bridge_quotes(
             err_msg = err_data.get("error", str(exc))
         except Exception:
             err_msg = str(exc)
-        if exc.code in (500, 504):
-            try:
-                stop_bridge_server()
-            except Exception:
-                pass
         raise BridgeUnavailableError(f"Matcha bridge temporarily failed (local-status={exc.code}): {err_msg}") from exc
     except Exception as exc:
         raise BridgeUnavailableError(f"Matcha bridge temporarily failed ({type(exc).__name__})") from exc
@@ -598,8 +603,11 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     except Exception:
                         pass
 
-                    eth_ok = "checkpoint" not in t_eth and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
-                    sol_ok = "checkpoint" not in t_sol and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
+                    eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
+                    sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
+
+                    if poll_idx > 0 and poll_idx % 10 == 0:
+                        logger.debug("[MatchaBridge] Warmup check (poll %d/40): ETH='%s', SOL='%s'", poll_idx, t_eth, t_sol)
 
                     if eth_ok and sol_ok and poll_idx >= 2:
                         logger.info("[MatchaBridge] Both tabs cleared! (ETH: %s, SOL: %s)", t_eth, t_sol)
@@ -621,6 +629,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     launch_kwargs["args"] = list(launch_kwargs.get("args", [])) + ["--no-proxy-server"]
                     browser = pw.chromium.launch(**launch_kwargs)
                     context = browser.new_context(viewport={"width": 1280, "height": 800})
+                    _inject_context_cookies()
                     page_eth = context.new_page()
                     Stealth().apply_stealth_sync(page_eth)
                     page_sol = context.new_page()
@@ -637,8 +646,8 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         time.sleep(1)
                         t_eth = (page_eth.title() or "").lower()
                         t_sol = (page_sol.title() or "").lower()
-                        eth_ok = "checkpoint" not in t_eth and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
-                        sol_ok = "checkpoint" not in t_sol and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
+                        eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
+                        sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
                         if eth_ok and sol_ok and poll_idx >= 2:
                             logger.info("[MatchaBridge] Direct fallback cleared tabs! (ETH: %s, SOL: %s)", t_eth, t_sol)
                             time.sleep(2.0)

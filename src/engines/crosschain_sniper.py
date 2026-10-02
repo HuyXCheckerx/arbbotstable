@@ -2583,7 +2583,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 from src.engines.matcha_browser_bridge import ensure_bridge_running
                 logger.info("Ensuring Matcha browser bridge daemon is ready...")
-                ensure_bridge_running(timeout=45.0)
+                ensure_bridge_running(timeout=75.0)
             except Exception as exc:
                 logger.warning("Failed to initialize Matcha browser bridge: %s", exc)
 
