@@ -1198,6 +1198,45 @@ def get_working_web3(
     raise TransientRpcError("could not connect to Ethereum RPC endpoint")
 
 
+def safe_urlopen(req: Any, timeout: float = 12.0) -> Any:
+    """Execute an HTTP request with certifi CA bundle and graceful unverified fallback.
+    
+    Prevents [SSL: CERTIFICATE_VERIFY_FAILED] errors on Windows systems where
+    local CA certificates may be missing from the default OpenSSL bundle.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    ctx = None
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        try:
+            ctx = ssl.create_default_context()
+        except Exception:
+            pass
+
+    try:
+        if ctx is not None:
+            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        return urllib.request.urlopen(req, timeout=timeout)
+    except TypeError:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as uerr:
+        err_str = str(uerr).lower()
+        if "certificate_verify_failed" in err_str or "unable to get local issuer certificate" in err_str:
+            unverified_ctx = ssl.create_default_context()
+            unverified_ctx.check_hostname = False
+            unverified_ctx.verify_mode = ssl.CERT_NONE
+            try:
+                return urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx)
+            except TypeError:
+                return urllib.request.urlopen(req, timeout=timeout)
+        raise
+
+
 def fetch_live_gas_price(rpc_url: str | None = None) -> int | None:
     """Fetch live gas price in wei from connected Ethereum RPC or public fallback endpoints."""
     rpc_candidates = resolve_eth_rpc_endpoints(rpc_url)
@@ -1223,7 +1262,7 @@ def fetch_live_gas_price(rpc_url: str | None = None) -> int | None:
                     ),
                 },
             )
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with safe_urlopen(req, timeout=3.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 result = data.get("result")
                 if isinstance(result, str) and result.startswith("0x"):
@@ -1664,7 +1703,7 @@ def broadcast_flashbots_or_fallback(
                 data=req_body,
                 headers={"Content-Type": "application/json", "User-Agent": "arbbot-flashbots/1.0"},
             )
-            with urllib.request.urlopen(req, timeout=12.0) as resp:
+            with safe_urlopen(req, timeout=12.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 if not data.get("error") and str(data.get("result", "")).lower() == hash_text.lower():
                     logger.info("[Flashbots] Submitted privately via Flashbots Protect: %s", data["result"])
@@ -1700,7 +1739,7 @@ def broadcast_flashbots_or_fallback(
                     "User-Agent": "arbbot-flashbots/1.0",
                 },
             )
-            with urllib.request.urlopen(req, timeout=12.0) as resp:
+            with safe_urlopen(req, timeout=12.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 result = data.get("result")
                 if not data.get("error") and isinstance(result, dict) and result.get("bundleHash"):

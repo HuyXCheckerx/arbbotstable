@@ -111,6 +111,7 @@ $venvPip = "$repoDir\venv\Scripts\pip.exe"
 Write-Host 'Upgrading pip and installing Python dependencies...' -ForegroundColor Cyan
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r requirements.txt
+& $venvPython -m pip install --upgrade certifi
 
 Write-Host 'Installing Playwright Chromium browser...' -ForegroundColor Cyan
 & $venvPython -m playwright install chromium

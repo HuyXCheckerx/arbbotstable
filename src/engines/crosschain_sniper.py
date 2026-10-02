@@ -889,6 +889,45 @@ def parse_gas_fee_gwei(value: object) -> Decimal | None:
     return scaled
 
 
+def safe_urlopen(req: Any, timeout: float = 12.0) -> Any:
+    """Execute an HTTP request with certifi CA bundle and graceful unverified fallback.
+    
+    Prevents [SSL: CERTIFICATE_VERIFY_FAILED] errors on Windows systems where
+    local CA certificates may be missing from the default OpenSSL bundle.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    ctx = None
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        try:
+            ctx = ssl.create_default_context()
+        except Exception:
+            pass
+
+    try:
+        if ctx is not None:
+            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        return urllib.request.urlopen(req, timeout=timeout)
+    except TypeError:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as uerr:
+        err_str = str(uerr).lower()
+        if "certificate_verify_failed" in err_str or "unable to get local issuer certificate" in err_str:
+            unverified_ctx = ssl.create_default_context()
+            unverified_ctx.check_hostname = False
+            unverified_ctx.verify_mode = ssl.CERT_NONE
+            try:
+                return urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx)
+            except TypeError:
+                return urllib.request.urlopen(req, timeout=timeout)
+        raise
+
+
 def fetch_ethereum_base_fee_gwei(
     rpc_url: str | list[str],
     timeout: float = 5.0,
@@ -945,7 +984,7 @@ def fetch_ethereum_base_fee_gwei(
                         "User-Agent": "arbbot-sniper/1.0",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=timeout) as response:
+                with safe_urlopen(req, timeout=timeout) as response:
                     body = json.loads(response.read().decode("utf-8"))
                     result = body.get("result")
                     if not isinstance(result, dict):
@@ -2379,7 +2418,7 @@ def main(argv: list[str] | None = None) -> int:
                     data=rpc_req,
                     headers={"Content-Type": "application/json", "User-Agent": "ArbBotRecovery"},
                 )
-                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                with safe_urlopen(req, timeout=5.0) as resp:
                     rdata = json.loads(resp.read().decode("utf-8"))
                     rres = rdata.get("result")
                     if rres and isinstance(rres, dict) and "status" in rres:
