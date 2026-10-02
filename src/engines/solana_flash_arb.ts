@@ -63,8 +63,10 @@ import {
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
+  createCloseAccountInstruction,
   createTransferCheckedInstruction,
   getAssociatedTokenAddressSync,
+  unpackAccount,
 } from "@solana/spl-token";
 import bs58 from "bs58";
 
@@ -373,6 +375,9 @@ export interface CliOptions {
   send: boolean;
   createMarginfiAccount: boolean;
   setupSubAtas?: boolean;
+  reclaimRent?: boolean;
+  maxSubTakerIndex?: number;
+  includeActive?: boolean;
   provider?: "marginfi" | "kamino" | "solend" | "auto";
   dexProvider?: "metamatcha" | "dflow" | "jupiter";
   swapOrder?: "dex-first" | "stable-first";
@@ -671,7 +676,21 @@ export async function ensureSubAccountAtas(
   connection: Connection,
   masterKeypair: Keypair,
   subKeypair: Keypair,
+  currentSubTakerIndex?: number,
 ): Promise<void> {
+  // Check and reclaim rent from prior unused sub-taker accounts (1 .. currentSubTakerIndex - 1)
+  if (currentSubTakerIndex && currentSubTakerIndex > 1) {
+    try {
+      await reclaimUnusedSubAccountRents(connection, masterKeypair, {
+        currentSubTakerIndex,
+        maxIndex: currentSubTakerIndex - 1,
+        silent: true,
+      });
+    } catch (err) {
+      console.warn(`[RentReclaim] Note checking prior sub-takers: ${errorMessage(err)}`);
+    }
+  }
+
   const mints = [
     { mint: USDC_MINT, program: intermediateTokenProgram(USDC_MINT), name: "USDC" },
     { mint: PYUSD_MINT, program: intermediateTokenProgram(PYUSD_MINT), name: "PYUSD" },
@@ -731,6 +750,310 @@ export async function ensureSubAccountAtas(
     "confirmed",
   );
   console.log(`Sub-account setup initialized successfully! Signature: ${sig}`);
+}
+
+export interface SubAccountTokenRentStatus {
+  mint: PublicKey;
+  symbol: string;
+  programId: PublicKey;
+  ata: PublicKey;
+  exists: boolean;
+  lamports: bigint;
+  tokenBalance: bigint;
+}
+
+export interface SubAccountRentStatus {
+  index: number;
+  subTaker: PublicKey;
+  tokenAccounts: SubAccountTokenRentStatus[];
+  nativeLamports: bigint;
+  totalReclaimableLamports: bigint;
+}
+
+export interface ReclaimRentResult {
+  index: number;
+  subTaker: string;
+  accountsClosed: number;
+  tokensRecovered: { symbol: string; amount: bigint }[];
+  lamportsReclaimed: bigint;
+  signature?: string;
+  skippedReason?: string;
+}
+
+export async function getSubAccountRentStatus(
+  connection: Connection,
+  masterKeypair: Keypair,
+  index: number,
+): Promise<SubAccountRentStatus> {
+  const subKeypair = deriveSubAccountKeypair(masterKeypair, index);
+  const mints = [
+    { mint: USDC_MINT, program: intermediateTokenProgram(USDC_MINT), name: "USDC" },
+    { mint: PYUSD_MINT, program: intermediateTokenProgram(PYUSD_MINT), name: "PYUSD" },
+    { mint: USDG_MINT, program: intermediateTokenProgram(USDG_MINT), name: "USDG" },
+  ];
+
+  const atas = mints.map(({ mint, program }) =>
+    getAssociatedTokenAddressSync(mint, subKeypair.publicKey, false, program),
+  );
+
+  const accountPubkeys = [...atas, subKeypair.publicKey];
+  const infos = await connection.getMultipleAccountsInfo(accountPubkeys);
+
+  const tokenAccounts: SubAccountTokenRentStatus[] = [];
+  let totalReclaimableLamports = 0n;
+
+  for (let i = 0; i < mints.length; i++) {
+    const { mint, program, name } = mints[i];
+    const ata = atas[i];
+    const info = infos[i];
+
+    if (!info) {
+      tokenAccounts.push({
+        mint,
+        symbol: name,
+        programId: program,
+        ata,
+        exists: false,
+        lamports: 0n,
+        tokenBalance: 0n,
+      });
+      continue;
+    }
+
+    const lamports = BigInt(info.lamports);
+    let tokenBalance = 0n;
+    try {
+      const parsed = unpackAccount(ata, info, program);
+      tokenBalance = parsed.amount;
+    } catch {
+      tokenBalance = 0n;
+    }
+
+    totalReclaimableLamports += lamports;
+    tokenAccounts.push({
+      mint,
+      symbol: name,
+      programId: program,
+      ata,
+      exists: true,
+      lamports,
+      tokenBalance,
+    });
+  }
+
+  const nativeInfo = infos[mints.length];
+  const nativeLamports = nativeInfo ? BigInt(nativeInfo.lamports) : 0n;
+  totalReclaimableLamports += nativeLamports;
+
+  return {
+    index,
+    subTaker: subKeypair.publicKey,
+    tokenAccounts,
+    nativeLamports,
+    totalReclaimableLamports,
+  };
+}
+
+export function buildReclaimRentInstructions(
+  masterPublicKey: PublicKey,
+  subKeypair: Keypair,
+  status: SubAccountRentStatus,
+): TransactionInstruction[] {
+  const instructions: TransactionInstruction[] = [];
+
+  for (const token of status.tokenAccounts) {
+    if (!token.exists) continue;
+
+    // If there is any leftover token balance, transfer it to master wallet's ATA first
+    if (token.tokenBalance > 0n) {
+      const masterAta = getAssociatedTokenAddressSync(
+        token.mint,
+        masterPublicKey,
+        false,
+        token.programId,
+      );
+      instructions.push(
+        createAssociatedTokenAccountIdempotentInstruction(
+          masterPublicKey,
+          masterAta,
+          masterPublicKey,
+          token.mint,
+          token.programId,
+        ),
+        createTransferCheckedInstruction(
+          token.ata,
+          token.mint,
+          masterAta,
+          subKeypair.publicKey,
+          token.tokenBalance,
+          6,
+          [],
+          token.programId,
+        ),
+      );
+    }
+
+    // Close token account and route rent directly to master wallet
+    instructions.push(
+      createCloseAccountInstruction(
+        token.ata,
+        masterPublicKey,
+        subKeypair.publicKey,
+        [],
+        token.programId,
+      ),
+    );
+  }
+
+  // Transfer remaining native SOL balance from sub-account back to master wallet
+  if (status.nativeLamports > 0n) {
+    instructions.push(
+      SystemProgram.transfer({
+        fromPubkey: subKeypair.publicKey,
+        toPubkey: masterPublicKey,
+        lamports: status.nativeLamports,
+      }),
+    );
+  }
+
+  return instructions;
+}
+
+export async function reclaimSubAccountRent(
+  connection: Connection,
+  masterKeypair: Keypair,
+  index: number,
+): Promise<ReclaimRentResult> {
+  const subKeypair = deriveSubAccountKeypair(masterKeypair, index);
+  const status = await getSubAccountRentStatus(connection, masterKeypair, index);
+
+  if (status.totalReclaimableLamports === 0n) {
+    return {
+      index,
+      subTaker: subKeypair.publicKey.toBase58(),
+      accountsClosed: 0,
+      tokensRecovered: [],
+      lamportsReclaimed: 0n,
+      skippedReason: "no active token accounts or SOL balance",
+    };
+  }
+
+  const instructions = buildReclaimRentInstructions(masterKeypair.publicKey, subKeypair, status);
+  if (!instructions.length) {
+    return {
+      index,
+      subTaker: subKeypair.publicKey.toBase58(),
+      accountsClosed: 0,
+      tokensRecovered: [],
+      lamportsReclaimed: 0n,
+      skippedReason: "no instructions needed",
+    };
+  }
+
+  const accountsClosed = status.tokenAccounts.filter((t) => t.exists).length;
+  const tokensRecovered = status.tokenAccounts
+    .filter((t) => t.exists && t.tokenBalance > 0n)
+    .map((t) => ({ symbol: t.symbol, amount: t.tokenBalance }));
+
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const msg = new TransactionMessage({
+    payerKey: masterKeypair.publicKey,
+    recentBlockhash: latest.blockhash,
+    instructions: [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 150_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }),
+      ...instructions,
+    ],
+  }).compileToV0Message();
+
+  const tx = new VersionedTransaction(msg);
+  tx.sign([masterKeypair, subKeypair]);
+  const sig = await connection.sendTransaction(tx);
+  await connection.confirmTransaction(
+    {
+      signature: sig,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    },
+    "confirmed",
+  );
+
+  return {
+    index,
+    subTaker: subKeypair.publicKey.toBase58(),
+    accountsClosed,
+    tokensRecovered,
+    lamportsReclaimed: status.totalReclaimableLamports,
+    signature: sig,
+  };
+}
+
+export async function reclaimUnusedSubAccountRents(
+  connection: Connection,
+  masterKeypair: Keypair,
+  options: {
+    currentSubTakerIndex?: number;
+    maxIndex?: number;
+    includeActive?: boolean;
+    silent?: boolean;
+  } = {},
+): Promise<ReclaimRentResult[]> {
+  const currentSubTaker = options.currentSubTakerIndex ?? 1;
+  const maxIndex = options.maxIndex ?? Math.max(currentSubTaker + 5, 20);
+  const results: ReclaimRentResult[] = [];
+
+  for (let idx = 1; idx <= maxIndex; idx++) {
+    if (!options.includeActive && idx === currentSubTaker) {
+      if (!options.silent) {
+        const subKp = deriveSubAccountKeypair(masterKeypair, idx);
+        console.log(`[RentReclaim] Sub-taker #${idx} (${subKp.publicKey.toBase58()}) is currently active; skipping.`);
+      }
+      continue;
+    }
+
+    try {
+      const res = await reclaimSubAccountRent(connection, masterKeypair, idx);
+      if (res.accountsClosed > 0 || res.lamportsReclaimed > 0n) {
+        results.push(res);
+        if (!options.silent) {
+          const sol = (Number(res.lamportsReclaimed) / 1e9).toFixed(6);
+          console.log(
+            `[RentReclaim] Sub-taker #${idx} (${res.subTaker}): closed ${res.accountsClosed} token account(s), reclaimed ${sol} SOL. Signature: ${res.signature}`,
+          );
+        }
+      }
+    } catch (err) {
+      if (!options.silent) {
+        console.warn(`[RentReclaim] Sub-taker #${idx} reclamation error: ${errorMessage(err)}`);
+      }
+    }
+  }
+
+  return results;
+}
+
+export function scheduleSubTakerRentReclamation(config: Config, bannedIndex: number): void {
+  setImmediate(async () => {
+    try {
+      if (!config.rpcUrl || config.rpcUrl.includes("mock") || config.rpcUrl.includes("invalid")) {
+        return;
+      }
+      const connection = wrapConnectionWithResilientRpc(
+        new Connection(config.rpcUrl, config.commitment ?? "confirmed"),
+        config.rpcFallbacks ?? [],
+      );
+      const res = await reclaimSubAccountRent(connection, config.keypair, bannedIndex);
+      if (res.accountsClosed > 0 || res.lamportsReclaimed > 0n) {
+        console.log(
+          `[RentReclaim] Auto-reclaimed rent from banned sub-taker #${bannedIndex} (${res.subTaker}): closed ${res.accountsClosed} token account(s), recovered ${(Number(res.lamportsReclaimed) / 1e9).toFixed(6)} SOL. Sig: ${res.signature}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[RentReclaim] Background reclamation for banned sub-taker #${bannedIndex} deferred: ${errorMessage(err)}`,
+      );
+    }
+  });
 }
 
 export async function ensureAltAccounts(
@@ -990,6 +1313,11 @@ export function parseCli(argv: string[]): CliOptions {
     else if (arg === "--send") options.send = true;
     else if (arg === "--create-marginfi-account") options.createMarginfiAccount = true;
     else if (arg === "--setup-sub-atas") options.setupSubAtas = true;
+    else if (arg === "--reclaim-rent" || arg === "--reclaim-sub-rent") options.reclaimRent = true;
+    else if (arg === "--include-active") options.includeActive = true;
+    else if (arg === "--max-sub-taker-index" || arg === "--max-index") {
+      options.maxSubTakerIndex = parseInt(argv[++index], 10);
+    }
     else if (arg === "--provider") {
       const p = argv[++index]?.toLowerCase();
       if (p !== "marginfi" && p !== "kamino" && p !== "solend" && p !== "auto") {
@@ -1032,6 +1360,8 @@ function printHelp(): void {
   npm run solana:flash -- --dex-provider jupiter
   npm run solana:flash -- --send --confirm-mainnet EXECUTE_SOLANA_FLASH_ARB
   npm run solana:flash -- --create-marginfi-account --send --confirm-mainnet CREATE_MARGINFI_ACCOUNT
+  npm run solana:flash -- --reclaim-rent [--max-index 25] [--include-active]
+  npm run solana:reclaim-rent
 
 All amounts, RPC settings, API keys, fee settings, and account addresses come from .env.`);
 }
@@ -1199,6 +1529,9 @@ export function rotateSubTaker(config: Config): number {
   });
   updateSubTakerEnv(nextIndex);
   clearMetaMatchaDenial();
+  if (currentIndex >= 1) {
+    scheduleSubTakerRentReclamation(config, currentIndex);
+  }
   return nextIndex;
 }
 
@@ -3856,11 +4189,29 @@ async function main(): Promise<void> {
     await createMarginfiAccount(config, cli, connection);
     return;
   }
+  if (cli.reclaimRent) {
+    const maxIndex = cli.maxSubTakerIndex ?? Math.max(config.subTakerIndex + 5, 20);
+    console.log(
+      `[RentReclaim] Scanning sub-takers 1 to ${maxIndex} (active sub-taker is #${config.subTakerIndex}${cli.includeActive ? " - INCLUDED" : " - SKIPPED"})...`,
+    );
+    const results = await reclaimUnusedSubAccountRents(connection, config.keypair, {
+      currentSubTakerIndex: config.subTakerIndex,
+      maxIndex,
+      includeActive: cli.includeActive,
+      silent: false,
+    });
+    const totalReclaimedLamports = results.reduce((sum, r) => sum + r.lamportsReclaimed, 0n);
+    const totalClosed = results.reduce((sum, r) => sum + r.accountsClosed, 0);
+    console.log(
+      `[RentReclaim] Complete! Closed ${totalClosed} token account(s) and reclaimed ${(Number(totalReclaimedLamports) / 1e9).toFixed(6)} SOL back to master wallet (${config.keypair.publicKey.toBase58()}).`,
+    );
+    return;
+  }
   if (cli.setupSubAtas) {
     if (!config.subKeypair) {
       throw new Error("Sub-account taker is not enabled (SOL_FLASH_ARB_USE_SUB_TAKER is false)");
     }
-    await ensureSubAccountAtas(connection, config.keypair, config.subKeypair);
+    await ensureSubAccountAtas(connection, config.keypair, config.subKeypair, config.subTakerIndex);
     return;
   }
   if (cli.send && cli.confirmation !== "EXECUTE_SOLANA_FLASH_ARB") {
@@ -3902,7 +4253,7 @@ async function main(): Promise<void> {
 
   if (!cli.quoteOnly) {
     if (cli.send && config.subKeypair) {
-      await ensureSubAccountAtas(connection, config.keypair, config.subKeypair);
+      await ensureSubAccountAtas(connection, config.keypair, config.subKeypair, config.subTakerIndex);
     }
     const funding = await readFundingSnapshot(
       connection,

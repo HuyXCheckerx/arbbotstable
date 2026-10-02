@@ -63,6 +63,8 @@ import {
   recordMetaMatchaDenial,
   clearMetaMatchaDenial,
   rotateSubTaker,
+  buildReclaimRentInstructions,
+  type SubAccountRentStatus,
   stableCapacity,
   tokenAccountAmountRaw,
   type JupiterQuote,
@@ -76,7 +78,11 @@ import {
   VersionedTransaction,
   type Connection,
 } from "@solana/web3.js";
-import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
+import {
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 
 // Engine runtime state (provider denials, cached bank addresses) must never
 // reach the live logs/ directory from tests, nor carry over between tests.
@@ -1432,6 +1438,98 @@ test("rotateSubTaker increments subTakerIndex, updates subKeypair, and clears de
   assert.equal(metaMatchaDenialRemainingMs(), 0);
 });
 
+test("buildReclaimRentInstructions builds close account and SOL transfer instructions for sub-taker", () => {
+  const master = Keypair.generate();
+  const sub = deriveSubAccountKeypair(master, 1);
 
+  const usdcAta = getAssociatedTokenAddressSync(USDC_MINT, sub.publicKey, false, TOKEN_PROGRAM_ID);
+  const pyusdAta = getAssociatedTokenAddressSync(PYUSD_MINT, sub.publicKey, false, TOKEN_2022_PROGRAM_ID);
+  const usdgAta = getAssociatedTokenAddressSync(USDG_MINT, sub.publicKey, false, TOKEN_2022_PROGRAM_ID);
 
+  const status: SubAccountRentStatus = {
+    index: 1,
+    subTaker: sub.publicKey,
+    tokenAccounts: [
+      {
+        mint: USDC_MINT,
+        symbol: "USDC",
+        programId: TOKEN_PROGRAM_ID,
+        ata: usdcAta,
+        exists: true,
+        lamports: 2_039_280n,
+        tokenBalance: 0n,
+      },
+      {
+        mint: PYUSD_MINT,
+        symbol: "PYUSD",
+        programId: TOKEN_2022_PROGRAM_ID,
+        ata: pyusdAta,
+        exists: true,
+        lamports: 2_039_280n,
+        tokenBalance: 0n,
+      },
+      {
+        mint: USDG_MINT,
+        symbol: "USDG",
+        programId: TOKEN_2022_PROGRAM_ID,
+        ata: usdgAta,
+        exists: false,
+        lamports: 0n,
+        tokenBalance: 0n,
+      },
+    ],
+    nativeLamports: 5_000_000n,
+    totalReclaimableLamports: 2_039_280n + 2_039_280n + 5_000_000n,
+  };
 
+  const ixs = buildReclaimRentInstructions(master.publicKey, sub, status);
+  // Expect 2 CloseAccount instructions + 1 SystemProgram.transfer instruction = 3
+  assert.equal(ixs.length, 3);
+
+  // First instruction closes USDC ATA to master
+  assert.equal(ixs[0].programId.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+  assert.equal(ixs[0].keys[0].pubkey.toBase58(), usdcAta.toBase58());
+  assert.equal(ixs[0].keys[1].pubkey.toBase58(), master.publicKey.toBase58());
+  assert.equal(ixs[0].keys[2].pubkey.toBase58(), sub.publicKey.toBase58());
+
+  // Second instruction closes PYUSD ATA to master using Token-2022
+  assert.equal(ixs[1].programId.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58());
+  assert.equal(ixs[1].keys[0].pubkey.toBase58(), pyusdAta.toBase58());
+  assert.equal(ixs[1].keys[1].pubkey.toBase58(), master.publicKey.toBase58());
+
+  // Third instruction transfers remaining native SOL from sub to master
+  assert.equal(ixs[2].programId.toBase58(), SystemProgram.programId.toBase58());
+  assert.equal(ixs[2].keys[0].pubkey.toBase58(), sub.publicKey.toBase58());
+  assert.equal(ixs[2].keys[1].pubkey.toBase58(), master.publicKey.toBase58());
+});
+
+test("buildReclaimRentInstructions transfers leftover tokens before closing ATA", () => {
+  const master = Keypair.generate();
+  const sub = deriveSubAccountKeypair(master, 2);
+
+  const usdcAta = getAssociatedTokenAddressSync(USDC_MINT, sub.publicKey, false, TOKEN_PROGRAM_ID);
+
+  const status: SubAccountRentStatus = {
+    index: 2,
+    subTaker: sub.publicKey,
+    tokenAccounts: [
+      {
+        mint: USDC_MINT,
+        symbol: "USDC",
+        programId: TOKEN_PROGRAM_ID,
+        ata: usdcAta,
+        exists: true,
+        lamports: 2_039_280n,
+        tokenBalance: 1_500_000n, // 1.5 USDC leftover
+      },
+    ],
+    nativeLamports: 0n,
+    totalReclaimableLamports: 2_039_280n,
+  };
+
+  const ixs = buildReclaimRentInstructions(master.publicKey, sub, status);
+  // Expect: 1 CreateIdempotent master ATA + 1 TransferChecked to master ATA + 1 CloseAccount = 3
+  assert.equal(ixs.length, 3);
+  assert.equal(ixs[2].programId.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+  assert.equal(ixs[2].keys[1].pubkey.toBase58(), master.publicKey.toBase58());
+});
