@@ -1918,11 +1918,12 @@ def _handle_route_outcome(
             )
         ):
             _consecutive_bridge_failures += 1
-            if _consecutive_bridge_failures >= 3:
+            threshold = 1 if any(x in lowered_detail for x in ("failed to become ready", "local-status=500")) else 2
+            if _consecutive_bridge_failures >= threshold:
                 _consecutive_bridge_failures = 0
                 logger.warning(
-                    "[MatchaBridge] %d consecutive bridge failures detected; verifying proxy health and restarting bridge daemon...",
-                    3,
+                    "[MatchaBridge] %d bridge failure(s) detected; verifying proxy health and restarting bridge daemon...",
+                    threshold,
                 )
                 try:
                     from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
@@ -1932,16 +1933,20 @@ def _handle_route_outcome(
                 try:
                     from src.engines.matcha_browser_bridge import stop_bridge_server, ensure_bridge_running
                     stop_bridge_server()
-                    ensure_bridge_running(timeout=45.0)
+                    if ensure_bridge_running(timeout=30.0):
+                        backoff.succeed("metamatcha:ethereum")
+                        backoff.succeed("metamatcha:solana")
+                        logger.info("[MatchaBridge] Bridge daemon successfully restored; resumed scanning immediately")
                 except Exception as exc:
                     logger.warning("[MatchaBridge] Bridge auto-restart error: %s", exc)
-        elif outcome.category != "transient-matcha":
+        elif route.dex_name == "MetaMatcha" and outcome.category in ("unprofitable", "executed", "simulated", "submitted"):
             _consecutive_bridge_failures = 0
     else:
         backoff.succeed(f"stable:{route.chain}")
         backoff.succeed(f"rpc:{route.chain}")
         backoff.succeed(dex_provider_key(route))
-        _consecutive_bridge_failures = 0
+        if route.dex_name == "MetaMatcha":
+            _consecutive_bridge_failures = 0
 
     if outcome.category == "no-route":
         dependency = dex_market_key(route)

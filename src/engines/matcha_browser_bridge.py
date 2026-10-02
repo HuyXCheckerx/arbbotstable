@@ -132,6 +132,12 @@ def _stop_bridge_server_locked(base_url: str | None = None) -> bool:
                 else:
                     import signal
                     os.kill(pid, signal.SIGTERM)
+                    time.sleep(0.1)
+                    if is_pid_alive(pid):
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
             stopped = True
         except Exception:
             pass
@@ -205,6 +211,13 @@ def _recorded_pid() -> int | None:
         return None
 
 
+def _pid_file_age() -> float:
+    try:
+        return time.time() - PID_FILE.stat().st_mtime
+    except (OSError, ValueError):
+        return float("inf")
+
+
 def _spawn_bridge() -> subprocess.Popen:
     creationflags = 0
     startupinfo = None
@@ -229,7 +242,7 @@ _last_bridge_recycle: float = 0.0
 
 
 def ensure_bridge_running(timeout: float = 50.0) -> bool:
-    """A warming/busy daemon is not dead. Only confirmed mismatches are replaced."""
+    """A warming/busy daemon is not dead. Confirmed mismatches, dead threads, and stalled daemons are recycled."""
     global _last_bridge_recycle
     base_url = get_bridge_base_url()
     deadline = time.monotonic() + timeout
@@ -244,22 +257,34 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                 status = get_bridge_status(base_url)
                 if status.get("ready") and _compatible(status):
                     return True
+
+                needs_recycle = False
+                now = time.monotonic()
+
                 if "version" in status and not _compatible(status):
                     logger.info("[MatchaBridge] Replacing daemon with outdated version or launch configuration")
-                    if not _stop_bridge_server_locked(base_url):
-                        return False
+                    needs_recycle = True
+                elif status.get("error"):
+                    logger.warning("[MatchaBridge] Worker reported an error (%s); recycling daemon...", status.get("error"))
+                    needs_recycle = True
+                elif status.get("thread_dead"):
+                    logger.warning("[MatchaBridge] Worker thread has exited; recycling daemon...")
+                    needs_recycle = True
+                elif status.get("is_stuck"):
+                    logger.warning("[MatchaBridge] Worker is stuck in queue; recycling daemon...")
+                    needs_recycle = True
+                elif status.get("unreachable") and _recorded_pid() and _pid_file_age() > 15.0 and timeout >= 5.0:
+                    logger.warning("[MatchaBridge] Daemon process is alive but HTTP port is unreachable after %.1fs; recycling zombie process...", _pid_file_age())
+                    needs_recycle = True
+                elif not status.get("ready") and (status.get("uptime", 0) > 25.0 or _pid_file_age() > 25.0) and timeout >= 5.0:
+                    logger.warning("[MatchaBridge] Worker failed to reach ready state within expected window; recycling daemon...")
+                    needs_recycle = True
+
+                if needs_recycle:
+                    _stop_bridge_server_locked(base_url)
+                    _last_bridge_recycle = now
                     status = {}
-                # If worker reported an error, recycle the crashed daemon so it doesn't wedge forever
-                if status.get("error"):
-                    now = time.monotonic()
-                    if now - _last_bridge_recycle >= 15.0:
-                        logger.warning("[MatchaBridge] Worker reported an error (%s); recycling daemon...", status.get("error"))
-                        _last_bridge_recycle = now
-                        _stop_bridge_server_locked(base_url)
-                        status = {}
-                    else:
-                        logger.warning("[MatchaBridge] Worker reported a startup error; see bridge log")
-                        return False
+
                 proc = None
                 if not status.get("running") and not _recorded_pid():
                     try:
@@ -268,22 +293,29 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                     except OSError as exc:
                         logger.warning("[MatchaBridge] Could not start worker (%s)", type(exc).__name__)
                         return False
+
                 while time.monotonic() < deadline:
                     if proc is not None and proc.poll() is not None:
+                        logger.warning("[MatchaBridge] Worker process terminated unexpectedly with exit code %s", proc.poll())
                         return False
                     status = get_bridge_status(base_url)
                     if status.get("ready") and _compatible(status):
                         return True
-                    if status.get("error"):
+                    if status.get("error") or status.get("thread_dead"):
                         now = time.monotonic()
-                        if now - _last_bridge_recycle >= 15.0:
-                            logger.warning("[MatchaBridge] Worker reported error during launch (%s); recycling daemon...", status.get("error"))
+                        if now - _last_bridge_recycle >= 10.0 and timeout >= 5.0:
+                            logger.warning("[MatchaBridge] Worker reported error during launch (%s); recycling daemon...", status.get("error") or "thread dead")
                             _last_bridge_recycle = now
                             _stop_bridge_server_locked(base_url)
                             status = {}
                         return False
                     time.sleep(min(0.25, max(0, deadline - time.monotonic())))
-                logger.warning("[MatchaBridge] Worker is not ready yet; leaving it running")
+
+                if timeout >= 5.0:
+                    logger.warning("[MatchaBridge] Worker failed to become ready after %.1fs; terminating process to prevent zombie lock", timeout)
+                    _stop_bridge_server_locked(base_url)
+                else:
+                    logger.warning("[MatchaBridge] Worker is not ready yet; leaving it running")
                 return False
         except FileLockTimeout:
             return False
@@ -318,7 +350,11 @@ def fetch_bridge_quotes(
     timeout: float = 25.0,
 ) -> dict[str, Any]:
     """Fetch quotes via the Matcha browser bridge."""
-    if not ensure_bridge_running(timeout=45.0):
+    if not ensure_bridge_running(timeout=30.0):
+        try:
+            stop_bridge_server()
+        except Exception:
+            pass
         raise BridgeUnavailableError("Matcha bridge temporarily failed to become ready; see logs/matcha_browser_bridge.log")
 
     chain_name = "ethereum" if chain in ("ethereum", "1", 1) else "solana"
@@ -352,6 +388,11 @@ def fetch_bridge_quotes(
             err_msg = err_data.get("error", str(exc))
         except Exception:
             err_msg = str(exc)
+        if exc.code in (500, 504):
+            try:
+                stop_bridge_server()
+            except Exception:
+                pass
         raise BridgeUnavailableError(f"Matcha bridge temporarily failed (local-status={exc.code}): {err_msg}") from exc
     except Exception as exc:
         raise BridgeUnavailableError(f"Matcha bridge temporarily failed ({type(exc).__name__})") from exc
@@ -386,12 +427,12 @@ QUOTE_SCRIPT = r"""async (args) => {
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
             compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
-                method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(14000)
+                method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(8000)
             });
             break;
         } catch (e) {
             if (attempt === 0) {
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 400));
                 continue;
             }
             let errDesc = 'network connection failure';
@@ -416,7 +457,7 @@ QUOTE_SCRIPT = r"""async (args) => {
         try {
             const response = await fetch(`https://meta.matcha.xyz/api/quotes?aggregator=${encodeURIComponent(agg)}`, {
                 method: 'POST', headers, body: JSON.stringify({competitionId: compId, aggregator: agg}),
-                signal: AbortSignal.timeout(15000)
+                signal: AbortSignal.timeout(8000)
             });
             if (!response.ok) {
                 const detail = await failure(response, '/api/quotes');
@@ -448,8 +489,11 @@ class _BridgeServerState:
         self.fatal_error: str | None = None
         self.proxy_url: str = os.getenv("MATCHA_PROXY", "").strip()
         self.configured_proxy = proxy_fingerprint(self.proxy_url)
+        self.start_time: float = time.monotonic()
         self.last_heartbeat: float = time.monotonic()
         self.worker_thread: threading.Thread | None = None
+        self.server_instance: Any = None
+        self.request_count: int = 0
 
 
 def _run_playwright_worker(state: _BridgeServerState) -> None:
@@ -618,6 +662,17 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                 last_health_check = time.monotonic()
                 last_tab_refresh = {"ethereum": time.monotonic(), "solana": time.monotonic()}
                 while state.is_running:
+                    # Max daemon lifetime: 2 hours (7200s) or 2000 requests
+                    # Proactively recycle when idle so browser memory/handles never degrade
+                    if (time.monotonic() - state.start_time > 7200.0 or state.request_count >= 2000) and state.queue.empty():
+                        logger.info(
+                            "[MatchaBridge] Daemon reached scheduled refresh window (uptime: %.0fs, requests: %d); recycling cleanly...",
+                            time.monotonic() - state.start_time,
+                            state.request_count,
+                        )
+                        state.is_running = False
+                        break
+
                     try:
                         task = state.queue.get(timeout=1.0)
                     except Exception:
@@ -653,6 +708,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                             logger.debug("[MatchaBridge] Proactive %s tab refresh notice: %s", chain, exc)
 
                     state.last_heartbeat = time.monotonic()
+                    state.request_count += 1
                     try:
                         t0 = time.perf_counter()
                         res = page.evaluate(
@@ -688,6 +744,21 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     except Exception as exc:
                         logger.error("[MatchaBridge] Evaluate error on [%s]: %s", chain, exc)
                         result_box["error"] = str(exc)
+                        err_msg = str(exc).lower()
+                        fatal_markers = (
+                            "target closed",
+                            "browser has been closed",
+                            "session closed",
+                            "connection closed",
+                            "broken pipe",
+                            "context was destroyed",
+                            "crashed",
+                        )
+                        if any(m in err_msg for m in fatal_markers) or not browser.is_connected() or page.is_closed():
+                            logger.error("[MatchaBridge] Fatal browser crash/disconnection detected: %s. Terminating worker to trigger instant respawn.", exc)
+                            state.fatal_error = f"Fatal browser disconnection: {exc}"
+                            state.is_running = False
+                            break
                         # Page state is likely corrupted, challenged, or timed out. Auto-recover immediately.
                         try:
                             _inject_context_cookies()
@@ -721,6 +792,12 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
             result_box["error"] = state.fatal_error or "Browser worker stopped"
             event.set()
             state.queue.task_done()
+
+        if state.server_instance is not None:
+            try:
+                threading.Thread(target=state.server_instance.shutdown, daemon=True).start()
+            except Exception:
+                pass
 
 
 def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
@@ -781,6 +858,11 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                         "configured_proxy": state.configured_proxy,
                         "connection": "proxy" if state.proxy_url else "direct",
                         "pid": os.getpid(),
+                        "uptime": round(time.monotonic() - state.start_time, 1),
+                        "thread_dead": thread_dead,
+                        "is_stuck": is_stuck,
+                        "error": state.fatal_error,
+                        "requests": state.request_count,
                     }).encode("utf-8"))
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
                     pass
@@ -826,10 +908,10 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
             aggregators = req_data.get("aggregators", ["0x"] if chain == "ethereum" else ["Jupiter"])
 
             event = threading.Event()
-            result_box: dict[str, Any] = {"deadline": time.monotonic() + 23.0}
+            result_box: dict[str, Any] = {"deadline": time.monotonic() + 22.0}
             state.queue.put((chain, payload, aggregators, event, result_box))
 
-            if not event.wait(timeout=23.0):
+            if not event.wait(timeout=22.0):
                 # The client waits 25 seconds. Leave room to deliver this error,
                 # and prevent abandoned work from being evaluated later.
                 result_box["deadline"] = 0.0
@@ -852,6 +934,8 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
             exc,
         )
         return
+
+    state.server_instance = server
 
     try:
         with open(PID_FILE, "w", encoding="utf-8") as f:
