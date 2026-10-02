@@ -73,7 +73,7 @@ def get_bridge_status(base_url: str | None = None, timeout: float = 0.8) -> dict
         try:
             return json.loads(exc.read().decode("utf-8"))
         except Exception:
-            return {"ready": False, "error": f"HTTP {exc.code}"}
+            return {"ready": False, "running": True}
     except Exception:
         return {"ready": False, "unreachable": True}
 
@@ -211,13 +211,6 @@ def _recorded_pid() -> int | None:
         return None
 
 
-def _pid_file_age() -> float:
-    try:
-        return time.time() - PID_FILE.stat().st_mtime
-    except (OSError, ValueError):
-        return float("inf")
-
-
 def _spawn_bridge() -> subprocess.Popen:
     creationflags = 0
     startupinfo = None
@@ -265,24 +258,28 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                     logger.info("[MatchaBridge] Replacing daemon with outdated version or launch configuration")
                     needs_recycle = True
                 elif status.get("error"):
-                    logger.warning("[MatchaBridge] Worker reported an error (%s); recycling daemon...", status.get("error"))
-                    needs_recycle = True
+                    if now - _last_bridge_recycle >= 10.0:
+                        logger.warning("[MatchaBridge] Worker reported an error (%s); recycling daemon...", status.get("error"))
+                        needs_recycle = True
                 elif status.get("thread_dead"):
                     logger.warning("[MatchaBridge] Worker thread has exited; recycling daemon...")
                     needs_recycle = True
                 elif status.get("is_stuck"):
                     logger.warning("[MatchaBridge] Worker is stuck in queue; recycling daemon...")
                     needs_recycle = True
-                elif status.get("unreachable") and _recorded_pid() and _pid_file_age() > 15.0 and timeout >= 5.0:
-                    logger.warning("[MatchaBridge] Daemon process is alive but HTTP port is unreachable after %.1fs; recycling zombie process...", _pid_file_age())
-                    needs_recycle = True
-                elif not status.get("ready") and (status.get("uptime", 0) > 25.0 or _pid_file_age() > 25.0) and timeout >= 5.0:
-                    logger.warning("[MatchaBridge] Worker failed to reach ready state within expected window; recycling daemon...")
+                elif status.get("running") and not status.get("ready") and status.get("uptime", 0) > 40.0 and timeout >= 5.0:
+                    logger.warning("[MatchaBridge] Worker has been running for %.1fs without becoming ready; recycling daemon...", status.get("uptime", 0))
                     needs_recycle = True
 
                 if needs_recycle:
                     _stop_bridge_server_locked(base_url)
                     _last_bridge_recycle = now
+                    status = {}
+
+                # If port is unreachable and timeout is for real launch (>= 5s),
+                # clear any ghost PID so spawn proceeds without getting blocked.
+                if status.get("unreachable") and timeout >= 5.0 and _recorded_pid():
+                    _stop_bridge_server_locked(base_url)
                     status = {}
 
                 proc = None
@@ -301,21 +298,17 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                     status = get_bridge_status(base_url)
                     if status.get("ready") and _compatible(status):
                         return True
-                    if status.get("error") or status.get("thread_dead"):
+                    if status.get("fatal_error") or status.get("thread_dead"):
                         now = time.monotonic()
                         if now - _last_bridge_recycle >= 10.0 and timeout >= 5.0:
-                            logger.warning("[MatchaBridge] Worker reported error during launch (%s); recycling daemon...", status.get("error") or "thread dead")
+                            logger.warning("[MatchaBridge] Worker reported error during launch (%s); recycling daemon...", status.get("fatal_error") or "thread dead")
                             _last_bridge_recycle = now
                             _stop_bridge_server_locked(base_url)
                             status = {}
                         return False
                     time.sleep(min(0.25, max(0, deadline - time.monotonic())))
 
-                if timeout >= 5.0:
-                    logger.warning("[MatchaBridge] Worker failed to become ready after %.1fs; terminating process to prevent zombie lock", timeout)
-                    _stop_bridge_server_locked(base_url)
-                else:
-                    logger.warning("[MatchaBridge] Worker is not ready yet; leaving it running")
+                logger.warning("[MatchaBridge] Worker is not ready yet; leaving it running")
                 return False
         except FileLockTimeout:
             return False
@@ -851,7 +844,7 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 try:
-                    self.wfile.write(json.dumps({
+                    payload = {
                         "ready": ready,
                         "running": state.is_running,
                         "version": BRIDGE_VERSION,
@@ -861,9 +854,12 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
                         "uptime": round(time.monotonic() - state.start_time, 1),
                         "thread_dead": thread_dead,
                         "is_stuck": is_stuck,
-                        "error": state.fatal_error,
                         "requests": state.request_count,
-                    }).encode("utf-8"))
+                    }
+                    if state.fatal_error:
+                        payload["error"] = state.fatal_error
+                        payload["fatal_error"] = state.fatal_error
+                    self.wfile.write(json.dumps(payload).encode("utf-8"))
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
                     pass
             elif self.path == "/shutdown":
