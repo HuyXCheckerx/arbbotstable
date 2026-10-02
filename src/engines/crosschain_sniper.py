@@ -1907,7 +1907,15 @@ def _handle_route_outcome(
 
         lowered_detail = outcome.detail.lower()
         if outcome.category == "transient-matcha" and any(
-            x in lowered_detail for x in ("evaluation timeout", "page.evaluate", "local-status=504", "local-status=500")
+            x in lowered_detail for x in (
+                "evaluation timeout",
+                "page.evaluate",
+                "local-status=504",
+                "local-status=500",
+                "competition fetch failed",
+                "event(error)",
+                "bridge temporarily failed",
+            )
         ):
             _consecutive_bridge_failures += 1
             if _consecutive_bridge_failures >= 3:

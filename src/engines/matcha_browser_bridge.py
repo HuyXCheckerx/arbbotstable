@@ -383,19 +383,26 @@ QUOTE_SCRIPT = r"""async (args) => {
         try { await fetch('https://meta.matcha.xyz/api/gas?chainId=1', {signal: AbortSignal.timeout(8000)}); } catch(e) {}
     }
     let compRes;
-    try {
-        compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
-            method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(14000)
-        });
-    } catch (e) {
-        let errDesc = 'network connection failure';
-        if (e) {
-            errDesc = e.message || e.name || '';
-            if (!errDesc || errDesc === '[object Event]') {
-                errDesc = e.type ? `Event(${e.type})` : (e.target && e.target.status ? `HTTP ${e.target.status}` : 'connection reset/aborted');
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
+                method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(14000)
+            });
+            break;
+        } catch (e) {
+            if (attempt === 0) {
+                await new Promise(r => setTimeout(r, 600));
+                continue;
             }
+            let errDesc = 'network connection failure';
+            if (e) {
+                errDesc = e.message || e.name || '';
+                if (!errDesc || errDesc === '[object Event]') {
+                    errDesc = e.type ? `Event(${e.type})` : (e.target && e.target.status ? `HTTP ${e.target.status}` : 'connection reset/aborted');
+                }
+            }
+            return {error: `Competition fetch failed: ${errDesc}`};
         }
-        return {error: `Competition fetch failed: ${errDesc}`};
     }
     if (!compRes.ok) return {provider_error: await failure(compRes, '/api/competitions')};
     let comp;
@@ -609,6 +616,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     )
 
                 last_health_check = time.monotonic()
+                last_tab_refresh = {"ethereum": time.monotonic(), "solana": time.monotonic()}
                 while state.is_running:
                     try:
                         task = state.queue.get(timeout=1.0)
@@ -633,6 +641,17 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         continue
                     page = page_eth if chain == "ethereum" else page_sol
 
+                    # Proactively refresh long-lived tabs (every 30m) to maintain fresh DOM/Kasada tokens
+                    if time.monotonic() - last_tab_refresh.get(chain, 0.0) > 1800.0:
+                        last_tab_refresh[chain] = time.monotonic()
+                        try:
+                            logger.info("[MatchaBridge] Proactively refreshing %s tab...", chain)
+                            _inject_context_cookies()
+                            page.reload(wait_until="domcontentloaded", timeout=25000)
+                            time.sleep(1.0)
+                        except Exception as exc:
+                            logger.debug("[MatchaBridge] Proactive %s tab refresh notice: %s", chain, exc)
+
                     state.last_heartbeat = time.monotonic()
                     try:
                         t0 = time.perf_counter()
@@ -651,6 +670,17 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                                     page.reload(wait_until="domcontentloaded", timeout=25000)
                                 except Exception:
                                     pass
+
+                        if isinstance(res, dict) and res.get("error"):
+                            err_text = str(res["error"]).lower()
+                            if any(k in err_text for k in ("event(error)", "network connection", "fetch failed", "connection reset", "interrupted")):
+                                logger.warning("[MatchaBridge] %s tab hit fetch error (%s); refreshing tab to restore session...", chain, res["error"])
+                                try:
+                                    _inject_context_cookies()
+                                    page.reload(wait_until="domcontentloaded", timeout=25000)
+                                    time.sleep(1.0)
+                                except Exception as reload_exc:
+                                    logger.debug("[MatchaBridge] %s tab reload notice: %s", chain, reload_exc)
 
                         elapsed = time.perf_counter() - t0
                         logger.info("[MatchaBridge] Quote [%s] fetched in %.1fms (aggregators: %s)", chain, elapsed * 1000, aggregators)
