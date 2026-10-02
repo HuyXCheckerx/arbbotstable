@@ -56,6 +56,7 @@ DEFAULT_ROUTE_PAIRS = tuple(
     if loan != counter
 )
 _consecutive_bridge_failures: int = 0
+_last_bridge_failure_restart: float = 0.0
 
 
 class SniperError(RuntimeError):
@@ -1837,7 +1838,7 @@ def _handle_route_outcome(
     stop: threading.Event,
 ) -> bool:
     """Process outcome, update metrics/backoff, and return True if execution stop/cooldown is triggered."""
-    global _consecutive_bridge_failures
+    global _consecutive_bridge_failures, _last_bridge_failure_restart
     cooldown_seconds = bounded_pause(cooldown_seconds)
     if outcome.category in {"submitted", "reverted", "failure"}:
         level = logging.ERROR
@@ -1906,34 +1907,41 @@ def _handle_route_outcome(
             )
 
         lowered_detail = outcome.detail.lower()
-        if outcome.category == "transient-matcha" and any(
-            x in lowered_detail for x in (
-                "evaluation timeout",
-                "page.evaluate",
-                "local-status=504",
-                "local-status=500",
-                "competition fetch failed",
-                "event(error)",
-                "bridge temporarily failed",
+        if (
+            outcome.category == "transient-matcha"
+            and any(
+                x in lowered_detail
+                for x in (
+                    "evaluation timeout",
+                    "page.evaluate",
+                    "local-status=504",
+                    "local-status=500",
+                    "competition fetch failed",
+                    "event(error)",
+                )
             )
+            and "failed to become ready" not in lowered_detail
+            and "temporarily failed" not in lowered_detail
         ):
             _consecutive_bridge_failures += 1
-            threshold = 1 if any(x in lowered_detail for x in ("failed to become ready", "local-status=500")) else 2
-            if _consecutive_bridge_failures >= threshold:
+            threshold = 3
+            now = time.monotonic()
+            if _consecutive_bridge_failures >= threshold and (now - _last_bridge_failure_restart >= 60.0):
                 _consecutive_bridge_failures = 0
+                _last_bridge_failure_restart = now
                 logger.warning(
-                    "[MatchaBridge] %d bridge failure(s) detected; verifying proxy health and restarting bridge daemon...",
+                    "[MatchaBridge] %d persistent bridge failure(s) detected; verifying proxy health and restarting bridge daemon...",
                     threshold,
                 )
                 try:
                     from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
-                    check_and_rotate_proxy_if_needed(logger=logger, verify_current=True)
+                    check_and_rotate_proxy_if_needed(logger=logger, verify_current=True, reload_bridge=False)
                 except Exception as exc:
                     logger.debug("[ProxyManager] Proxy rotation on bridge failure error: %s", exc)
                 try:
                     from src.engines.matcha_browser_bridge import stop_bridge_server, ensure_bridge_running
                     stop_bridge_server()
-                    if ensure_bridge_running(timeout=30.0):
+                    if ensure_bridge_running(timeout=35.0):
                         backoff.succeed("metamatcha:ethereum")
                         backoff.succeed("metamatcha:solana")
                         logger.info("[MatchaBridge] Bridge daemon successfully restored; resumed scanning immediately")

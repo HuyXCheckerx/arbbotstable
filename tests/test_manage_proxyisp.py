@@ -18,6 +18,7 @@ from scripts.manage_proxyisp import (
     get_proxies_status,
     is_proxy_working,
     parse_expiry,
+    reset_rotation_cooldown,
     setup_sniper_proxy,
     update_env_proxy,
     wait_for_new_proxy,
@@ -25,6 +26,9 @@ from scripts.manage_proxyisp import (
 
 
 class TestManageProxyISP(unittest.TestCase):
+    def setUp(self):
+        reset_rotation_cooldown()
+
     def test_parse_expiry(self):
         dt = parse_expiry("2026-10-22T17:56:42.739000")
         self.assertIsNotNone(dt)
@@ -419,6 +423,50 @@ class TestManageProxyISP(unittest.TestCase):
             )
             self.assertEqual(res, "http://clean_u:clean_p@6.6.6.6:6666")
             mock_buy.assert_called_once_with("fake_key", days=1, auto_renew=False)
+
+    @patch("scripts.manage_proxyisp.is_proxy_working")
+    @patch("scripts.manage_proxyisp.get_proxies_status")
+    def test_check_and_rotate_respects_cooldown(self, mock_status, mock_is_working):
+        mock_status.return_value = {
+            "balance_vnd": 5000.0,
+            "proxies": [
+                {
+                    "id": "p1",
+                    "name": "Proxy 1",
+                    "proxy_url": "http://u1:pw1@1.1.1.1:8000",
+                    "is_expired": True,
+                    "remaining_seconds": 0.0,
+                    "remaining_str": "EXPIRED",
+                },
+                {
+                    "id": "p2",
+                    "name": "Proxy 2",
+                    "proxy_url": "http://u2:pw2@2.2.2.2:8000",
+                    "is_expired": False,
+                    "remaining_seconds": 50000.0,
+                    "remaining_str": "14h",
+                },
+            ],
+        }
+        mock_is_working.return_value = True
+
+        with patch.dict("os.environ", {"MATCHA_PROXY": "http://u1:pw1@1.1.1.1:8000"}):
+            # First rotation succeeds and triggers cooldown
+            res1 = check_and_rotate_proxy_if_needed("fake_key", reload_bridge=False, cooldown_seconds=60.0)
+            self.assertEqual(res1, "http://u2:pw2@2.2.2.2:8000")
+
+            # Second rotation within cooldown should be a no-op even if called
+            with patch("scripts.manage_proxyisp.get_proxies_status") as mock_status_2:
+                res2 = check_and_rotate_proxy_if_needed("fake_key", reload_bridge=False, cooldown_seconds=60.0)
+                self.assertEqual(res2, "http://u2:pw2@2.2.2.2:8000")
+                mock_status_2.assert_not_called()
+
+            # Forced rotation bypasses cooldown
+            with patch("scripts.manage_proxyisp.get_proxies_status") as mock_status_3:
+                mock_status_3.return_value = mock_status.return_value
+                res3 = check_and_rotate_proxy_if_needed("fake_key", force=True, reload_bridge=False, cooldown_seconds=60.0)
+                self.assertEqual(res3, "http://u2:pw2@2.2.2.2:8000")
+                mock_status_3.assert_called_once()
 
 
 if __name__ == "__main__":

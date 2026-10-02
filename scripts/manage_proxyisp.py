@@ -408,6 +408,10 @@ def is_proxy_working(proxy_url: str, check_challenge: bool = False) -> bool:
         if check_challenge:
             return _test_proxy_challenge_clearance(proxy_url)
         return True
+    # If basic IP connectivity is working through the proxy and there is no explicit firewall denial,
+    # consider the proxy viable so transient gas endpoint timeouts do not trigger false rotation loops.
+    if res.get("ip_ok") and res.get("mitigated") not in ("deny", "denied"):
+        return True
     return False
 
 
@@ -488,14 +492,22 @@ def update_env_proxy(
         lines = content.splitlines()
         found = False
         new_lines = []
+        already_current = False
         for line in lines:
             if line.startswith("MATCHA_PROXY="):
+                current_val = line.split("=", 1)[1].strip()
+                if current_val == proxy_url.strip():
+                    already_current = True
                 new_lines.append(f"MATCHA_PROXY={proxy_url}")
                 found = True
             else:
                 new_lines.append(line)
         if not found:
             new_lines.append(f"MATCHA_PROXY={proxy_url}")
+
+        if already_current and os.environ.get("MATCHA_PROXY", "").strip() == proxy_url.strip():
+            return True
+
         env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
         os.environ["MATCHA_PROXY"] = proxy_url
 
@@ -617,6 +629,13 @@ def setup_sniper_proxy(
 
 
 _rotation_lock = threading.Lock()
+_last_rotation_time: float = 0.0
+
+
+def reset_rotation_cooldown() -> None:
+    """Reset rotation cooldown timer (used by tests)."""
+    global _last_rotation_time
+    _last_rotation_time = 0.0
 
 
 def check_and_rotate_proxy_if_needed(
@@ -627,6 +646,7 @@ def check_and_rotate_proxy_if_needed(
     force: bool = False,
     verify_current: bool = False,
     reload_bridge: bool = True,
+    cooldown_seconds: float = 90.0,
 ) -> str | None:
     """Runtime check and automated rotation for the active proxy:
     1. If PROXYISP_API_KEY is missing, do nothing.
@@ -653,6 +673,16 @@ def check_and_rotate_proxy_if_needed(
             return os.getenv("MATCHA_PROXY")
 
         current_proxy = os.getenv("MATCHA_PROXY", "").strip()
+
+        global _last_rotation_time
+        now = time.monotonic()
+        if not force and cooldown_seconds > 0 and (now - _last_rotation_time < cooldown_seconds):
+            if logger:
+                logger.debug(
+                    "[ProxyManager] Proxy rotation in cooldown (%.1fs remaining); keeping current proxy.",
+                    cooldown_seconds - (now - _last_rotation_time),
+                )
+            return os.getenv("MATCHA_PROXY") or current_proxy
 
         try:
             status = get_proxies_status(api_key)
@@ -769,6 +799,7 @@ def check_and_rotate_proxy_if_needed(
         except Exception:
             pass
 
+        _last_rotation_time = time.monotonic()
         return new_selected
 
 
