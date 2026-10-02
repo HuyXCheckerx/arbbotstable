@@ -28,7 +28,7 @@ PID_FILE = PROJECT_ROOT / ".matcha_bridge.pid"
 LOCK_FILE = PROJECT_ROOT / ".matcha_bridge.lock"
 DEFAULT_PORT = 18234
 DEFAULT_HOST = "127.0.0.1"
-BRIDGE_VERSION = 6
+BRIDGE_VERSION = 7
 # Four 45s navigations, 40s + 30s clearance polling, and browser
 # launch/settling overhead when proxy warmup requires direct fallback.
 WARMUP_TIMEOUT_SECONDS = 300.0
@@ -497,6 +497,27 @@ class _BridgeServerState:
         self.request_count: int = 0
 
 
+def _record_warmup_failure(page_eth: Any, page_sol: Any, connection: str) -> str:
+    """Capture public page diagnostics without logging cookies or proxy credentials."""
+    details = []
+    log_dir = PROJECT_ROOT / "logs"
+    for chain, page in (("ethereum", page_eth), ("solana", page_sol)):
+        try:
+            title = str(page.title())[:160]
+            body = " ".join(page.locator("body").inner_text(timeout=2000).split())[:400]
+            details.append(f"{chain}: title={title!r}, page={body!r}")
+        except Exception as exc:
+            details.append(f"{chain}: page diagnostics unavailable ({type(exc).__name__})")
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(log_dir / f"matcha-warmup-{connection}-{chain}.png"), timeout=3000)
+        except Exception:
+            pass
+    detail = "; ".join(details)
+    logger.warning("[MatchaBridge] %s warmup failed: %s", connection, detail)
+    return detail
+
+
 def _run_playwright_worker(state: _BridgeServerState) -> None:
     try:
         from playwright.sync_api import sync_playwright
@@ -516,7 +537,9 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
     ]
-    launch_kwargs: dict[str, Any] = {"headless": True, "args": launch_args}
+    headless = os.getenv("MATCHA_BRIDGE_HEADLESS", "true").strip().lower() not in ("0", "false", "no")
+    launch_kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
+    logger.info("[MatchaBridge] Browser mode: %s (bridge version %d)", "headless" if headless else "visible", BRIDGE_VERSION)
     if proxy_url:
         from urllib.parse import urlparse
         p = urlparse(proxy_url)
@@ -609,6 +632,17 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
                     sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
 
+                    # Immediate fail-fast if proxy IP is banned by Vercel firewall (403 Forbidden)
+                    if proxy_url and (any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden"))):
+                        logger.warning("[MatchaBridge] Proxy %s is blocked by Vercel firewall (403 Forbidden). Rotating proxy immediately...", proxy_url)
+                        if os.getenv("PROXYISP_API_KEY", "").strip():
+                            try:
+                                from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
+                                check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False)
+                            except Exception as exc:
+                                logger.debug("[MatchaBridge] Immediate proxy rotation error: %s", exc)
+                        break
+
                     if poll_idx > 0 and poll_idx % 10 == 0:
                         logger.debug("[MatchaBridge] Warmup check (poll %d/40): ETH='%s', SOL='%s'", poll_idx, t_eth, t_sol)
 
@@ -621,6 +655,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
 
                 # If proxy was used and failed to clear tabs, fallback directly without proxy
                 if proxy_url and not (state.ready_eth.is_set() and state.ready_sol.is_set()):
+                    _record_warmup_failure(page_eth, page_sol, "proxy")
                     logger.warning("[MatchaBridge] Proxy failed to clear browser tabs; retrying directly without proxy...")
                     state.proxy_url = ""
                     try:
@@ -634,8 +669,10 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                     context = browser.new_context(viewport={"width": 1280, "height": 800})
                     _inject_context_cookies()
                     page_eth = context.new_page()
+                    page_eth.set_default_timeout(45000)
                     Stealth().apply_stealth_sync(page_eth)
                     page_sol = context.new_page()
+                    page_sol.set_default_timeout(45000)
                     Stealth().apply_stealth_sync(page_sol)
                     try:
                         page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
@@ -659,9 +696,10 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                             break
 
                 if not (state.ready_eth.is_set() and state.ready_sol.is_set()):
+                    detail = _record_warmup_failure(page_eth, page_sol, "direct" if not state.proxy_url else "proxy")
                     raise RuntimeError(
                         "Browser warm-up exhausted without both tabs becoming ready; "
-                        "check provider access and proxy connectivity"
+                        f"{detail}; see logs/matcha-warmup-*.png"
                     )
 
                 last_health_check = time.monotonic()

@@ -335,44 +335,40 @@ def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
         if p.password:
             proxy_cfg["password"] = p.password
 
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+        ]
+
         with sync_playwright() as pw:
             try:
                 browser = pw.chromium.launch(
                     headless=True,
                     proxy=proxy_cfg,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-gpu",
-                        "--disable-dev-shm-usage",
-                        "--disable-software-rasterizer",
-                    ],
+                    args=launch_args,
                 )
             except (OSError, Exception) as launch_exc:
                 logger.debug("Chromium launch failed in proxy challenge test: %s", launch_exc)
                 return False
 
             try:
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    viewport={"width": 1280, "height": 800},
-                )
+                context = browser.new_context(viewport={"width": 1280, "height": 800})
                 page = context.new_page()
                 Stealth().apply_stealth_sync(page)
                 try:
-                    page.goto("https://meta.matcha.xyz/solana", timeout=15000, wait_until="domcontentloaded")
+                    page.goto("https://meta.matcha.xyz/ethereum", timeout=12000, wait_until="domcontentloaded")
                 except Exception:
                     pass
-                time.sleep(2)
-                eval_res = page.evaluate("""async () => {
-                    try {
-                        const r = await fetch("https://meta.matcha.xyz/api/gas?chainId=1");
-                        return { status: r.status };
-                    } catch(e) {
-                        return { status: 0 };
-                    }
-                }""")
-                return eval_res.get("status") == 200
+                for _ in range(6):
+                    time.sleep(1)
+                    title = (page.title() or "").lower()
+                    if any(b in title for b in ("403", "forbidden", "denied")):
+                        return False
+                    if any(w in title for w in ("matcha", "swap", "ethereum", "solana")):
+                        return True
+                return False
             finally:
                 try:
                     browser.close()
@@ -383,14 +379,11 @@ def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
         return False
 
 
-def is_proxy_working(proxy_url: str, check_challenge: bool = False) -> bool:
+def is_proxy_working(proxy_url: str, check_challenge: bool = True) -> bool:
     """Determine whether a proxy is fully functional for MetaMatcha quotes.
     
-    Uses lightweight HTTP checks. If the residential proxy is alive (ip_ok)
-    and not explicitly banned by Vercel firewall (mitigated != 'deny' and status != 403),
-    it is considered working. The persistent browser bridge naturally solves any
-    Turnstile / Vercel challenge (HTTP 429) using its stealth runtime without
-    needing a separate browser process launched here.
+    If the residential proxy is alive (ip_ok) and not explicitly banned by Vercel firewall,
+    verifies that browser clearance does not evaluate to 403 Forbidden.
     """
     if not proxy_url:
         return False
@@ -402,15 +395,14 @@ def is_proxy_working(proxy_url: str, check_challenge: bool = False) -> bool:
     # If explicitly denied by Vercel firewall (HTTP 403 or mitigated=deny)
     if res.get("mitigated") in ("deny", "denied") or res.get("status_code") in (401, 403):
         return False
-    # If challenged (HTTP 429), the proxy IP is viable and not banned.
-    # Browser bridge will complete the challenge.
+    # If challenged (HTTP 429), verify whether browser clearance evaluates or is 403 banned
     if res.get("mitigated") == "challenge" or res.get("status_code") == 429:
         if check_challenge:
             return _test_proxy_challenge_clearance(proxy_url)
         return True
-    # If basic IP connectivity is working through the proxy and there is no explicit firewall denial,
-    # consider the proxy viable so transient gas endpoint timeouts do not trigger false rotation loops.
     if res.get("ip_ok") and res.get("mitigated") not in ("deny", "denied"):
+        if check_challenge:
+            return _test_proxy_challenge_clearance(proxy_url)
         return True
     return False
 

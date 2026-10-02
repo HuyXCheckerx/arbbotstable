@@ -343,6 +343,20 @@ class BrowserBridgeTests(unittest.TestCase):
         page.evaluate.assert_not_called()
         browser.close.assert_called_once()
 
+    def test_warmup_failure_records_checkpoint_and_screenshots(self):
+        page = Mock()
+        page.title.return_value = "Vercel Security Checkpoint"
+        page.locator.return_value.inner_text.return_value = "Failed to verify your browser\nCode 21"
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(bridge, "PROJECT_ROOT", Path(directory)), \
+                self.assertLogs(bridge.logger, level="WARNING") as logs:
+            detail = bridge._record_warmup_failure(page, page, "direct")
+            self.assertIn("Code 21", detail)
+            self.assertIn("Vercel Security Checkpoint", logs.output[0])
+            self.assertEqual(page.screenshot.call_count, 2)
+            self.assertEqual(Path(page.screenshot.call_args.kwargs["path"]).name,
+                             "matcha-warmup-direct-solana.png")
+
     def test_expired_queued_quote_is_skipped_before_next_live_quote(self):
         state = bridge._BridgeServerState()
         expired_event, expired = threading.Event(), {"deadline": 0.0}
