@@ -322,8 +322,7 @@ def test_proxy(proxy_url: str, check_meta: bool = True) -> dict[str, Any]:
     return result
 
 
-def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
-    """Verify whether a challenged proxy can solve Vercel challenge and achieve HTTP 200."""
+def _run_sync_challenge_test(proxy_url: str) -> bool:
     try:
         from playwright.sync_api import sync_playwright
         from playwright_stealth import Stealth
@@ -358,10 +357,10 @@ def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
                 page = context.new_page()
                 Stealth().apply_stealth_sync(page)
                 try:
-                    page.goto("https://meta.matcha.xyz/ethereum", timeout=12000, wait_until="domcontentloaded")
+                    page.goto("https://meta.matcha.xyz/ethereum", timeout=15000, wait_until="domcontentloaded")
                 except Exception:
                     pass
-                for _ in range(6):
+                for _ in range(15):
                     time.sleep(1)
                     title = (page.title() or "").lower()
                     if any(b in title for b in ("403", "forbidden", "denied")):
@@ -376,6 +375,28 @@ def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
                     pass
     except (OSError, Exception) as exc:
         logger.debug("Proxy challenge test failed for %s: %s", proxy_url, exc)
+        return False
+
+
+def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
+    """Verify whether a challenged proxy can solve Vercel challenge and achieve HTTP 200."""
+    try:
+        import asyncio
+        import concurrent.futures
+
+        try:
+            asyncio.get_running_loop()
+            in_loop = True
+        except RuntimeError:
+            in_loop = False
+
+        if in_loop:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_sync_challenge_test, proxy_url)
+                return future.result(timeout=25.0)
+        return _run_sync_challenge_test(proxy_url)
+    except Exception as exc:
+        logger.debug("Proxy clearance runner failed for %s: %s", proxy_url, exc)
         return False
 
 

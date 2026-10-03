@@ -638,7 +638,16 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         if os.getenv("PROXYISP_API_KEY", "").strip():
                             try:
                                 from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
-                                check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False)
+                                rotated = check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False)
+                                if rotated and rotated != proxy_url:
+                                    logger.info("[MatchaBridge] Proxy successfully rotated to %s; restarting bridge worker...", rotated)
+                                    state.proxy_url = rotated
+                                    try:
+                                        context.close()
+                                        browser.close()
+                                    except Exception:
+                                        pass
+                                    return _run_playwright_worker(state, rotated)
                             except Exception as exc:
                                 logger.debug("[MatchaBridge] Immediate proxy rotation error: %s", exc)
                         break
@@ -686,6 +695,9 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         time.sleep(1)
                         t_eth = (page_eth.title() or "").lower()
                         t_sol = (page_sol.title() or "").lower()
+                        if any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden")):
+                            logger.warning("[MatchaBridge] Direct fallback blocked by Vercel firewall (403 Forbidden).")
+                            break
                         eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
                         sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
                         if eth_ok and sol_ok and poll_idx >= 2:
