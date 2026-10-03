@@ -21,6 +21,12 @@ import urllib.error
 
 from filelock import FileLock, Timeout as FileLockTimeout
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+except ImportError:
+    pass
+
 logger = logging.getLogger("matcha.bridge")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -236,6 +242,7 @@ def _spawn_bridge() -> subprocess.Popen:
             [sys.executable, str(Path(__file__).resolve())],
             creationflags=creationflags, startupinfo=startupinfo,
             close_fds=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            env=dict(os.environ),
         )
     PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     return proc
@@ -530,6 +537,11 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
         return
 
     logger.info("[MatchaBridge] Initializing Playwright worker...")
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(PROJECT_ROOT / ".env", override=True)
+    except Exception:
+        pass
     proxy_url = os.getenv("MATCHA_PROXY", "").strip()
     launch_args = [
         "--disable-blink-features=AutomationControlled",
