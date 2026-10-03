@@ -265,17 +265,7 @@ def test_proxy(proxy_url: str, check_meta: bool = True) -> dict[str, Any]:
     if not check_meta:
         return result
 
-    # 2. Check MetaMatcha gas endpoint
-    cookie_file = COOKIE_FILE
-    if cookie_file.exists():
-        try:
-            with open(cookie_file, "r", encoding="utf-8") as f:
-                c_data = json.load(f)
-                for c in c_data.get("cookies", []):
-                    s.cookies.set(c["name"], c["value"], domain=c.get("domain", "meta.matcha.xyz"))
-        except Exception:
-            pass
-
+    # 2. Check MetaMatcha gas endpoint (clean test without cached cookies to avoid false positives)
     s.headers.update({
         "origin": "https://meta.matcha.xyz",
         "referer": "https://meta.matcha.xyz/solana",
@@ -354,18 +344,33 @@ def _run_sync_challenge_test(proxy_url: str) -> bool:
 
             try:
                 context = browser.new_context(viewport={"width": 1280, "height": 800})
-                page = context.new_page()
-                Stealth().apply_stealth_sync(page)
+                page_eth = context.new_page()
+                Stealth().apply_stealth_sync(page_eth)
                 try:
-                    page.goto("https://meta.matcha.xyz/ethereum", timeout=15000, wait_until="domcontentloaded")
+                    page_eth.goto("https://meta.matcha.xyz/ethereum", timeout=15000, wait_until="domcontentloaded")
                 except Exception:
                     pass
+
+                page_sol = context.new_page()
+                Stealth().apply_stealth_sync(page_sol)
+                try:
+                    page_sol.goto("https://meta.matcha.xyz/solana", timeout=15000, wait_until="domcontentloaded")
+                except Exception:
+                    pass
+
+                eth_ok = False
+                sol_ok = False
                 for _ in range(15):
                     time.sleep(1)
-                    title = (page.title() or "").lower()
-                    if any(b in title for b in ("403", "forbidden", "denied")):
+                    t_eth = (page_eth.title() or "").lower()
+                    t_sol = (page_sol.title() or "").lower()
+                    if any(b in t_eth for b in ("403", "forbidden", "denied")) or any(b in t_sol for b in ("403", "forbidden", "denied")):
                         return False
-                    if any(w in title for w in ("matcha", "swap", "ethereum", "solana")):
+                    if not eth_ok and any(w in t_eth for w in ("matcha", "swap", "ethereum")):
+                        eth_ok = True
+                    if not sol_ok and any(w in t_sol for w in ("matcha", "swap", "solana")):
+                        sol_ok = True
+                    if eth_ok and sol_ok:
                         return True
                 return False
             finally:
@@ -411,21 +416,12 @@ def is_proxy_working(proxy_url: str, check_challenge: bool = True) -> bool:
     res = test_proxy(proxy_url, check_meta=True)
     if not res.get("ip_ok"):
         return False
-    if res.get("gas_ok"):
-        return True
     # If explicitly denied by Vercel firewall (HTTP 403 or mitigated=deny)
     if res.get("mitigated") in ("deny", "denied") or res.get("status_code") in (401, 403):
         return False
-    # If challenged (HTTP 429), verify whether browser clearance evaluates or is 403 banned
-    if res.get("mitigated") == "challenge" or res.get("status_code") == 429:
-        if check_challenge:
-            return _test_proxy_challenge_clearance(proxy_url)
-        return True
-    if res.get("ip_ok") and res.get("mitigated") not in ("deny", "denied"):
-        if check_challenge:
-            return _test_proxy_challenge_clearance(proxy_url)
-        return True
-    return False
+    if check_challenge:
+        return _test_proxy_challenge_clearance(proxy_url)
+    return True
 
 
 def buy_residential_proxy(api_key: str, days: int = 1, auto_renew: bool = False) -> dict:

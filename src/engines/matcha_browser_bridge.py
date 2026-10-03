@@ -650,7 +650,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                         if os.getenv("PROXYISP_API_KEY", "").strip():
                             try:
                                 from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
-                                rotated = check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False)
+                                rotated = check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False, logger=logger)
                                 if rotated and rotated != proxy_url:
                                     logger.info("[MatchaBridge] Proxy successfully rotated to %s; restarting bridge worker...", rotated)
                                     state.proxy_url = rotated
@@ -661,7 +661,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                                         pass
                                     return _run_playwright_worker(state, rotated)
                             except Exception as exc:
-                                logger.debug("[MatchaBridge] Immediate proxy rotation error: %s", exc)
+                                logger.warning("[MatchaBridge] Immediate proxy rotation error: %s", exc)
                         break
 
                     if poll_idx > 0 and poll_idx % 10 == 0:
