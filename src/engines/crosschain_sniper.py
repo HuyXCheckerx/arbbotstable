@@ -444,6 +444,7 @@ def build_route_invocation(
                 f"SOL_FLASH_ARB_MIN_NET_PROFIT_{route.loan}": floor,
                 "SOL_FLASH_ARB_OUTPUT_PATH": output_path,
                 "SOL_FLASH_ARB_MATCHA_PYTHON": sys.executable,
+                "SOL_FLASH_ARB_PROVIDER": os.getenv("SOL_FLASH_ARB_PROVIDER", "kamino"),
             }
         )
         existing_node_opts = environment.get("NODE_OPTIONS", "")
@@ -1590,7 +1591,7 @@ def run_route(
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0  # SW_HIDE
-    effective_timeout = timeout_seconds if live else min(timeout_seconds, 45.0)
+    effective_timeout = min(timeout_seconds, 45.0)
     try:
         if is_subprocess_mocked():
             result = subprocess.run(
@@ -2234,8 +2235,14 @@ def worker(
             eligible = [route for route in candidates if is_due(route)]
             if not eligible or stop.is_set():
                 return stop.is_set()
-            with ThreadPoolExecutor(max_workers=min(len(eligible), 6)) as pool:
-                futures = [pool.submit(check, route) for route in eligible]
+            # On Solana, rate-limit worker concurrency to avoid RPC 429 rate limit bursts
+            max_workers = min(len(eligible), 2 if chain == "solana" else 6)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = []
+                for route in eligible:
+                    futures.append(pool.submit(check, route))
+                    if chain == "solana":
+                        time.sleep(0.3)
                 for future in as_completed(futures):
                     if stop.is_set():
                         return True
