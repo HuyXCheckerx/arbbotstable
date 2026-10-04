@@ -55,6 +55,12 @@ DEFAULT_ROUTE_PAIRS = tuple(
     for counter in ROUTE_TOKENS
     if loan != counter
 )
+DEFAULT_ETH_PAIRS = ("PYUSD/USDG", "USDG/PYUSD")
+DEFAULT_SOL_PAIRS = ("USDC/PYUSD", "PYUSD/USDC", "USDC/USDG", "USDG/USDC")
+CHAIN_DEFAULT_PAIRS: dict[str, tuple[str, ...]] = {
+    "ethereum": DEFAULT_ETH_PAIRS,
+    "solana": DEFAULT_SOL_PAIRS,
+}
 _consecutive_bridge_failures: int = 0
 _last_bridge_failure_restart: float = 0.0
 
@@ -285,20 +291,41 @@ def amount_text(value: Decimal) -> str:
 
 def selected_routes(
     chains: list[str],
-    pairs: list[str],
-    swap_orders: list[str],
+    pairs: list[str] | None = None,
+    swap_orders: list[str] = list(DEFAULT_SWAP_ORDERS),
+    *,
+    filter_chain_defaults: bool = False,
 ) -> list[Route]:
-    return [
-        Route(chain, pair, swap_order)
-        for chain in chains
-        for pair in pairs
-        for swap_order in swap_orders
-    ]
+    routes: list[Route] = []
+    for chain in chains:
+        allowed = CHAIN_DEFAULT_PAIRS.get(chain)
+        if pairs is None:
+            active_pairs = list(allowed) if allowed is not None else list(DEFAULT_ROUTE_PAIRS)
+        elif filter_chain_defaults and allowed is not None:
+            matching = [p for p in pairs if p in allowed]
+            active_pairs = matching if matching else pairs
+        else:
+            active_pairs = pairs
+        for pair in active_pairs:
+            for swap_order in swap_orders:
+                routes.append(Route(chain, pair, swap_order))
+    return routes
 
 
 # Outcomes meaning the loan token cannot be borrowed right now, so the
 # equivalent route that borrows the other token should be checked instead.
 FUNDING_UNAVAILABLE_CATEGORIES = frozenset({"flash-liquidity", "flash-conflict", "marginfi-utilization"})
+
+
+def route_preference_priority(r: Route) -> int:
+    """Return priority for sorting within an arbitrage group (0 = preferred, 1 = fallback)."""
+    if r.chain == "ethereum":
+        # On Ethereum, prefer Morpho-funded loans (PYUSD) over Uniswap v4 (USDG)
+        return 0 if r.loan == "PYUSD" else 1
+    if r.chain == "solana":
+        # On Solana, prefer primary USDC flash loans over PYUSD or USDG
+        return 0 if r.loan == "USDC" else 1
+    return 0
 
 
 def arbitrage_groups(routes: list[Route]) -> list[list[Route]]:
@@ -308,11 +335,7 @@ def arbitrage_groups(routes: list[Route]) -> list[list[Route]]:
         groups.setdefault(route.arbitrage_key, []).append(route)
     result = []
     for group in groups.values():
-        # On Ethereum, prefer Morpho-funded loans (USDC, PYUSD) over Uniswap v4 (USDG)
-        sorted_group = sorted(
-            group,
-            key=lambda r: (1 if r.chain == "ethereum" and r.loan == "USDG" else 0),
-        )
+        sorted_group = sorted(group, key=route_preference_priority)
         result.append(sorted_group)
     return result
 
@@ -535,9 +558,18 @@ def failure_category(detail: str) -> str:
             "only 0% fee flash loan providers are allowed",
             "marginfi flash loan is unavailable",
             "no known kamino reserve configured",
-            "flash-loan liquidity is below",
+            "flash-loan liquidity",
+            "flash loan liquidity",
+            "flash loan capacity",
+            "flash-loan capacity",
+            "flash borrow",
+            "borrow capacity",
+            "insufficient flash",
         )
-    ) or ("flash liquidity is" in lowered and "below requested" in lowered):
+    ) or (
+        "flash liquidity" in lowered
+        and any(w in lowered for w in ("below", "insufficient", "unavailable", "exceeded", "limit"))
+    ):
         return "flash-liquidity"
     if (
         "poolmanager" in lowered
@@ -556,7 +588,12 @@ def failure_category(detail: str) -> str:
         or "unsupported loan token" in lowered
     ):
         return "no-route"
-    if "6026" in lowered or "illegalutilizationratio" in lowered or "utilization ratio" in lowered:
+    if (
+        "6026" in lowered
+        or "illegalutilizationratio" in lowered
+        or "utilization ratio" in lowered
+        or "lendingaccountborrow" in lowered
+    ):
         return "marginfi-utilization"
     if "capacity kept changing" in lowered:
         return "unstable-capacity"
@@ -2250,11 +2287,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="pairs",
         nargs="+",
         choices=DEFAULT_ROUTE_PAIRS,
-        default=list(DEFAULT_ROUTE_PAIRS),
+        default=None,
         metavar="LOAN/COUNTER",
         help=(
-            "flash-loan and counter-token pair (default: all six ordered "
-            "USDC/USDG/PYUSD pairs)"
+            "flash-loan and counter-token pair (default: chain-specific pairs — "
+            "PYUSD/USDG on Ethereum; USDC/PYUSD and USDC/USDG on Solana)"
         ),
     )
     parser.add_argument(
@@ -2413,7 +2450,12 @@ def main(argv: list[str] | None = None) -> int:
             f"--live requires --confirm-live {LIVE_CONFIRMATION}"
         )
 
-    routes = selected_routes(args.chains, args.pairs, args.swap_orders)
+    routes = selected_routes(
+        args.chains,
+        args.pairs,
+        args.swap_orders,
+        filter_chain_defaults=True,
+    )
     for route in routes:
         route_execution_floor(route, args.threshold_usd)
     logger = configure_logging()

@@ -856,19 +856,74 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertTrue(process_is_running(os.getpid()))
         self.assertFalse(process_is_running(2_000_000_000))
 
-    def test_cross_token_pairs_are_in_the_default_rotation(self):
+    def test_default_route_matrix_matches_filtered_routes_for_eth_and_solana(self):
         args = parse_args([])
-        pairs = args.pairs
-        self.assertEqual(len(pairs), 6)
-        for stable_from in ("USDC", "USDG", "PYUSD"):
-            for stable_to in ("USDC", "USDG", "PYUSD"):
-                if stable_from != stable_to:
-                    self.assertIn(f"{stable_from}/{stable_to}", pairs)
+        self.assertIsNone(args.pairs)
         self.assertEqual(args.swap_orders, ["dex-first", "stable-first"])
+        routes = selected_routes(args.chains, args.pairs, args.swap_orders)
+        self.assertEqual(len(routes), 12)
+
+        eth_routes = [r for r in routes if r.chain == "ethereum"]
+        sol_routes = [r for r in routes if r.chain == "solana"]
+
+        self.assertEqual(len(eth_routes), 4)
+        self.assertEqual(len(sol_routes), 8)
+
+        # Ethereum: only PYUSD/USDG and USDG/PYUSD
+        self.assertEqual({r.pair for r in eth_routes}, {"PYUSD/USDG", "USDG/PYUSD"})
+        # No USDC routes on Ethereum
+        self.assertTrue(all("USDC" not in r.pair for r in eth_routes))
+
+        # Solana: only USDC/PYUSD, PYUSD/USDC, USDC/USDG, USDG/USDC
         self.assertEqual(
-            len(selected_routes(args.chains, args.pairs, args.swap_orders)),
-            24,
+            {r.pair for r in sol_routes},
+            {"USDC/PYUSD", "PYUSD/USDC", "USDC/USDG", "USDG/USDC"},
         )
+        # No PYUSD/USDG routes on Solana
+        self.assertTrue(all(r.pair not in {"PYUSD/USDG", "USDG/PYUSD"} for r in sol_routes))
+
+    def test_arbitrage_groups_prioritizes_primary_loan_for_eth_and_solana(self):
+        routes = selected_routes(["ethereum", "solana"])
+        groups = arbitrage_groups(routes)
+        self.assertEqual(len(groups), 6)  # 2 on eth, 4 on sol
+
+        # Each group has exactly 2 routes (1 preferred, 1 fallback)
+        self.assertTrue(all(len(g) == 2 for g in groups))
+
+        # On Ethereum: PYUSD is always preferred (index 0), USDG is fallback (index 1)
+        for g in groups:
+            if g[0].chain == "ethereum":
+                self.assertEqual(g[0].loan, "PYUSD")
+                self.assertEqual(g[1].loan, "USDG")
+
+        # On Solana: USDC is always preferred (index 0), PYUSD or USDG is fallback (index 1)
+        for g in groups:
+            if g[0].chain == "solana":
+                self.assertEqual(g[0].loan, "USDC")
+                self.assertIn(g[1].loan, {"PYUSD", "USDG"})
+
+    def test_active_routes_only_scans_preferred_loan_unless_funding_blocked(self):
+        routes = selected_routes(["ethereum", "solana"])
+        groups = arbitrage_groups(routes)
+
+        # Normal scan: only 6 routes active (2 on ETH loaning PYUSD, 4 on SOL loaning USDC)
+        active = active_routes(groups, {}, now=100.0)
+        self.assertEqual(len(active), 6)
+        eth_active = [r for r in active if r.chain == "ethereum"]
+        sol_active = [r for r in active if r.chain == "solana"]
+        self.assertEqual(len(eth_active), 2)
+        self.assertTrue(all(r.loan == "PYUSD" for r in eth_active))
+        self.assertEqual(len(sol_active), 4)
+        self.assertTrue(all(r.loan == "USDC" for r in sol_active))
+
+        # When a preferred route's flash loan capacity / liquidity is blocked:
+        blocked_route = eth_active[0]
+        blocked = {blocked_route.key: 200.0}
+        fallback_active = active_routes(groups, blocked, now=100.0)
+        self.assertEqual(len(fallback_active), 6)
+        # The blocked PYUSD route is replaced by its USDG twin
+        self.assertNotIn(blocked_route, fallback_active)
+        self.assertTrue(any(r.chain == "ethereum" and r.loan == "USDG" for r in fallback_active))
 
     def test_route_display_explains_both_venues(self):
         route = Route("ethereum", "PYUSD/USDC")
