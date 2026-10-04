@@ -1226,6 +1226,12 @@ function readConfig(cli: CliOptions): Config {
           process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
         );
         if (fs.existsSync(venv)) return venv;
+        const standardVenv = path.join(
+          root,
+          "venv",
+          process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
+        );
+        if (fs.existsSync(standardVenv)) return standardVenv;
         return process.platform === "win32" ? "python" : "python3";
       })(),
     matchaHelperPath:
