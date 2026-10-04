@@ -1208,8 +1208,11 @@ function readConfig(cli: CliOptions): Config {
       process.env.SOL_FLASH_ARB_MATCHA_BASE_URL || "https://meta.matcha.xyz"
     ).replace(/\/$/, ""),
     matchaAggregators: (
-      process.env.SOL_FLASH_ARB_MATCHA_AGGREGATORS || "0x,DFlow,Jupiter,OKX"
-    ).split(",").map((value) => value.trim()).filter(Boolean),
+      process.env.SOL_FLASH_ARB_MATCHA_AGGREGATORS || "0x,Bitget,DFlow,OKX"
+    )
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => Boolean(value) && value.toLowerCase() !== "jupiter"),
     matchaPython:
       process.env.SOL_FLASH_ARB_MATCHA_PYTHON ||
       (() => {
@@ -2390,7 +2393,7 @@ async function getDexQuote(
   // venue is opt-in, so a MetaMatcha failure surfaces (and pauses the route)
   // instead of silently trading on a different DEX.
   const fallbackToDflow = process.env.SOL_FLASH_ARB_FALLBACK_DFLOW === "true";
-  const fallbackToJupiter = process.env.SOL_FLASH_ARB_FALLBACK_JUPITER === "true";
+  const fallbackToJupiter = false; // Jupiter is banned
   const jupiterQuote = () =>
     getJupiterQuote(config, inputMint, outputMint, amountRaw, requestNumber, overrideMaxAccounts);
   if (config.dexProvider === "metamatcha") {

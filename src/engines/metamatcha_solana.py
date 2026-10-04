@@ -58,7 +58,7 @@ except ImportError as exc:  # pragma: no cover - exercised by deployment checks
 
 CHAIN_ID = 1_399_811_149
 DEFAULT_BASE_URL = "https://meta.matcha.xyz"
-DEFAULT_AGGREGATORS = ("0x", "Bitget", "DFlow", "Jupiter", "OKX")
+DEFAULT_AGGREGATORS = ("0x", "Bitget", "DFlow", "OKX")
 HEADERS = {
     "accept": "*/*",
     "accept-language": "en-US,en;q=0.9",
@@ -193,6 +193,8 @@ def select_candidate_quotes(
     candidates: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
     errors: list[str] = []
     for aggregator, response in responses.items():
+        if aggregator.strip().lower() == "jupiter":
+            continue
         try:
             quote, simulation = _direct_result(response)
             if not _simulation_succeeded(simulation):
@@ -278,9 +280,13 @@ def fetch_quote(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("slippageBps must be between 0 and 9999")
     if not isinstance(aggregators, list) or not aggregators:
         raise ValueError("aggregators must be a non-empty list")
-    clean_aggregators = [str(value).strip() for value in aggregators if str(value).strip()]
+    clean_aggregators = [
+        str(value).strip()
+        for value in aggregators
+        if str(value).strip() and str(value).strip().lower() != "jupiter"
+    ]
     if not clean_aggregators:
-        raise ValueError("aggregators must contain at least one provider")
+        raise ValueError("aggregators must contain at least one non-Jupiter provider")
 
     competition_payload = {
         "chainId": CHAIN_ID,

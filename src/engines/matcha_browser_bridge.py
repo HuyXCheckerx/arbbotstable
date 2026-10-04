@@ -977,7 +977,8 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
 
             chain = "ethereum" if "/ethereum" in self.path else "solana"
             payload = req_data.get("payload", {})
-            aggregators = req_data.get("aggregators", ["0x"] if chain == "ethereum" else ["Jupiter"])
+            raw_aggregators = req_data.get("aggregators", ["0x"] if chain == "ethereum" else ["0x", "Bitget", "DFlow", "OKX"])
+            aggregators = [agg for agg in raw_aggregators if agg.lower() != "jupiter"]
 
             event = threading.Event()
             result_box: dict[str, Any] = {"deadline": time.monotonic() + 22.0}
