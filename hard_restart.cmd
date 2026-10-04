@@ -33,7 +33,7 @@ if exist "%~dp0venv\Scripts\python.exe" (
 
 rem 5. Check and rotate proxy if needed
 echo [HardRestart] Verifying proxy status and rotating if needed...
-%PY_EXE% scripts\manage_proxyisp.py --rotate-if-needed --verify
+%PY_EXE% scripts\manage_proxyisp.py --rotate-if-needed
 
 echo ===================================================
 echo [HardRestart] Launching Sniper Engine cleanly...
