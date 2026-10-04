@@ -56,7 +56,11 @@ DEFAULT_ROUTE_PAIRS = tuple(
     if loan != counter
 )
 DEFAULT_ETH_PAIRS = ("PYUSD/USDG", "USDG/PYUSD")
-DEFAULT_SOL_PAIRS = ("USDC/PYUSD", "PYUSD/USDC", "USDC/USDG", "USDG/USDC")
+DEFAULT_SOL_PAIRS = (
+    "USDC/PYUSD", "PYUSD/USDC",
+    "USDC/USDG", "USDG/USDC",
+    "PYUSD/USDG", "USDG/PYUSD",
+)
 CHAIN_DEFAULT_PAIRS: dict[str, tuple[str, ...]] = {
     "ethereum": DEFAULT_ETH_PAIRS,
     "solana": DEFAULT_SOL_PAIRS,
@@ -323,8 +327,11 @@ def route_preference_priority(r: Route) -> int:
         # On Ethereum, prefer Morpho-funded loans (PYUSD) over Uniswap v4 (USDG)
         return 0 if r.loan == "PYUSD" else 1
     if r.chain == "solana":
-        # On Solana, prefer primary USDC flash loans over PYUSD or USDG
-        return 0 if r.loan == "USDC" else 1
+        # On Solana, prefer primary USDC flash loans when USDC is in the pair
+        if "USDC" in r.pair:
+            return 0 if r.loan == "USDC" else 1
+        # For PYUSD/USDG on Solana, prefer deep PYUSD reserves (Kamino/Marginfi) over USDG
+        return 0 if r.loan == "PYUSD" else 1
     return 0
 
 
