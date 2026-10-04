@@ -17,6 +17,8 @@ del /f /q .matcha_bridge.pid .matcha_bridge.lock logs\crosschain-sniper.pid logs
 
 if exist "%~dp0venv\Scripts\python.exe" (
   "%~dp0venv\Scripts\python.exe" sniper.py %ARGS%
+) else if exist "venv\Scripts\python.exe" (
+  "venv\Scripts\python.exe" sniper.py %ARGS%
 ) else (
   where py >nul 2>nul
   if %errorlevel%==0 (
