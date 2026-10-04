@@ -30,6 +30,8 @@ except ImportError:
 logger = logging.getLogger("matcha.bridge")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 PID_FILE = PROJECT_ROOT / ".matcha_bridge.pid"
 LOCK_FILE = PROJECT_ROOT / ".matcha_bridge.lock"
 DEFAULT_PORT = 18234
@@ -208,8 +210,76 @@ def stop_bridge_server(base_url: str | None = None) -> bool:
             with FileLock(str(LOCK_FILE), timeout=10):
                 return _stop_bridge_server_locked(base_url)
         except FileLockTimeout:
-            logger.warning("[MatchaBridge] Startup is still in progress; shutdown deferred")
-            return False
+            logger.warning("[MatchaBridge] Lock acquisition timed out during stop; forcefully clearing lock...")
+            try:
+                LOCK_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return _stop_bridge_server_locked(base_url)
+
+
+def hard_restart_bridge(base_url: str | None = None, logger: logging.Logger | None = None) -> bool:
+    """Forcefully kill any running bridge daemon, clean up locks, rotate proxy if needed, and start fresh."""
+    log = logger or logging.getLogger("matcha.bridge")
+    log.warning("[MatchaBridge] Executing HARD RESTART of Matcha browser bridge daemon...")
+
+    # 1. Kill recorded PID if alive
+    pid = _recorded_pid()
+    if pid and pid != os.getpid():
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False)
+            else:
+                os.kill(pid, 9)
+        except Exception:
+            pass
+
+    # 2. Kill any process listening on the bridge port
+    port = get_bridge_port()
+    if sys.platform == "win32":
+        try:
+            creation_flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            netstat_out = subprocess.check_output(
+                ["netstat", "-ano", "-p", "tcp"],
+                text=True,
+                creationflags=creation_flags,
+            )
+            port_str = f":{port}"
+            for line in netstat_out.splitlines():
+                if port_str in line and "LISTENING" in line:
+                    parts = line.strip().split()
+                    if parts and parts[-1].isdigit():
+                        listen_pid = int(parts[-1])
+                        if listen_pid != os.getpid():
+                            subprocess.run(
+                                ["taskkill", "/F", "/T", "/PID", str(listen_pid)],
+                                capture_output=True,
+                                check=False,
+                                creationflags=creation_flags,
+                            )
+        except Exception:
+            pass
+
+    # 3. Clean up lock and PID files
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    # 4. Check and rotate proxy if needed
+    if os.getenv("PROXYISP_API_KEY", "").strip():
+        try:
+            from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
+            check_and_rotate_proxy_if_needed(logger=log, verify_current=True, reload_bridge=False)
+        except Exception as exc:
+            log.debug("[ProxyManager] Proxy rotation on hard restart error: %s", exc)
+
+    time.sleep(1.0)
+    return ensure_bridge_running(timeout=45.0)
 
 
 def _recorded_pid() -> int | None:
@@ -274,10 +344,9 @@ def ensure_bridge_running(timeout: float = 50.0) -> bool:
                 if "version" in status and not _compatible(status):
                     logger.info("[MatchaBridge] Replacing daemon with outdated version or launch configuration")
                     needs_recycle = True
-                elif status.get("error"):
-                    if now - _last_bridge_recycle >= 10.0:
-                        logger.warning("[MatchaBridge] Worker reported an error (%s); recycling daemon...", status.get("error"))
-                        needs_recycle = True
+                elif status.get("error") or status.get("fatal_error"):
+                    logger.warning("[MatchaBridge] Worker reported an error (%s); recycling daemon...", status.get("error") or status.get("fatal_error"))
+                    needs_recycle = True
                 elif status.get("thread_dead"):
                     logger.warning("[MatchaBridge] Worker thread has exited; recycling daemon...")
                     needs_recycle = True
@@ -979,6 +1048,12 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
             payload = req_data.get("payload", {})
             raw_aggregators = req_data.get("aggregators", ["0x"] if chain == "ethereum" else ["0x", "Bitget", "DFlow", "OKX"])
             aggregators = [agg for agg in raw_aggregators if agg.lower() != "jupiter"]
+
+            thread_dead = state.worker_thread is not None and not state.worker_thread.is_alive()
+            if state.fatal_error or thread_dead or not state.is_running:
+                err_msg = state.fatal_error or ("Bridge worker thread dead" if thread_dead else "Bridge worker is stopping")
+                self.send_quote_response(503, {"error": err_msg})
+                return
 
             event = threading.Event()
             result_box: dict[str, Any] = {"deadline": time.monotonic() + 22.0}

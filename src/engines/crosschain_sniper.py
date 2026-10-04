@@ -1509,6 +1509,58 @@ def run_ethereum_route_direct(
         )
 
 
+def run_command_tree(
+    command: list[str],
+    *,
+    cwd: Path | str,
+    env: dict[str, str],
+    timeout: float,
+    creationflags: int = 0,
+    startupinfo: Any = None,
+) -> tuple[int, str, str]:
+    """Run a subprocess tree with robust termination of all child/grandchild processes on timeout."""
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creationflags,
+        startupinfo=startupinfo,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout or "", stderr or ""
+    except subprocess.TimeoutExpired:
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            stdout, stderr = proc.communicate(timeout=2.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+
+
 def run_route(
     route: Route,
     *,
@@ -1538,20 +1590,37 @@ def run_route(
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0  # SW_HIDE
+    effective_timeout = timeout_seconds if live else min(timeout_seconds, 45.0)
     try:
-        result = subprocess.run(
-            invocation.command,
-            cwd=PROJECT_ROOT,
-            env=invocation.environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-            creationflags=creationflags,
-            startupinfo=startupinfo,
-        )
+        if is_subprocess_mocked():
+            result = subprocess.run(
+                invocation.command,
+                cwd=PROJECT_ROOT,
+                env=invocation.environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=effective_timeout,
+                check=False,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+        else:
+            retcode, stdout, stderr = run_command_tree(
+                invocation.command,
+                cwd=PROJECT_ROOT,
+                env=invocation.environment,
+                timeout=effective_timeout,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+            result = subprocess.CompletedProcess(
+                invocation.command,
+                retcode,
+                stdout,
+                stderr,
+            )
     except subprocess.TimeoutExpired as exc:
         captured = "\n".join(
             (
@@ -1576,71 +1645,71 @@ def run_route(
         if transaction_status == "confirmed" and transaction:
             return Outcome(
                 True,
-                f"confirmed before the engine timed out after {timeout_seconds:g}s: "
+                f"confirmed before the engine timed out after {effective_timeout:g}s: "
                 f"{transaction}",
                 "confirmed",
                 gross_profit=gross_profit,
                 net_profit=net_profit,
                 profit_token=route.loan,
-                elapsed_seconds=timeout_seconds,
+                elapsed_seconds=effective_timeout,
                 transaction=transaction,
             )
         if transaction_status == "submitted" and transaction:
             return Outcome(
                 False,
-                f"submitted but the engine timed out after {timeout_seconds:g}s: "
+                f"submitted but the engine timed out after {effective_timeout:g}s: "
                 f"{transaction}",
                 "submitted",
                 gross_profit=gross_profit,
                 net_profit=net_profit,
                 profit_token=route.loan,
-                elapsed_seconds=timeout_seconds,
+                elapsed_seconds=effective_timeout,
                 transaction=transaction,
             )
         if transaction_status == "reverted" and transaction:
             return Outcome(
                 False,
-                f"reverted before the engine timed out after {timeout_seconds:g}s: "
+                f"reverted before the engine timed out after {effective_timeout:g}s: "
                 f"{transaction}",
                 "reverted",
                 gross_profit=gross_profit,
                 net_profit=net_profit,
                 profit_token=route.loan,
-                elapsed_seconds=timeout_seconds,
+                elapsed_seconds=effective_timeout,
                 transaction=transaction,
             )
         if transaction_status == "expired" and transaction:
             return Outcome(
                 False,
                 f"expired without landing before the engine timed out after "
-                f"{timeout_seconds:g}s: {transaction}; continuing",
+                f"{effective_timeout:g}s: {transaction}; continuing",
                 "expired",
                 gross_profit=gross_profit,
                 net_profit=net_profit,
                 profit_token=route.loan,
-                elapsed_seconds=timeout_seconds,
+                elapsed_seconds=effective_timeout,
                 transaction=transaction,
             )
         if transaction_status == "dropped" and transaction:
             return Outcome(
                 False,
                 f"not found with an unused nonce before the engine timed out after "
-                f"{timeout_seconds:g}s: {transaction}; continuing",
+                f"{effective_timeout:g}s: {transaction}; continuing",
                 "dropped",
                 gross_profit=gross_profit,
                 net_profit=net_profit,
                 profit_token=route.loan,
-                elapsed_seconds=timeout_seconds,
+                elapsed_seconds=effective_timeout,
                 transaction=transaction,
             )
         return Outcome(
             False,
-            f"quote timed out after {timeout_seconds:g}s",
+            f"quote timed out after {effective_timeout:g}s",
             "transient-rpc",
             gross_profit=gross_profit,
             net_profit=net_profit,
             profit_token=route.loan,
-            elapsed_seconds=timeout_seconds,
+            elapsed_seconds=effective_timeout,
         )
     except OSError as exc:
         return Outcome(
@@ -1953,39 +2022,22 @@ def _handle_route_outcome(
         lowered_detail = outcome.detail.lower()
         if (
             outcome.category == "transient-matcha"
-            and any(
-                x in lowered_detail
-                for x in (
-                    "evaluation timeout",
-                    "page.evaluate",
-                    "local-status=504",
-                    "local-status=500",
-                    "competition fetch failed",
-                    "event(error)",
-                )
-            )
-            and "failed to become ready" not in lowered_detail
-            and "temporarily failed" not in lowered_detail
+            or "metamatcha" in lowered_detail
+            or "matcha" in lowered_detail
         ):
             _consecutive_bridge_failures += 1
-            threshold = 3
+            threshold = 2
             now = time.monotonic()
-            if _consecutive_bridge_failures >= threshold and (now - _last_bridge_failure_restart >= 60.0):
+            if _consecutive_bridge_failures >= threshold and (now - _last_bridge_failure_restart >= 45.0):
                 _consecutive_bridge_failures = 0
                 _last_bridge_failure_restart = now
                 logger.warning(
-                    "[MatchaBridge] %d persistent bridge failure(s) detected; verifying proxy health and restarting bridge daemon...",
+                    "[MatchaBridge] %d persistent bridge failure(s) detected; performing hard restart of Matcha bridge daemon...",
                     threshold,
                 )
                 try:
-                    from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
-                    check_and_rotate_proxy_if_needed(logger=logger, verify_current=True, reload_bridge=False)
-                except Exception as exc:
-                    logger.debug("[ProxyManager] Proxy rotation on bridge failure error: %s", exc)
-                try:
-                    from src.engines.matcha_browser_bridge import stop_bridge_server, ensure_bridge_running
-                    stop_bridge_server()
-                    if ensure_bridge_running(timeout=35.0):
+                    from src.engines.matcha_browser_bridge import hard_restart_bridge
+                    if hard_restart_bridge(logger=logger):
                         backoff.succeed("metamatcha:ethereum")
                         backoff.succeed("metamatcha:solana")
                         logger.info("[MatchaBridge] Bridge daemon successfully restored; resumed scanning immediately")

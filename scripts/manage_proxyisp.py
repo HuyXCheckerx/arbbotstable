@@ -42,6 +42,8 @@ from dotenv import load_dotenv
 logger = logging.getLogger("proxyisp")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 ENV_FILE = PROJECT_ROOT / ".env"
 COOKIE_FILE = PROJECT_ROOT / ".matcha_cookies.json"
 
@@ -795,10 +797,11 @@ def check_and_rotate_proxy_if_needed(
         # Reload bridge daemon and background cookie solver
         if reload_bridge:
             try:
-                from src.engines.matcha_browser_bridge import stop_bridge_server, ensure_bridge_running
+                from src.engines.matcha_browser_bridge import hard_restart_bridge, stop_bridge_server, ensure_bridge_running
                 log_info("[ProxyManager] Restarting Matcha browser bridge with fresh proxy IP...")
-                stop_bridge_server()
-                ensure_bridge_running(timeout=45.0)
+                if not hard_restart_bridge():
+                    stop_bridge_server()
+                    ensure_bridge_running(timeout=45.0)
             except Exception as exc:
                 log_warn(f"[ProxyManager] Bridge restart warning after proxy rotation: {exc}")
 

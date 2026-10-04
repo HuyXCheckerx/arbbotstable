@@ -12,6 +12,9 @@ for /f "tokens=5" %%a in ('netstat -ano -p tcp ^| findstr ":18234" ^| findstr "L
   taskkill /F /T /PID %%a >nul 2>nul
 )
 
+rem Clean up stale lock and pid files
+del /f /q .matcha_bridge.pid .matcha_bridge.lock logs\crosschain-sniper.pid logs\.crosschain-sniper.lock 2>nul
+
 if exist "%~dp0venv\Scripts\python.exe" (
   "%~dp0venv\Scripts\python.exe" sniper.py %ARGS%
 ) else (
