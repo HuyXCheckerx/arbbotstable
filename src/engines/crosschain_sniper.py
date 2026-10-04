@@ -423,6 +423,8 @@ def build_route_invocation(
                 script_path,
                 "--swap-order",
                 route.swap_order,
+                "--provider",
+                "kamino",
             ]
         else:
             executable = "npx.cmd" if sys.platform == "win32" else "npx"
@@ -432,6 +434,8 @@ def build_route_invocation(
                 script_path,
                 "--swap-order",
                 route.swap_order,
+                "--provider",
+                "kamino",
             ]
         environment.update(
             {

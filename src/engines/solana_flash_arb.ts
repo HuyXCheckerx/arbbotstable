@@ -676,31 +676,24 @@ export async function ensureSubAccountAtas(
   connection: Connection,
   masterKeypair: Keypair,
   subKeypair: Keypair,
-  currentSubTakerIndex?: number,
+  _currentSubTakerIndex?: number,
 ): Promise<void> {
-  // Check and reclaim rent from prior unused sub-taker accounts (1 .. currentSubTakerIndex - 1)
-  if (currentSubTakerIndex && currentSubTakerIndex > 1) {
-    try {
-      await reclaimUnusedSubAccountRents(connection, masterKeypair, {
-        currentSubTakerIndex,
-        maxIndex: currentSubTakerIndex - 1,
-        silent: true,
-      });
-    } catch (err) {
-      console.warn(`[RentReclaim] Note checking prior sub-takers: ${errorMessage(err)}`);
-    }
-  }
-
   const mints = [
     { mint: USDC_MINT, program: intermediateTokenProgram(USDC_MINT), name: "USDC" },
     { mint: PYUSD_MINT, program: intermediateTokenProgram(PYUSD_MINT), name: "PYUSD" },
     { mint: USDG_MINT, program: intermediateTokenProgram(USDG_MINT), name: "USDG" },
   ];
+  const atas = mints.map((m) => getAssociatedTokenAddressSync(m.mint, subKeypair.publicKey, false, m.program));
+
+  // Single batch RPC call to check sub-account SOL balance AND all 3 token ATAs:
+  const accountPubkeys = [subKeypair.publicKey, ...atas];
+  const accountInfos = await connection.getMultipleAccountsInfo(accountPubkeys);
+
+  const subBal = BigInt(accountInfos[0]?.lamports ?? 0);
   const missingIxs: TransactionInstruction[] = [];
 
   // Check sub-account SOL balance. Aggregators (like OKX/Phoenix) require the sub-taker to hold rent.
-  const subBal = await connection.getBalance(subKeypair.publicKey).catch(() => 0);
-  if (subBal < 5_000_000) {
+  if (subBal < 5_000_000n) {
     console.log(
       `Funding sub-account ${subKeypair.publicKey.toBase58()} with 0.005 SOL for rent buffer...`,
     );
@@ -713,10 +706,11 @@ export async function ensureSubAccountAtas(
     );
   }
 
-  for (const { mint, program, name } of mints) {
-    const ata = getAssociatedTokenAddressSync(mint, subKeypair.publicKey, false, program);
-    const info = await connection.getAccountInfo(ata);
+  for (let i = 0; i < mints.length; i++) {
+    const info = accountInfos[i + 1];
     if (!info) {
+      const { mint, program, name } = mints[i];
+      const ata = atas[i];
       console.log(`Preparing sub-account ATA for ${name} (${ata.toBase58()})...`);
       missingIxs.push(
         createAssociatedTokenAccountIdempotentInstruction(
@@ -729,6 +723,7 @@ export async function ensureSubAccountAtas(
       );
     }
   }
+
   if (!missingIxs.length) {
     return;
   }
