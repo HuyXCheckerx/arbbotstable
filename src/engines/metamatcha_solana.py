@@ -58,7 +58,7 @@ except ImportError as exc:  # pragma: no cover - exercised by deployment checks
 
 CHAIN_ID = 1_399_811_149
 DEFAULT_BASE_URL = "https://meta.matcha.xyz"
-DEFAULT_AGGREGATORS = ("0x", "DFlow", "Jupiter", "OKX")
+DEFAULT_AGGREGATORS = ("0x", "Bitget", "DFlow", "Jupiter", "OKX")
 HEADERS = {
     "accept": "*/*",
     "accept-language": "en-US,en;q=0.9",

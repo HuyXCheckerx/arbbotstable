@@ -4972,8 +4972,12 @@ async function main(): Promise<void> {
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (import.meta.url === invokedPath) {
-  main().catch((error: unknown) => {
-    console.error(`ERROR: ${errorMessage(error)}`);
-    process.exitCode = 1;
-  });
+  main()
+    .then(() => {
+      process.exit(0);
+    })
+    .catch((error: unknown) => {
+      console.error(`ERROR: ${errorMessage(error)}`);
+      process.exit(1);
+    });
 }
