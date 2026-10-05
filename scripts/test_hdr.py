@@ -22,32 +22,45 @@ payload = {
 with sync_playwright() as pw:
     b = pw.chromium.launch(headless=True, proxy=p_cfg, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
     c = b.new_context(user_agent=UA, viewport={"width": 1280, "height": 800})
+    
+    # Test on matcha.xyz
     page = c.new_page()
     Stealth().apply_stealth_sync(page)
-    page.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=20000)
-    time.sleep(3)
+    print("Navigating to https://matcha.xyz/ ...")
+    try:
+        page.goto("https://matcha.xyz/", wait_until="domcontentloaded", timeout=25000)
+    except Exception as e:
+        print("Goto matcha.xyz error:", e)
+    time.sleep(4)
+    print("matcha.xyz title:", page.title())
     
-    # Test 1: WITHOUT x-fetch-native
+    # Try fetch meta.matcha.xyz/api/competitions from matcha.xyz origin
     res1 = page.evaluate("""async (pl) => {
-        const r = await fetch("https://meta.matcha.xyz/api/competitions", {
-            method: "POST",
-            headers: {"content-type": "application/json"},
-            credentials: "include",
-            body: JSON.stringify(pl)
-        });
-        return {status: r.status, mit: r.headers.get("x-vercel-mitigated"), text: (await r.text()).substring(0, 100)};
+        try {
+            const r = await fetch("https://meta.matcha.xyz/api/competitions", {
+                method: "POST",
+                headers: {"content-type": "application/json"},
+                credentials: "include",
+                body: JSON.stringify(pl)
+            });
+            return {status: r.status, mit: r.headers.get("x-vercel-mitigated"), text: (await r.text()).substring(0, 150)};
+        } catch(e) {
+            return {error: String(e)};
+        }
     }""", payload)
-    print("Without x-fetch-native:", res1)
+    print("Fetch from matcha.xyz origin:", res1)
+
+    # Try fetch /api/gas
+    res_gas = page.evaluate("""async () => {
+        try {
+            const r = await fetch("https://meta.matcha.xyz/api/gas?chainId=1", {
+                credentials: "include"
+            });
+            return {status: r.status, mit: r.headers.get("x-vercel-mitigated"), text: (await r.text()).substring(0, 150)};
+        } catch(e) {
+            return {error: String(e)};
+        }
+    }""")
+    print("Fetch gas from matcha.xyz origin:", res_gas)
     
-    # Test 2: WITH x-fetch-native
-    res2 = page.evaluate("""async (pl) => {
-        const r = await fetch("https://meta.matcha.xyz/api/competitions", {
-            method: "POST",
-            headers: {"content-type": "application/json", "x-fetch-native": "1"},
-            credentials: "include",
-            body: JSON.stringify(pl)
-        });
-        return {status: r.status, mit: r.headers.get("x-vercel-mitigated"), text: (await r.text()).substring(0, 100)};
-    }""", payload)
-    print("With x-fetch-native:", res2)
     b.close()
