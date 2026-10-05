@@ -400,6 +400,10 @@ def build_route_invocation(
             "--output",
             output_path,
         ]
+        quote_provider = os.getenv("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
+        if quote_provider:
+            command.extend(["--quote-provider", quote_provider])
+            environment["ETH_ARB_QUOTE_PROVIDER"] = quote_provider
         if live:
             command.extend(
                 ["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"]
@@ -415,6 +419,7 @@ def build_route_invocation(
                 except Exception:
                     pass
 
+        dex_provider = os.getenv("SOL_FLASH_ARB_DEX_PROVIDER", "metamatcha").strip().lower()
         local_tsx = PROJECT_ROOT / "node_modules" / ".bin" / ("tsx.cmd" if sys.platform == "win32" else "tsx")
         script_path = str(PROJECT_ROOT / "src" / "engines" / "solana_flash_arb.ts")
         if local_tsx.exists():
@@ -425,6 +430,8 @@ def build_route_invocation(
                 route.swap_order,
                 "--provider",
                 "kamino",
+                "--dex-provider",
+                dex_provider,
             ]
         else:
             executable = "npx.cmd" if sys.platform == "win32" else "npx"
@@ -436,6 +443,8 @@ def build_route_invocation(
                 route.swap_order,
                 "--provider",
                 "kamino",
+                "--dex-provider",
+                dex_provider,
             ]
         environment.update(
             {
@@ -449,6 +458,7 @@ def build_route_invocation(
                 "SOL_FLASH_ARB_OUTPUT_PATH": output_path,
                 "SOL_FLASH_ARB_MATCHA_PYTHON": sys.executable,
                 "SOL_FLASH_ARB_PROVIDER": os.getenv("SOL_FLASH_ARB_PROVIDER", "kamino"),
+                "SOL_FLASH_ARB_DEX_PROVIDER": dex_provider,
             }
         )
         existing_node_opts = environment.get("NODE_OPTIONS", "")
@@ -669,12 +679,12 @@ def jupiter_market_key(route: Route) -> str:
 
 
 def dex_market_key(route: Route) -> str:
-    venue = "jupiter" if route.dex_name == "Jupiter" else "metamatcha"
+    venue = route.dex_name.lower()
     return f"{venue}:{route.chain}:{route.dex_from}/{route.dex_to}"
 
 
 def dex_provider_key(route: Route) -> str:
-    venue = "jupiter" if route.dex_name == "Jupiter" else "metamatcha"
+    venue = route.dex_name.lower()
     return f"{venue}:{route.chain}"
 
 
@@ -907,6 +917,8 @@ def dependency_label(key: str) -> str:
         "stable": "Stable.com",
         "jupiter": "Jupiter",
         "metamatcha": "MetaMatcha",
+        "dflow": "DFlow",
+        "direct": "Direct DEX",
         "rpc": "chain RPC",
     }
     label = names.get(provider, provider)
@@ -2026,9 +2038,12 @@ def _handle_route_outcome(
 
         lowered_detail = outcome.detail.lower()
         if (
-            outcome.category == "transient-matcha"
-            or "metamatcha" in lowered_detail
-            or "matcha" in lowered_detail
+            route.dex_name == "MetaMatcha"
+            and (
+                outcome.category == "transient-matcha"
+                or "metamatcha" in lowered_detail
+                or "matcha" in lowered_detail
+            )
         ):
             _consecutive_bridge_failures += 1
             threshold = 2
