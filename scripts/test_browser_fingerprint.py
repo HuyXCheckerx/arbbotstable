@@ -20,27 +20,25 @@ with sync_playwright() as pw:
         if t and "checkpoint" not in t:
             break
 
-    details = page.evaluate("""async () => {
-        const scripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
-        const out = [];
+    # Look for the botid script in all script tags or global window
+    info = page.evaluate("""async () => {
+        let botidCode = "";
+        const scripts = Array.from(document.querySelectorAll('script')).map(s => s.src || s.innerText);
         for (const s of scripts) {
-            try {
-                const text = await (await fetch(s)).text();
-                if (text.includes('/api/competitions')) {
-                    const idx = text.indexOf('/api/competitions');
-                    out.push({
-                        url: s,
-                        before: text.substring(Math.max(0, idx - 400), idx),
-                        after: text.substring(idx, Math.min(text.length, idx + 600))
-                    });
-                }
-            } catch(e) {}
+            let text = s;
+            if (s.startsWith('http')) {
+                try { text = await (await fetch(s)).text(); } catch(e){}
+            }
+            if (text.includes('checkLevel') || text.includes('botId') || text.includes('botid')) {
+                botidCode = text;
+                break;
+            }
         }
-        return out;
+        return {
+            windowKeys: Object.keys(window).filter(k => k.toLowerCase().includes('bot') || k.toLowerCase().includes('kasada') || k.toLowerCase().includes('protect')),
+            botidSnippet: botidCode.substring(0, 2000)
+        };
     }""")
-    for d in details:
-        print("=== URL:", d["url"])
-        print("BEFORE:\n", d["before"])
-        print("AFTER:\n", d["after"])
-        print("-" * 50)
+    print("Window keys:", info.get("windowKeys"))
+    print("\nBotID Code Snippet:\n", info.get("botidSnippet")[:1500])
     b.close()
