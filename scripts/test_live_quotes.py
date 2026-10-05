@@ -17,7 +17,7 @@ try:
     sell_amt = 100_000_000 # 100 tokens (6 decimals)
     quotes = mc.quotes(executor, sell_amt, 50, ["velora"], PYUSD, USDG)
     for agg, q in quotes:
-        print(f"  [SUCCESS] {agg.upper()}: PYUSD -> USDG | in={sell_amt/1e6:.2f}, out={q.buy_amount/1e6:.4f}, gas={q.estimated_gas}")
+        print(f"  [SUCCESS] {agg.upper()}: PYUSD -> USDG | in={sell_amt/1e6:.2f}, out={q.buy_amount/1e6:.4f}, target={q.target}")
 except Exception as e:
     print(f"  [ERROR] Ethereum direct quote failed: {e}")
 
