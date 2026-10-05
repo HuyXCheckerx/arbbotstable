@@ -882,7 +882,7 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                                                 browser.close()
                                             except Exception:
                                                 pass
-                                            return _run_playwright_worker(state, rotated)
+                                            return _run_playwright_worker(state)
                                     except Exception as rot_err:
                                         logger.warning("[MatchaBridge] Runtime proxy rotation failed: %s", rot_err)
                             else:
