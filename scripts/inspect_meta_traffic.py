@@ -60,4 +60,38 @@ with sync_playwright() as pw:
     print("GAS HEADERS:", json.dumps(res_gas["headers"], indent=2))
     print("GAS BODY:", res_gas["text"][:200])
 
+    # Now let's try fetch /api/competitions
+    print("\nEvaluating fetch(/api/competitions)...")
+    payload = {
+        "chainId": 1,
+        "sellTokenAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "buyTokenAddress": "0x6c3ea9036406852006290770bedfcaba0e23a0e8",
+        "sellAmount": "100000000",
+        "sellTokenDecimals": 6,
+        "buyTokenDecimals": 6,
+        "slippageBps": 50,
+        "gasPrice": res_gas["text"] and json.loads(res_gas["text"]).get("price") or "2000000000",
+        "taker": "0x50da32e628b45abb1335924086ca0013b9d4ec1c"
+    }
+    res_comp = page.evaluate("""async (pl) => {
+        const r = await fetch("https://meta.matcha.xyz/api/competitions", {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                "x-taker": pl.taker
+            },
+            credentials: "include",
+            body: JSON.stringify(pl)
+        });
+        return {
+            status: r.status,
+            statusText: r.statusText,
+            headers: Object.fromEntries(r.headers.entries()),
+            text: await r.text()
+        };
+    }""", payload)
+    print("COMP STATUS:", res_comp["status"], res_comp["statusText"])
+    print("COMP HEADERS:", json.dumps(res_comp["headers"], indent=2))
+    print("COMP BODY:", res_comp["text"][:300])
+
     b.close()
