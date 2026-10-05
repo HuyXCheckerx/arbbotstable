@@ -2399,25 +2399,9 @@ async function getDexQuote(
         return await getMetaMatchaQuote(config, inputMint, outputMint, amountRaw, taker);
       } catch (error) {
         const msg = errorMessage(error);
-        const isVercelChallenge =
-          /vercel security checkpoint|mitigation=challenge|x-vercel-mitigated\s*[:=]\s*challenge/i.test(msg);
-        const isCompetitorDenial = /request failures:/i.test(msg);
-        const isTakerForbidden =
-          (/\b403\b/i.test(msg) || /denial=forbidden/i.test(msg)) &&
-          /forbidden/i.test(msg) &&
-          !isVercelChallenge &&
-          !isCompetitorDenial;
-
-        if (isTakerForbidden && rotation < maxRotations) {
-          const oldTaker = config.subKeypair
-            ? config.subKeypair.publicKey.toBase58()
-            : wallet.toBase58();
-          const nextIndex = rotateSubTaker(config);
-          console.warn(
-            `MetaMatcha 403/Forbidden for taker ${oldTaker}. Auto-rotated to sub-taker #${nextIndex} (${config.subKeypair?.publicKey.toBase58()}). Retrying quote...`,
-          );
-          continue;
-        }
+        // MetaMatcha HTTP 403 / 429 / WAF blocks are proxy/IP/session issues, NOT taker address bans.
+        // Do NOT rotate sub-takers on HTTP/WAF denials, as that creates an on-chain transaction churn loop.
+        recordMetaMatchaDenial(msg);
         if (fallbackToDflow) {
           console.warn(
             `MetaMatcha quote unavailable (${errorMessage(error)}); falling back to DFlow DEX...`,
