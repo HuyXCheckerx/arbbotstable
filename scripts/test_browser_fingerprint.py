@@ -22,21 +22,25 @@ with sync_playwright() as pw:
 
     details = page.evaluate("""async () => {
         const scripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
-        const results = {};
+        const out = [];
         for (const s of scripts) {
-            if (s.includes('00sdxgptnb74p') || s.includes('3md428e29o3sy')) {
+            try {
                 const text = await (await fetch(s)).text();
-                const filename = s.split('/').pop();
-                results[filename] = {};
-                for (const target of ['protect:', 'ec(', 'x-fetch-native', 'checkLevel']) {
-                    const idx = text.indexOf(target);
-                    if (idx !== -1) {
-                        results[filename][target] = text.substring(Math.max(0, idx - 300), Math.min(text.length, idx + 500));
-                    }
+                if (text.includes('/api/competitions')) {
+                    const idx = text.indexOf('/api/competitions');
+                    out.push({
+                        url: s,
+                        before: text.substring(Math.max(0, idx - 400), idx),
+                        after: text.substring(idx, Math.min(text.length, idx + 600))
+                    });
                 }
-            }
+            } catch(e) {}
         }
-        return results;
+        return out;
     }""")
-    print(json.dumps(details, indent=2))
+    for d in details:
+        print("=== URL:", d["url"])
+        print("BEFORE:\n", d["before"])
+        print("AFTER:\n", d["after"])
+        print("-" * 50)
     b.close()
