@@ -38,7 +38,7 @@ with sync_playwright() as pw:
 
     api_events = []
     def on_request(r):
-        if "/api/" in r.url:
+        if "meta.matcha.xyz" in r.url and any(x in r.url for x in ("/api/", "quote", "compet")):
             api_events.append({
                 "type": "REQUEST",
                 "method": r.method,
@@ -47,7 +47,7 @@ with sync_playwright() as pw:
                 "post_data": r.post_data
             })
     def on_response(r):
-        if "/api/" in r.url:
+        if "meta.matcha.xyz" in r.url and any(x in r.url for x in ("/api/", "quote", "compet")):
             try:
                 body = r.text()
             except Exception as e:
@@ -63,45 +63,52 @@ with sync_playwright() as pw:
     page.on("response", on_response)
 
     print("Navigating to https://meta.matcha.xyz/ethereum...")
-    page.goto("https://meta.matcha.xyz/ethereum", wait_until="networkidle", timeout=45000)
-    print("Title:", page.title())
-    time.sleep(3)
+    page.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
+    
+    for i in range(30):
+        time.sleep(1)
+        t = (page.title() or "").lower()
+        if t and not any(m in t for m in ("checkpoint", "challenge", "just a moment")):
+            print(f"Challenge cleared at {i+1}s! Title: {page.title()}")
+            break
+    time.sleep(4)
 
     print("\n--- Initial API Events ---")
     for ev in api_events:
         print(f"[{ev['type']}] {ev.get('method', '')} {ev.get('status', '')} {ev['url']}")
-        if ev['type'] == 'REQUEST' and ev.get('post_data'):
-            print(f"  Payload: {ev['post_data'][:200]}")
-        if ev['type'] == 'RESPONSE':
-            print(f"  Body: {ev['body'][:200]}")
 
-    # Now inspect input fields on the page
+    # Inspect all inputs and buttons on page
     inputs = page.locator("input").all()
     print(f"\nFound {len(inputs)} input fields on page")
+    target_inp = None
     for i, inp in enumerate(inputs):
         try:
-            print(f"Input {i}: placeholder={inp.get_attribute('placeholder')}, aria-label={inp.get_attribute('aria-label')}, name={inp.get_attribute('name')}")
+            ph = inp.get_attribute("placeholder") or ""
+            al = inp.get_attribute("aria-label") or ""
+            val = inp.get_attribute("value") or ""
+            print(f"Input {i}: placeholder={ph!r}, aria-label={al!r}, value={val!r}")
+            if ("0" in ph or "amount" in ph.lower() or "0" in val) and not target_inp:
+                target_inp = inp
         except Exception:
             pass
 
-    # Try typing '100' into the first number input or amount input
-    api_events.clear()
-    for inp in inputs:
-        ph = (inp.get_attribute("placeholder") or "").lower()
-        if "0" in ph or "amount" in ph or inp.get_attribute("inputmode") == "decimal":
-            print(f"Typing into input (placeholder={ph})...")
-            inp.click()
-            inp.fill("100")
-            break
-
-    print("Waiting 5 seconds for UI quote requests...")
-    time.sleep(5)
+    if target_inp:
+        api_events.clear()
+        print("\nTyping '100' into target input...")
+        target_inp.click()
+        target_inp.fill("100")
+        print("Waiting 8 seconds for quotes...")
+        time.sleep(8)
+    else:
+        print("No target input found! Taking screenshot / printing body...")
+        print(page.locator("body").inner_text()[:600])
 
     print(f"\n--- API Events after typing amount ({len(api_events)} events) ---")
     for ev in api_events:
         print(f"[{ev['type']}] {ev.get('method', '')} {ev.get('status', '')} {ev['url']}")
         if ev['type'] == 'REQUEST':
-            print(f"  Headers: {json.dumps({k: v for k, v in ev['headers'].items() if any(x in k.lower() for x in ('x-', 'sec-', 'content-type', 'cookie', 'origin', 'referer'))}, indent=2)}")
+            interesting = {k: v for k, v in ev['headers'].items() if any(x in k.lower() for x in ('x-', 'sec-', 'content-type', 'cookie', 'origin', 'referer'))}
+            print(f"  Headers: {json.dumps(interesting, indent=2)}")
             if ev.get('post_data'):
                 print(f"  Payload: {ev['post_data']}")
         if ev['type'] == 'RESPONSE':
