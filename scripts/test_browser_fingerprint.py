@@ -24,18 +24,19 @@ with sync_playwright() as pw:
     res = page.evaluate("""async () => {
         const scripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
         for (const s of scripts) {
-            if (s.includes('3md428e29o3sy')) {
+            try {
                 const text = await (await fetch(s)).text();
-                const matches = [];
-                let idx = 0;
-                while ((idx = text.indexOf('ec=', idx + 1)) !== -1) {
-                    matches.push(text.substring(Math.max(0, idx - 50), Math.min(text.length, idx + 200)));
-                    if (matches.length > 5) break;
+                const idx = text.indexOf('/api/competitions');
+                if (idx !== -1) {
+                    return {
+                        url: s,
+                        chunk: text.substring(Math.max(0, idx - 1500), Math.min(text.length, idx + 500))
+                    };
                 }
-                return {matches};
-            }
+            } catch(e) {}
         }
         return {error: 'not found'};
     }""")
-    print("Matches for ec=:\n", json.dumps(res, indent=2))
+    print("Found in:", res.get("url"))
+    print("Chunk:\n", res.get("chunk"))
     b.close()
