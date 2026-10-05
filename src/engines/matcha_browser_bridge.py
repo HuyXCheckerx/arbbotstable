@@ -571,6 +571,7 @@ class _BridgeServerState:
         self.worker_thread: threading.Thread | None = None
         self.server_instance: Any = None
         self.request_count: int = 0
+        self.consecutive_denials: int = 0
 
 
 def _record_warmup_failure(page_eth: Any, page_sol: Any, connection: str) -> str:
@@ -862,6 +863,30 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                                     page.reload(wait_until="domcontentloaded", timeout=25000)
                                 except Exception:
                                     pass
+                            elif detail.get("mitigation") == "deny" or detail.get("status") in (401, 403):
+                                state.consecutive_denials += 1
+                                if state.consecutive_denials >= 3 and proxy_url and os.getenv("PROXYISP_API_KEY", "").strip():
+                                    logger.warning(
+                                        "[MatchaBridge] Proxy %s hit %d consecutive WAF denials (status=%s, mit=%s). Triggering proxy rotation...",
+                                        proxy_url, state.consecutive_denials, detail.get("status"), detail.get("mitigation")
+                                    )
+                                    state.consecutive_denials = 0
+                                    try:
+                                        from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
+                                        rotated = check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False, logger=logger)
+                                        if rotated and rotated != proxy_url:
+                                            logger.info("[MatchaBridge] Proxy rotated to %s; restarting worker thread...", rotated)
+                                            state.proxy_url = rotated
+                                            try:
+                                                context.close()
+                                                browser.close()
+                                            except Exception:
+                                                pass
+                                            return _run_playwright_worker(state, rotated)
+                                    except Exception as rot_err:
+                                        logger.warning("[MatchaBridge] Runtime proxy rotation failed: %s", rot_err)
+                            else:
+                                state.consecutive_denials = 0
 
                         if isinstance(res, dict) and res.get("error"):
                             err_text = str(res["error"]).lower()
