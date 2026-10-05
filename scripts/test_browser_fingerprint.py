@@ -11,7 +11,6 @@ p_cfg = {"server": f"{p.scheme}://{p.hostname}:{p.port}", "username": p.username
 
 with sync_playwright() as pw:
     chrome_exe = pw.chromium.executable_path
-    print("Using executable:", chrome_exe)
     
     b = pw.chromium.launch(
         executable_path=chrome_exe,
@@ -36,83 +35,40 @@ with sync_playwright() as pw:
     page = c.new_page()
     Stealth().apply_stealth_sync(page)
 
-    api_events = []
-    def on_request(r):
-        if "meta.matcha.xyz" in r.url and any(x in r.url for x in ("/api/", "quote", "compet")):
-            api_events.append({
-                "type": "REQUEST",
-                "method": r.method,
-                "url": r.url,
-                "headers": dict(r.headers),
-                "post_data": r.post_data
-            })
-    def on_response(r):
-        if "meta.matcha.xyz" in r.url and any(x in r.url for x in ("/api/", "quote", "compet")):
-            try:
-                body = r.text()
-            except Exception as e:
-                body = f"<error reading body: {e}>"
-            api_events.append({
-                "type": "RESPONSE",
-                "status": r.status,
-                "url": r.url,
-                "headers": dict(r.headers),
-                "body": body[:500]
-            })
-    page.on("request", on_request)
-    page.on("response", on_response)
-
-    print("Navigating to https://meta.matcha.xyz/ethereum...")
     page.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
-    
     for i in range(30):
         time.sleep(1)
         t = (page.title() or "").lower()
         if t and not any(m in t for m in ("checkpoint", "challenge", "just a moment")):
-            print(f"Challenge cleared at {i+1}s! Title: {page.title()}")
             break
-    time.sleep(4)
+    time.sleep(3)
 
-    print("\n--- Initial API Events ---")
-    for ev in api_events:
-        print(f"[{ev['type']}] {ev.get('method', '')} {ev.get('status', '')} {ev['url']}")
-
-    # Inspect all inputs and buttons on page
-    inputs = page.locator("input").all()
-    print(f"\nFound {len(inputs)} input fields on page")
-    target_inp = None
-    for i, inp in enumerate(inputs):
-        try:
-            ph = inp.get_attribute("placeholder") or ""
-            al = inp.get_attribute("aria-label") or ""
-            val = inp.get_attribute("value") or ""
-            print(f"Input {i}: placeholder={ph!r}, aria-label={al!r}, value={val!r}")
-            if ("0" in ph or "amount" in ph.lower() or "0" in val) and not target_inp:
-                target_inp = inp
-        except Exception:
-            pass
-
-    if target_inp:
-        api_events.clear()
-        print("\nTyping '100' into target input...")
-        target_inp.click()
-        target_inp.fill("100")
-        print("Waiting 8 seconds for quotes...")
-        time.sleep(8)
-    else:
-        print("No target input found! Taking screenshot / printing body...")
-        print(page.locator("body").inner_text()[:600])
-
-    print(f"\n--- API Events after typing amount ({len(api_events)} events) ---")
-    for ev in api_events:
-        print(f"[{ev['type']}] {ev.get('method', '')} {ev.get('status', '')} {ev['url']}")
-        if ev['type'] == 'REQUEST':
-            interesting = {k: v for k, v in ev['headers'].items() if any(x in k.lower() for x in ('x-', 'sec-', 'content-type', 'cookie', 'origin', 'referer'))}
-            print(f"  Headers: {json.dumps(interesting, indent=2)}")
-            if ev.get('post_data'):
-                print(f"  Payload: {ev['post_data']}")
-        if ev['type'] == 'RESPONSE':
-            print(f"  Status: {ev['status']}, Mitigated: {ev['headers'].get('x-vercel-mitigated')}")
-            print(f"  Body: {ev['body'][:300]}")
+    # Search loaded scripts inside the page
+    res = page.evaluate("""async () => {
+        const scripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
+        const matches = [];
+        for (const s of scripts) {
+            try {
+                const text = await (await fetch(s)).text();
+                const terms = ['/api/competitions', '/api/quotes', '/api/order', 'competitions', 'quotes?aggregator'];
+                for (const t of terms) {
+                    if (text.includes(t)) {
+                        const idx = text.indexOf(t);
+                        matches.append ? null : matches.push({
+                            src: s,
+                            term: t,
+                            snippet: text.substring(Math.max(0, idx - 100), Math.min(text.length, idx + 200))
+                        });
+                    }
+                }
+            } catch(e) {}
+        }
+        return {scriptCount: scripts.length, matches};
+    }""")
+    print("Script search result:")
+    print("Script count:", res.get("scriptCount"))
+    for m in res.get("matches", []):
+        print(f"\n--- Found {m['term']} in {m['src'].split('/')[-1]} ---")
+        print(m['snippet'])
 
     b.close()
