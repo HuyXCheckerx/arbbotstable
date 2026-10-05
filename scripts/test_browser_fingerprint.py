@@ -9,12 +9,7 @@ p = urlparse(p_url)
 p_cfg = {"server": f"{p.scheme}://{p.hostname}:{p.port}", "username": p.username, "password": p.password}
 
 with sync_playwright() as pw:
-    b = pw.chromium.launch(
-        executable_path=pw.chromium.executable_path,
-        headless=False,
-        args=["--headless=new", "--no-sandbox"],
-        proxy=p_cfg
-    )
+    b = pw.chromium.launch(executable_path=pw.chromium.executable_path, headless=False, args=["--headless=new", "--no-sandbox"], proxy=p_cfg)
     c = b.new_context(user_agent=UA_WIN)
     page = c.new_page()
     page.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=30000)
@@ -27,19 +22,17 @@ with sync_playwright() as pw:
     res = page.evaluate("""async () => {
         const scripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
         for (const s of scripts) {
-            try {
-                const text = await (await fetch(s)).text();
-                if (text.includes('/api/rpc/token')) {
-                    const idx = text.indexOf('/api/rpc/token');
-                    return {
-                        url: s,
-                        chunk: text.substring(Math.max(0, idx - 500), Math.min(text.length, idx + 800))
-                    };
-                }
-            } catch(e) {}
+            const text = await (await fetch(s)).text();
+            const idx = text.indexOf('if(!V)return;');
+            if (idx !== -1) {
+                return {
+                    url: s,
+                    snippet: text.substring(Math.max(0, idx - 400), Math.min(text.length, idx + 400))
+                };
+            }
         }
         return {error: 'not found'};
     }""")
-    print("Found rpc/token in:", res.get("url"))
-    print("Chunk:\n", res.get("chunk"))
+    print("Found in:", res.get("url"))
+    print("Snippet:\n", res.get("snippet"))
     b.close()
