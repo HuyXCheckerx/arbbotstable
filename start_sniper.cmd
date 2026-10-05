@@ -2,6 +2,9 @@
 setlocal
 cd /d "%~dp0"
 
+rem Disable Windows Console QuickEdit mode to prevent clicks from freezing execution
+powershell -NoProfile -Command "$k='HKCU:\Console'; Set-ItemProperty -Path $k -Name QuickEdit -Value 0 -Type DWord -ErrorAction SilentlyContinue; Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class WinCon { [DllImport(\"kernel32.dll\", SetLastError=true)] public static extern IntPtr GetStdHandle(int n); [DllImport(\"kernel32.dll\", SetLastError=true)] public static extern bool GetConsoleMode(IntPtr h, out uint m); [DllImport(\"kernel32.dll\", SetLastError=true)] public static extern bool SetConsoleMode(IntPtr h, uint m); public static void DisableQuickEdit() { IntPtr h = GetStdHandle(-10); uint m; if (GetConsoleMode(h, out m)) { SetConsoleMode(h, m & ~0x0040u & ~0x0010u); } } }'; [WinCon]::DisableQuickEdit();" >nul 2>&1
+
 if "%NODE_OPTIONS%"=="" set "NODE_OPTIONS=--max-old-space-size=512"
 
 set "ARGS=%*"

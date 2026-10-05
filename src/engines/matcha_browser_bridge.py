@@ -504,7 +504,7 @@ QUOTE_SCRIPT = r"""async (args) => {
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
             compRes = await fetch('https://meta.matcha.xyz/api/competitions', {
-                method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(8000)
+                method: 'POST', headers, credentials: 'include', body: JSON.stringify(payload), signal: AbortSignal.timeout(8000)
             });
             break;
         } catch (e) {
@@ -533,7 +533,7 @@ QUOTE_SCRIPT = r"""async (args) => {
     await Promise.all(aggregators.map(async agg => {
         try {
             const response = await fetch(`https://meta.matcha.xyz/api/quotes?aggregator=${encodeURIComponent(agg)}`, {
-                method: 'POST', headers, body: JSON.stringify({competitionId: compId, aggregator: agg}),
+                method: 'POST', headers, credentials: 'include', body: JSON.stringify({competitionId: compId, aggregator: agg}),
                 signal: AbortSignal.timeout(8000)
             });
             if (!response.ok) {
@@ -572,6 +572,7 @@ class _BridgeServerState:
         self.server_instance: Any = None
         self.request_count: int = 0
         self.consecutive_denials: int = 0
+        self.last_rotation_time: float = time.monotonic()
 
 
 def _record_warmup_failure(page_eth: Any, page_sol: Any, connection: str) -> str:
@@ -606,339 +607,386 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
         state.is_running = False
         return
 
-    logger.info("[MatchaBridge] Initializing Playwright worker...")
     try:
-        from dotenv import load_dotenv
-        load_dotenv(PROJECT_ROOT / ".env", override=True)
-    except Exception:
-        pass
-    proxy_url = os.getenv("MATCHA_PROXY", "").strip()
-    launch_args = [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-    ]
-    headless = os.getenv("MATCHA_BRIDGE_HEADLESS", "true").strip().lower() not in ("0", "false", "no")
-    launch_kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
-    logger.info("[MatchaBridge] Browser mode: %s (bridge version %d)", "headless" if headless else "visible", BRIDGE_VERSION)
-    if proxy_url:
-        from urllib.parse import urlparse
-        p = urlparse(proxy_url)
-        scheme = p.scheme or "http"
-        proxy_cfg = {"server": f"{scheme}://{p.hostname}:{p.port}"}
-        if p.username:
-            proxy_cfg["username"] = p.username
-        if p.password:
-            proxy_cfg["password"] = p.password
-        launch_kwargs["proxy"] = proxy_cfg
-        logger.info("[MatchaBridge] Using proxy for browser: %s:%s", p.hostname, p.port)
+        from .matcha_cookie_manager import DEFAULT_MATCHA_USER_AGENT
+    except ImportError:
+        try:
+            from matcha_cookie_manager import DEFAULT_MATCHA_USER_AGENT
+        except ImportError:
+            DEFAULT_MATCHA_USER_AGENT = (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
 
     try:
-        with sync_playwright() as pw:
+        while state.is_running:
+            logger.info("[MatchaBridge] Initializing Playwright worker...")
             try:
-                browser = pw.chromium.launch(**launch_kwargs)
-            except Exception as exc:
-                err_text = f"Failed to launch Chromium: {exc}. Run 'playwright install chromium' to install browser binaries."
-                logger.error("[MatchaBridge] %s", err_text)
-                state.fatal_error = err_text
-                state.is_running = False
-                return
+                from dotenv import load_dotenv
+                load_dotenv(PROJECT_ROOT / ".env", override=True)
+            except Exception:
+                pass
+            proxy_url = state.proxy_url or os.getenv("MATCHA_PROXY", "").strip()
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ]
+            headless = os.getenv("MATCHA_BRIDGE_HEADLESS", "true").strip().lower() not in ("0", "false", "no")
+            launch_kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
+            logger.info("[MatchaBridge] Browser mode: %s (bridge version %d)", "headless" if headless else "visible", BRIDGE_VERSION)
+            if proxy_url:
+                from urllib.parse import urlparse
+                p = urlparse(proxy_url)
+                scheme = p.scheme or "http"
+                proxy_cfg = {"server": f"{scheme}://{p.hostname}:{p.port}"}
+                if p.username:
+                    proxy_cfg["username"] = p.username
+                if p.password:
+                    proxy_cfg["password"] = p.password
+                launch_kwargs["proxy"] = proxy_cfg
+                logger.info("[MatchaBridge] Using proxy for browser: %s:%s", p.hostname, p.port)
 
+            should_reconnect = False
             try:
-                context = browser.new_context(viewport={"width": 1280, "height": 800})
-
-                def _inject_context_cookies() -> int:
+                with sync_playwright() as pw:
                     try:
-                        from .matcha_cookie_manager import get_valid_cookies
-                    except ImportError:
-                        try:
-                            from matcha_cookie_manager import get_valid_cookies
-                        except ImportError:
-                            return 0
-                    try:
-                        cookies = get_valid_cookies(non_blocking=True)
-                        if cookies:
-                            pw_cookies = [
-                                {
-                                    "name": c["name"],
-                                    "value": c["value"],
-                                    "domain": c.get("domain") or ".matcha.xyz",
-                                    "path": c.get("path") or "/",
-                                }
-                                for c in cookies
-                                if c.get("name") and c.get("value")
-                            ]
-                            if pw_cookies:
-                                context.add_cookies(pw_cookies)
-                                return len(pw_cookies)
-                    except Exception as e:
-                        logger.debug("[MatchaBridge] Cookie injection notice: %s", e)
-                    return 0
-
-                injected = _inject_context_cookies()
-                if injected:
-                    logger.info("[MatchaBridge] Injected %d cached clearance cookies into browser context", injected)
-
-                page_eth = context.new_page()
-                page_eth.set_default_timeout(45000)
-                Stealth().apply_stealth_sync(page_eth)
-
-                page_sol = context.new_page()
-                page_sol.set_default_timeout(45000)
-                Stealth().apply_stealth_sync(page_sol)
-
-                logger.info("[MatchaBridge] Warming Ethereum tab...")
-                try:
-                    page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
-                except Exception as e:
-                    logger.debug("[MatchaBridge] ETH initial navigation notice: %s", e)
-
-                logger.info("[MatchaBridge] Warming Solana tab...")
-                try:
-                    page_sol.goto("https://meta.matcha.xyz/solana", wait_until="domcontentloaded", timeout=45000)
-                except Exception as e:
-                    logger.debug("[MatchaBridge] SOL initial navigation notice: %s", e)
-
-                # Clearance loop
-                for poll_idx in range(40):
-                    time.sleep(1)
-                    t_eth = ""
-                    t_sol = ""
-                    try:
-                        t_eth = (page_eth.title() or "").lower()
-                        t_sol = (page_sol.title() or "").lower()
-                    except Exception:
-                        pass
-
-                    eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
-                    sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
-
-                    # Immediate fail-fast if proxy IP is banned by Vercel firewall (403 Forbidden)
-                    if proxy_url and (any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden"))):
-                        logger.warning("[MatchaBridge] Proxy %s is blocked by Vercel firewall (403 Forbidden). Rotating proxy immediately...", proxy_url)
-                        if os.getenv("PROXYISP_API_KEY", "").strip():
-                            try:
-                                from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
-                                rotated = check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False, logger=logger)
-                                if rotated and rotated != proxy_url:
-                                    logger.info("[MatchaBridge] Proxy successfully rotated to %s; restarting bridge worker...", rotated)
-                                    state.proxy_url = rotated
-                                    try:
-                                        context.close()
-                                        browser.close()
-                                    except Exception:
-                                        pass
-                                    return _run_playwright_worker(state, rotated)
-                            except Exception as exc:
-                                logger.warning("[MatchaBridge] Immediate proxy rotation error: %s", exc)
-                        break
-
-                    if poll_idx > 0 and poll_idx % 10 == 0:
-                        logger.debug("[MatchaBridge] Warmup check (poll %d/40): ETH='%s', SOL='%s'", poll_idx, t_eth, t_sol)
-
-                    if eth_ok and sol_ok and poll_idx >= 2:
-                        logger.info("[MatchaBridge] Both tabs cleared! (ETH: %s, SOL: %s)", t_eth, t_sol)
-                        time.sleep(2.0)  # Allow Kasada runtime to settle
-                        state.ready_eth.set()
-                        state.ready_sol.set()
-                        break
-
-                # If proxy was used and failed to clear tabs, fallback directly without proxy
-                if proxy_url and not (state.ready_eth.is_set() and state.ready_sol.is_set()):
-                    _record_warmup_failure(page_eth, page_sol, "proxy")
-                    logger.warning("[MatchaBridge] Proxy failed to clear browser tabs; retrying directly without proxy...")
-                    state.proxy_url = ""
-                    try:
-                        context.close()
-                        browser.close()
-                    except Exception:
-                        pass
-                    launch_kwargs.pop("proxy", None)
-                    launch_kwargs["args"] = list(launch_kwargs.get("args", [])) + ["--no-proxy-server"]
-                    browser = pw.chromium.launch(**launch_kwargs)
-                    context = browser.new_context(viewport={"width": 1280, "height": 800})
-                    _inject_context_cookies()
-                    page_eth = context.new_page()
-                    page_eth.set_default_timeout(45000)
-                    Stealth().apply_stealth_sync(page_eth)
-                    page_sol = context.new_page()
-                    page_sol.set_default_timeout(45000)
-                    Stealth().apply_stealth_sync(page_sol)
-                    try:
-                        page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
-                    except Exception:
-                        pass
-                    try:
-                        page_sol.goto("https://meta.matcha.xyz/solana", wait_until="domcontentloaded", timeout=45000)
-                    except Exception:
-                        pass
-                    for poll_idx in range(30):
-                        time.sleep(1)
-                        t_eth = (page_eth.title() or "").lower()
-                        t_sol = (page_sol.title() or "").lower()
-                        if any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden")):
-                            logger.warning("[MatchaBridge] Direct fallback blocked by Vercel firewall (403 Forbidden).")
-                            break
-                        eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
-                        sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
-                        if eth_ok and sol_ok and poll_idx >= 2:
-                            logger.info("[MatchaBridge] Direct fallback cleared tabs! (ETH: %s, SOL: %s)", t_eth, t_sol)
-                            time.sleep(2.0)
-                            state.ready_eth.set()
-                            state.ready_sol.set()
-                            break
-
-                if not (state.ready_eth.is_set() and state.ready_sol.is_set()):
-                    detail = _record_warmup_failure(page_eth, page_sol, "direct" if not state.proxy_url else "proxy")
-                    raise RuntimeError(
-                        "Browser warm-up exhausted without both tabs becoming ready; "
-                        f"{detail}; see logs/matcha-warmup-*.png"
-                    )
-
-                last_health_check = time.monotonic()
-                last_tab_refresh = {"ethereum": time.monotonic(), "solana": time.monotonic()}
-                while state.is_running:
-                    # Max daemon lifetime: 2 hours (7200s) or 2000 requests
-                    # Proactively recycle when idle so browser memory/handles never degrade
-                    if (time.monotonic() - state.start_time > 7200.0 or state.request_count >= 2000) and state.queue.empty():
-                        logger.info(
-                            "[MatchaBridge] Daemon reached scheduled refresh window (uptime: %.0fs, requests: %d); recycling cleanly...",
-                            time.monotonic() - state.start_time,
-                            state.request_count,
-                        )
+                        browser = pw.chromium.launch(**launch_kwargs)
+                    except Exception as exc:
+                        err_text = f"Failed to launch Chromium: {exc}. Run 'playwright install chromium' to install browser binaries."
+                        logger.error("[MatchaBridge] %s", err_text)
+                        state.fatal_error = err_text
                         state.is_running = False
-                        break
+                        return
 
                     try:
-                        task = state.queue.get(timeout=1.0)
-                    except Exception:
-                        # Periodic keep-alive
-                        if time.monotonic() - last_health_check > 120.0:
-                            last_health_check = time.monotonic()
+                        context = browser.new_context(
+                            user_agent=DEFAULT_MATCHA_USER_AGENT,
+                            viewport={"width": 1280, "height": 800}
+                        )
+
+                        def _inject_context_cookies() -> int:
                             try:
-                                t_e = (page_eth.title() or "").lower()
-                                if "checkpoint" in t_e:
-                                    logger.info("[MatchaBridge] ETH checkpoint detected during check, reloading...")
-                                    page_eth.reload(wait_until="domcontentloaded")
+                                from .matcha_cookie_manager import get_valid_cookies
+                            except ImportError:
+                                try:
+                                    from matcha_cookie_manager import get_valid_cookies
+                                except ImportError:
+                                    return 0
+                            try:
+                                cookies = get_valid_cookies(non_blocking=True)
+                                if cookies:
+                                    pw_cookies = [
+                                        {
+                                            "name": c["name"],
+                                            "value": c["value"],
+                                            "domain": c.get("domain") or ".matcha.xyz",
+                                            "path": c.get("path") or "/",
+                                        }
+                                        for c in cookies
+                                        if c.get("name") and c.get("value")
+                                    ]
+                                    if pw_cookies:
+                                        context.add_cookies(pw_cookies)
+                                        return len(pw_cookies)
+                            except Exception as e:
+                                logger.debug("[MatchaBridge] Cookie injection notice: %s", e)
+                            return 0
+
+                        injected = _inject_context_cookies()
+                        if injected:
+                            logger.info("[MatchaBridge] Injected %d cached clearance cookies into browser context", injected)
+
+                        page_eth = context.new_page()
+                        page_eth.set_default_timeout(45000)
+                        Stealth().apply_stealth_sync(page_eth)
+
+                        page_sol = context.new_page()
+                        page_sol.set_default_timeout(45000)
+                        Stealth().apply_stealth_sync(page_sol)
+
+                        logger.info("[MatchaBridge] Warming Ethereum tab...")
+                        try:
+                            page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
+                        except Exception as e:
+                            logger.debug("[MatchaBridge] ETH initial navigation notice: %s", e)
+
+                        logger.info("[MatchaBridge] Warming Solana tab...")
+                        try:
+                            page_sol.goto("https://meta.matcha.xyz/solana", wait_until="domcontentloaded", timeout=45000)
+                        except Exception as e:
+                            logger.debug("[MatchaBridge] SOL initial navigation notice: %s", e)
+
+                        # Clearance loop
+                        for poll_idx in range(40):
+                            time.sleep(1)
+                            t_eth = ""
+                            t_sol = ""
+                            try:
+                                t_eth = (page_eth.title() or "").lower()
+                                t_sol = (page_sol.title() or "").lower()
                             except Exception:
                                 pass
-                        continue
 
-                    chain, payload, aggregators, event, result_box = task
-                    if time.monotonic() >= result_box.get("deadline", float("inf")):
-                        result_box["error"] = "Matcha bridge request expired in queue"
-                        event.set()
-                        state.queue.task_done()
-                        continue
-                    page = page_eth if chain == "ethereum" else page_sol
+                            eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
+                            sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
 
-                    # Proactively refresh long-lived tabs (every 30m) to maintain fresh DOM/Kasada tokens
-                    if time.monotonic() - last_tab_refresh.get(chain, 0.0) > 1800.0:
-                        last_tab_refresh[chain] = time.monotonic()
-                        try:
-                            logger.info("[MatchaBridge] Proactively refreshing %s tab...", chain)
-                            _inject_context_cookies()
-                            page.reload(wait_until="domcontentloaded", timeout=25000)
-                            time.sleep(1.0)
-                        except Exception as exc:
-                            logger.debug("[MatchaBridge] Proactive %s tab refresh notice: %s", chain, exc)
-
-                    state.last_heartbeat = time.monotonic()
-                    state.request_count += 1
-                    try:
-                        t0 = time.perf_counter()
-                        res = page.evaluate(
-                            QUOTE_SCRIPT,
-                            {"chain": chain, "payload": payload, "aggregators": aggregators},
-                        )
-
-                        if isinstance(res, dict) and res.get("provider_error"):
-                            detail = res["provider_error"]
-                            logger.warning("[MatchaBridge] %s | %s", chain, BridgeProviderError(detail))
-                            # Only a real browser challenge warrants reloading, not a deny or 429.
-                            if detail.get("mitigation") == "challenge":
-                                try:
-                                    _inject_context_cookies()
-                                    page.reload(wait_until="domcontentloaded", timeout=25000)
-                                except Exception:
-                                    pass
-                            elif detail.get("mitigation") == "deny" or detail.get("status") in (401, 403):
-                                state.consecutive_denials += 1
-                                if state.consecutive_denials >= 3 and proxy_url and os.getenv("PROXYISP_API_KEY", "").strip():
-                                    logger.warning(
-                                        "[MatchaBridge] Proxy %s hit %d consecutive WAF denials (status=%s, mit=%s). Triggering proxy rotation...",
-                                        proxy_url, state.consecutive_denials, detail.get("status"), detail.get("mitigation")
-                                    )
-                                    state.consecutive_denials = 0
+                            # Immediate fail-fast if proxy IP is banned by Vercel firewall (403 Forbidden)
+                            if proxy_url and (any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden"))):
+                                logger.warning("[MatchaBridge] Proxy %s is blocked by Vercel firewall (403 Forbidden). Rotating proxy immediately...", proxy_url)
+                                if os.getenv("PROXYISP_API_KEY", "").strip():
                                     try:
                                         from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
                                         rotated = check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False, logger=logger)
                                         if rotated and rotated != proxy_url:
-                                            logger.info("[MatchaBridge] Proxy rotated to %s; restarting worker thread...", rotated)
+                                            logger.info("[MatchaBridge] Proxy successfully rotated to %s; restarting bridge worker...", rotated)
                                             state.proxy_url = rotated
+                                            state.last_rotation_time = time.monotonic()
+                                            state.consecutive_denials = 0
                                             try:
                                                 context.close()
                                                 browser.close()
                                             except Exception:
                                                 pass
-                                            return _run_playwright_worker(state)
-                                    except Exception as rot_err:
-                                        logger.warning("[MatchaBridge] Runtime proxy rotation failed: %s", rot_err)
-                            else:
-                                state.consecutive_denials = 0
+                                            should_reconnect = True
+                                            break
+                                    except Exception as exc:
+                                        logger.warning("[MatchaBridge] Immediate proxy rotation error: %s", exc)
+                                break
 
-                        if isinstance(res, dict) and res.get("error"):
-                            err_text = str(res["error"]).lower()
-                            if any(k in err_text for k in ("event(error)", "network connection", "fetch failed", "connection reset", "interrupted")):
-                                logger.warning("[MatchaBridge] %s tab hit fetch error (%s); refreshing tab to restore session...", chain, res["error"])
+                            if poll_idx > 0 and poll_idx % 10 == 0:
+                                logger.debug("[MatchaBridge] Warmup check (poll %d/40): ETH='%s', SOL='%s'", poll_idx, t_eth, t_sol)
+
+                            if eth_ok and sol_ok and poll_idx >= 2:
+                                logger.info("[MatchaBridge] Both tabs cleared! (ETH: %s, SOL: %s)", t_eth, t_sol)
+                                time.sleep(2.0)  # Allow Kasada runtime to settle
+                                state.ready_eth.set()
+                                state.ready_sol.set()
+                                break
+
+                        if should_reconnect:
+                            continue
+
+                        # If proxy was used and failed to clear tabs, fallback directly without proxy
+                        if proxy_url and not (state.ready_eth.is_set() and state.ready_sol.is_set()):
+                            _record_warmup_failure(page_eth, page_sol, "proxy")
+                            logger.warning("[MatchaBridge] Proxy failed to clear browser tabs; retrying directly without proxy...")
+                            state.proxy_url = ""
+                            try:
+                                context.close()
+                                browser.close()
+                            except Exception:
+                                pass
+                            launch_kwargs.pop("proxy", None)
+                            launch_kwargs["args"] = list(launch_kwargs.get("args", [])) + ["--no-proxy-server"]
+                            browser = pw.chromium.launch(**launch_kwargs)
+                            context = browser.new_context(
+                                user_agent=DEFAULT_MATCHA_USER_AGENT,
+                                viewport={"width": 1280, "height": 800}
+                            )
+                            _inject_context_cookies()
+                            page_eth = context.new_page()
+                            page_eth.set_default_timeout(45000)
+                            Stealth().apply_stealth_sync(page_eth)
+                            page_sol = context.new_page()
+                            page_sol.set_default_timeout(45000)
+                            Stealth().apply_stealth_sync(page_sol)
+                            try:
+                                page_eth.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=45000)
+                            except Exception:
+                                pass
+                            try:
+                                page_sol.goto("https://meta.matcha.xyz/solana", wait_until="domcontentloaded", timeout=45000)
+                            except Exception:
+                                pass
+                            for poll_idx in range(30):
+                                time.sleep(1)
+                                t_eth = (page_eth.title() or "").lower()
+                                t_sol = (page_sol.title() or "").lower()
+                                if any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden")):
+                                    logger.warning("[MatchaBridge] Direct fallback blocked by Vercel firewall (403 Forbidden).")
+                                    break
+                                eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
+                                sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
+                                if eth_ok and sol_ok and poll_idx >= 2:
+                                    logger.info("[MatchaBridge] Direct fallback cleared tabs! (ETH: %s, SOL: %s)", t_eth, t_sol)
+                                    time.sleep(2.0)
+                                    state.ready_eth.set()
+                                    state.ready_sol.set()
+                                    break
+
+                        if not (state.ready_eth.is_set() and state.ready_sol.is_set()):
+                            detail = _record_warmup_failure(page_eth, page_sol, "direct" if not state.proxy_url else "proxy")
+                            raise RuntimeError(
+                                "Browser warm-up exhausted without both tabs becoming ready; "
+                                f"{detail}; see logs/matcha-warmup-*.png"
+                            )
+
+                        last_health_check = time.monotonic()
+                        last_tab_refresh = {"ethereum": time.monotonic(), "solana": time.monotonic()}
+                        while state.is_running:
+                            # Max daemon lifetime: 2 hours (7200s) or 2000 requests
+                            # Proactively recycle when idle so browser memory/handles never degrade
+                            if (time.monotonic() - state.start_time > 7200.0 or state.request_count >= 2000) and state.queue.empty():
+                                logger.info(
+                                    "[MatchaBridge] Daemon reached scheduled refresh window (uptime: %.0fs, requests: %d); recycling cleanly...",
+                                    time.monotonic() - state.start_time,
+                                    state.request_count,
+                                )
+                                state.is_running = False
+                                break
+
+                            try:
+                                task = state.queue.get(timeout=1.0)
+                            except Exception:
+                                # Periodic keep-alive
+                                if time.monotonic() - last_health_check > 120.0:
+                                    last_health_check = time.monotonic()
+                                    try:
+                                        t_e = (page_eth.title() or "").lower()
+                                        if "checkpoint" in t_e:
+                                            logger.info("[MatchaBridge] ETH checkpoint detected during check, reloading...")
+                                            page_eth.reload(wait_until="domcontentloaded")
+                                    except Exception:
+                                        pass
+                                continue
+
+                            chain, payload, aggregators, event, result_box = task
+                            if time.monotonic() >= result_box.get("deadline", float("inf")):
+                                result_box["error"] = "Matcha bridge request expired in queue"
+                                event.set()
+                                state.queue.task_done()
+                                continue
+                            page = page_eth if chain == "ethereum" else page_sol
+
+                            # Proactively refresh long-lived tabs (every 30m) to maintain fresh DOM/Kasada tokens
+                            if time.monotonic() - last_tab_refresh.get(chain, 0.0) > 1800.0:
+                                last_tab_refresh[chain] = time.monotonic()
                                 try:
+                                    logger.info("[MatchaBridge] Proactively refreshing %s tab...", chain)
                                     _inject_context_cookies()
                                     page.reload(wait_until="domcontentloaded", timeout=25000)
                                     time.sleep(1.0)
-                                except Exception as reload_exc:
-                                    logger.debug("[MatchaBridge] %s tab reload notice: %s", chain, reload_exc)
+                                except Exception as exc:
+                                    logger.debug("[MatchaBridge] Proactive %s tab refresh notice: %s", chain, exc)
 
-                        elapsed = time.perf_counter() - t0
-                        logger.info("[MatchaBridge] Quote [%s] fetched in %.1fms (aggregators: %s)", chain, elapsed * 1000, aggregators)
-                        result_box["result"] = res
-                    except Exception as exc:
-                        logger.error("[MatchaBridge] Evaluate error on [%s]: %s", chain, exc)
-                        result_box["error"] = str(exc)
-                        err_msg = str(exc).lower()
-                        fatal_markers = (
-                            "target closed",
-                            "browser has been closed",
-                            "session closed",
-                            "connection closed",
-                            "broken pipe",
-                            "context was destroyed",
-                            "crashed",
-                        )
-                        if any(m in err_msg for m in fatal_markers) or not browser.is_connected() or page.is_closed():
-                            logger.error("[MatchaBridge] Fatal browser crash/disconnection detected: %s. Terminating worker to trigger instant respawn.", exc)
-                            state.fatal_error = f"Fatal browser disconnection: {exc}"
-                            state.is_running = False
-                            break
-                        # Page state is likely corrupted, challenged, or timed out. Auto-recover immediately.
-                        try:
-                            _inject_context_cookies()
-                            page.reload(wait_until="domcontentloaded", timeout=20000)
-                        except Exception as reload_err:
-                            logger.warning("[MatchaBridge] Page reload recovery failed on [%s]: %s", chain, reload_err)
+                            state.last_heartbeat = time.monotonic()
+                            state.request_count += 1
                             try:
-                                page.goto(f"https://meta.matcha.xyz/{chain}", wait_until="domcontentloaded", timeout=25000)
-                            except Exception:
-                                pass
+                                t0 = time.perf_counter()
+                                res = page.evaluate(
+                                    QUOTE_SCRIPT,
+                                    {"chain": chain, "payload": payload, "aggregators": aggregators},
+                                )
+
+                                if isinstance(res, dict) and res.get("provider_error"):
+                                    detail = res["provider_error"]
+                                    logger.warning("[MatchaBridge] %s | %s", chain, BridgeProviderError(detail))
+                                    # Only a real browser challenge warrants reloading, not a deny or 429.
+                                    if detail.get("mitigation") == "challenge":
+                                        try:
+                                            _inject_context_cookies()
+                                            page.reload(wait_until="domcontentloaded", timeout=25000)
+                                        except Exception:
+                                            pass
+                                    elif detail.get("mitigation") == "deny" or detail.get("status") in (401, 403):
+                                        state.consecutive_denials += 1
+                                        now = time.monotonic()
+                                        time_since_rot = now - getattr(state, "last_rotation_time", 0.0)
+                                        if (
+                                            state.consecutive_denials >= 8
+                                            and time_since_rot >= 60.0
+                                            and proxy_url
+                                            and os.getenv("PROXYISP_API_KEY", "").strip()
+                                        ):
+                                            logger.warning(
+                                                "[MatchaBridge] Proxy %s hit %d consecutive WAF denials (status=%s, mit=%s, cooldown=%.0fs). Triggering proxy rotation...",
+                                                proxy_url, state.consecutive_denials, detail.get("status"), detail.get("mitigation"), time_since_rot
+                                            )
+                                            state.consecutive_denials = 0
+                                            try:
+                                                from scripts.manage_proxyisp import check_and_rotate_proxy_if_needed
+                                                rotated = check_and_rotate_proxy_if_needed(force=True, verify_current=True, reload_bridge=False, logger=logger)
+                                                if rotated and rotated != proxy_url:
+                                                    logger.info("[MatchaBridge] Proxy rotated to %s; restarting worker session...", rotated)
+                                                    state.proxy_url = rotated
+                                                    state.last_rotation_time = time.monotonic()
+                                                    result_box["error"] = "Matcha bridge proxy rotating"
+                                                    try:
+                                                        context.close()
+                                                        browser.close()
+                                                    except Exception:
+                                                        pass
+                                                    should_reconnect = True
+                                                    break
+                                            except Exception as rot_err:
+                                                logger.warning("[MatchaBridge] Runtime proxy rotation failed: %s", rot_err)
+                                    else:
+                                        state.consecutive_denials = 0
+
+                                if isinstance(res, dict) and res.get("error"):
+                                    err_text = str(res["error"]).lower()
+                                    if any(k in err_text for k in ("event(error)", "network connection", "fetch failed", "connection reset", "interrupted")):
+                                        logger.warning("[MatchaBridge] %s tab hit fetch error (%s); refreshing tab to restore session...", chain, res["error"])
+                                        try:
+                                            _inject_context_cookies()
+                                            page.reload(wait_until="domcontentloaded", timeout=25000)
+                                            time.sleep(1.0)
+                                        except Exception as reload_exc:
+                                            logger.debug("[MatchaBridge] %s tab reload notice: %s", chain, reload_exc)
+
+                                elapsed = time.perf_counter() - t0
+                                logger.info("[MatchaBridge] Quote [%s] fetched in %.1fms (aggregators: %s)", chain, elapsed * 1000, aggregators)
+                                result_box["result"] = res
+                            except Exception as exc:
+                                logger.error("[MatchaBridge] Evaluate error on [%s]: %s", chain, exc)
+                                result_box["error"] = str(exc)
+                                err_msg = str(exc).lower()
+                                fatal_markers = (
+                                    "target closed",
+                                    "browser has been closed",
+                                    "session closed",
+                                    "connection closed",
+                                    "broken pipe",
+                                    "context was destroyed",
+                                    "crashed",
+                                )
+                                if any(m in err_msg for m in fatal_markers) or not browser.is_connected() or page.is_closed():
+                                    logger.error("[MatchaBridge] Fatal browser crash/disconnection detected: %s. Terminating worker to trigger instant respawn.", exc)
+                                    state.fatal_error = f"Fatal browser disconnection: {exc}"
+                                    state.is_running = False
+                                    break
+                                # Page state is likely corrupted, challenged, or timed out. Auto-recover immediately.
+                                try:
+                                    _inject_context_cookies()
+                                    page.reload(wait_until="domcontentloaded", timeout=20000)
+                                except Exception as reload_err:
+                                    logger.warning("[MatchaBridge] Page reload recovery failed on [%s]: %s", chain, reload_err)
+                                    try:
+                                        page.goto(f"https://meta.matcha.xyz/{chain}", wait_until="domcontentloaded", timeout=25000)
+                                    except Exception:
+                                        pass
+                            finally:
+                                state.last_heartbeat = time.monotonic()
+                                event.set()
+                                state.queue.task_done()
                     finally:
-                        state.last_heartbeat = time.monotonic()
-                        event.set()
-                        state.queue.task_done()
-            finally:
-                browser.close()
-    except Exception as exc:
-        state.fatal_error = f"Browser worker failed: {exc}"
-        logger.exception("[MatchaBridge] %s", state.fatal_error)
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+            except Exception as exc:
+                state.fatal_error = f"Browser worker session error: {exc}"
+                logger.exception("[MatchaBridge] %s", state.fatal_error)
+
+            if should_reconnect and state.is_running:
+                logger.info("[MatchaBridge] Reconnecting browser worker session cleanly with updated proxy...")
+                state.ready_eth.clear()
+                state.ready_sol.clear()
+                time.sleep(1.0)
+                continue
+            break
     finally:
         state.is_running = False
         state.ready_eth.clear()
@@ -1093,6 +1141,10 @@ def run_bridge_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Non
 
             if "error" in result_box:
                 self.send_quote_response(500, {"error": result_box["error"]})
+                return
+
+            if "result" not in result_box:
+                self.send_quote_response(503, {"error": "Matcha bridge worker did not return a quote result"})
                 return
 
             self.send_quote_response(200, result_box["result"])
