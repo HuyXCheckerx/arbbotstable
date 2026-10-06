@@ -142,8 +142,32 @@ def test_browser_strategies():
         cookies = context.cookies()
         print(f"  Cookies present: {[c['name'] for c in cookies]}")
         
+        # Inspect BotID object and challenge state
+        print("\n--> [Inspecting BotID & Kasada Internals]")
+        botid_info = page.evaluate("""async () => {
+            let scripts = Array.from(document.querySelectorAll('script')).map(s => s.src || s.innerText);
+            let kpsdk = window.KPSDK || window._kpsdk || null;
+            let vercel = window.__vercel || window.vercel || null;
+            let cookies = document.cookie;
+            
+            // Check if window.fetch has been patched
+            let isFetchPatched = !/\[native code\]/.test(window.fetch.toString());
+            
+            return {
+                isFetchPatched,
+                fetchStr: window.fetch.toString().substring(0, 300),
+                hasKpsdk: !!kpsdk,
+                kpsdkProps: kpsdk ? Object.keys(kpsdk) : [],
+                cookieNames: cookies.split(';').map(c => c.split('=')[0].trim()),
+                userAgent: navigator.userAgent,
+                webdriver: navigator.webdriver,
+                plugins: navigator.plugins.length,
+                languages: navigator.languages,
+            };
+        }""")
+        print("  BotID / Kasada Info:", json.dumps(botid_info, indent=2))
+        
         # Test Strategy 1: Immediate fetch with BotID wrapper
-        print("\n--> [Strategy 1: Direct fetch via BotID wrapper]")
         res1 = page.evaluate("""async (pl) => {
             const r = await fetch('https://meta.matcha.xyz/api/competitions', {
                 method: 'POST',
