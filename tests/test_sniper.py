@@ -1115,6 +1115,7 @@ class CrosschainSniperTests(unittest.TestCase):
         readable = readable_failure(route, detail, "no-route")
         self.assertIn("Ethereum executor does not support USDC/USDG", readable)
 
+    @patch.dict(os.environ, {"SOL_FLASH_ARB_DEX_PROVIDER": "metamatcha", "ETH_ARB_QUOTE_PROVIDER": "matcha"})
     def test_dex_market_key_scoped_by_chain(self):
         eth_route = Route("ethereum", "USDC/USDG")
         sol_route = Route("solana", "USDC/USDG")

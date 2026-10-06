@@ -316,7 +316,10 @@ def test_proxy(proxy_url: str, check_meta: bool = True) -> dict[str, Any]:
 
 def _run_sync_challenge_test(proxy_url: str) -> bool:
     try:
-        from playwright.sync_api import sync_playwright
+        try:
+            from patchright.sync_api import sync_playwright
+        except ImportError:
+            from playwright.sync_api import sync_playwright
         from playwright_stealth import Stealth
 
         p = urlparse(proxy_url)
@@ -407,19 +410,16 @@ def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
         return False
 
 
-def is_proxy_working(proxy_url: str, check_challenge: bool = True) -> bool:
-    """Determine whether a proxy is fully functional for MetaMatcha quotes.
+def is_proxy_working(proxy_url: str, check_challenge: bool = False) -> bool:
+    """Determine whether a proxy is fully functional for routing.
     
-    If the residential proxy is alive (ip_ok) and not explicitly banned by Vercel firewall,
-    verifies that browser clearance does not evaluate to 403 Forbidden.
+    Verifies that the proxy connects and has an active exit IP.
+    Optionally verifies that browser clearance does not evaluate to 403 Forbidden.
     """
     if not proxy_url:
         return False
-    res = test_proxy(proxy_url, check_meta=True)
+    res = test_proxy(proxy_url, check_meta=False)
     if not res.get("ip_ok"):
-        return False
-    # If explicitly denied by Vercel firewall (HTTP 403 or mitigated=deny)
-    if res.get("mitigated") in ("deny", "denied") or res.get("status_code") in (401, 403):
         return False
     if check_challenge:
         return _test_proxy_challenge_clearance(proxy_url)
@@ -584,7 +584,7 @@ def setup_sniper_proxy(
             log_info(f"[ProxyManager] Proxy {p.get('name')} is WORKING! Selecting this proxy.")
             break
         else:
-            log_info(f"[ProxyManager] Proxy {p.get('name')} failed connectivity / MetaMatcha check.")
+            log_info(f"[ProxyManager] Proxy {p.get('name')} failed connectivity check.")
 
     if working_proxy:
         update_env_proxy(working_proxy, env_path=env_path)
@@ -597,10 +597,9 @@ def setup_sniper_proxy(
         if balance < VN_RESIDENTIAL_DAILY_PRICE_VND:
             log_warn(
                 f"[ProxyManager] Insufficient balance ({balance:,.1f} VND) to buy proxy "
-                f"(requires {VN_RESIDENTIAL_DAILY_PRICE_VND:,.1f} VND). Disabling non-working proxy to connect directly."
+                f"(requires {VN_RESIDENTIAL_DAILY_PRICE_VND:,.1f} VND). Keeping current configured proxy."
             )
-            update_env_proxy("", env_path=env_path)
-            return ""
+            return current_proxy or None
 
         # Buy 1 day residential proxy with auto_renew=False
         order = buy_residential_proxy(api_key, days=1, auto_renew=False)
