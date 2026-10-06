@@ -213,12 +213,14 @@ def trigger_proxy_rotation(rotate_url: str | None = None) -> bool:
 def _solve_challenge(target_url: str = DEFAULT_URL) -> list[dict[str, Any]]:
     """Spins up headless Chromium with Playwright stealth to solve Vercel/Cloudflare."""
     try:
-        from playwright.sync_api import sync_playwright
+        try:
+            from patchright.sync_api import sync_playwright
+        except ImportError:
+            from playwright.sync_api import sync_playwright
         from playwright_stealth import Stealth
     except ImportError as exc:
         raise RuntimeError(
-            "playwright and playwright-stealth are required for automated MetaMatcha cookie rotation. "
-            "Run `pip install playwright playwright-stealth && python -m playwright install chromium`"
+            "playwright or patchright is required for automated MetaMatcha cookie rotation."
         ) from exc
 
     logger.info("[CookieManager] Launching headless browser to solve Vercel/Cloudflare challenge...")

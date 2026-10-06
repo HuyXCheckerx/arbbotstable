@@ -112,10 +112,13 @@ class DirectAggregatorClient:
         names = aggregators or _env("ETH_ARB_DIRECT_AGGREGATORS", DEFAULT_DIRECT_AGGREGATORS).split(",")
         self.aggregators = [n.strip().lower() for n in names if n.strip()]
         if session is None:
-            import requests  # plain requests: no proxy, no cookies
+            import requests
 
             session = requests.Session()
             session.trust_env = False
+            proxy_url = _env("MATCHA_PROXY")
+            if proxy_url:
+                session.proxies = {"http": proxy_url, "https": proxy_url}
             session.headers.update({"accept": "application/json", "user-agent": "arbbotstable/1.0"})
         self.session = session
         self.kyber_client_id = _env("KYBERSWAP_CLIENT_ID", "arbbotstable")
@@ -132,10 +135,32 @@ class DirectAggregatorClient:
         try:
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
         except Exception as exc:
-            raise RetryableArbError(f"{provider}: {method} {url.split('?')[0]} failed: {exc}") from exc
+            # Fall back to direct connection if proxy failed
+            if getattr(self.session, "proxies", None):
+                try:
+                    import requests
+                    response = requests.request(
+                        method, url, timeout=self.timeout, headers=self.session.headers, **kwargs
+                    )
+                except Exception:
+                    raise RetryableArbError(f"{provider}: {method} {url.split('?')[0]} failed: {exc}") from exc
+            else:
+                raise RetryableArbError(f"{provider}: {method} {url.split('?')[0]} failed: {exc}") from exc
         status = int(getattr(response, "status_code", 0) or 0)
         text = getattr(response, "text", "") or ""
         if status == 429:
+            # If rate-limited through proxy or direct, try alternative
+            if getattr(self.session, "proxies", None):
+                try:
+                    import requests
+                    fb = requests.request(method, url, timeout=self.timeout, headers=self.session.headers, **kwargs)
+                    if fb.status_code == 200:
+                        try:
+                            return fb.json()
+                        except ValueError:
+                            pass
+                except Exception:
+                    pass
             raise ArbError(f"{provider}: HTTP 429 rate limited")
         if status >= 500:
             raise RetryableArbError(f"{provider}: HTTP {status}: {' '.join(text.split())[:200]}")

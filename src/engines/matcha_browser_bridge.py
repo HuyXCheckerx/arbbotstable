@@ -598,10 +598,13 @@ def _record_warmup_failure(page_eth: Any, page_sol: Any, connection: str) -> str
 
 def _run_playwright_worker(state: _BridgeServerState) -> None:
     try:
-        from playwright.sync_api import sync_playwright
+        try:
+            from patchright.sync_api import sync_playwright
+        except ImportError:
+            from playwright.sync_api import sync_playwright
         from playwright_stealth import Stealth
     except ImportError as exc:
-        err_msg = f"playwright or playwright_stealth missing: {exc}"
+        err_msg = f"playwright or patchright missing: {exc}"
         logger.error("[MatchaBridge] %s", err_msg)
         state.fatal_error = err_msg
         state.is_running = False
@@ -732,8 +735,8 @@ def _run_playwright_worker(state: _BridgeServerState) -> None:
                             eth_ok = not any(m in t_eth for m in ("checkpoint", "challenge", "just a moment")) and len(t_eth) > 0 and any(w in t_eth for w in ("matcha", "swap", "ethereum"))
                             sol_ok = not any(m in t_sol for m in ("checkpoint", "challenge", "just a moment")) and len(t_sol) > 0 and any(w in t_sol for w in ("matcha", "swap", "solana"))
 
-                            # Immediate fail-fast if proxy IP is banned by Vercel firewall (403 Forbidden)
-                            if proxy_url and (any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden"))):
+                            # Allow at least 15 seconds for Vercel/Kasada challenge WASM to solve before fail-fast
+                            if proxy_url and poll_idx >= 15 and (any(b in t_eth for b in ("403", "forbidden")) or any(b in t_sol for b in ("403", "forbidden"))):
                                 logger.warning("[MatchaBridge] Proxy %s is blocked by Vercel firewall (403 Forbidden). Rotating proxy immediately...", proxy_url)
                                 if os.getenv("PROXYISP_API_KEY", "").strip():
                                     try:

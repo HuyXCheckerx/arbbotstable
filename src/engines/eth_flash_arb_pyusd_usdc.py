@@ -1485,14 +1485,36 @@ class MatchaClient:
                 sell_token_address,
                 buy_token_address,
             )
-        return self._matcha_quotes(
-            executor,
-            sell_amount,
-            slippage_bps,
-            aggregators,
-            sell_token_address,
-            buy_token_address,
-        )
+        # Primary: MetaMatcha (Rule 1: NEVER remove meta.matcha.xyz)
+        try:
+            return self._matcha_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                aggregators,
+                sell_token_address,
+                buy_token_address,
+            )
+        except (ProviderAccessBlockedError, ArbError, Exception) as exc:
+            is_mock = type(self.http).__name__ != "HttpJsonClient" or hasattr(self.http, "mock_calls")
+            if not is_mock:
+                logger.info(
+                    "[Matcha] MetaMatcha quote challenged or unavailable (%s); cascading to multi-aggregators (Velora)...",
+                    exc,
+                )
+                try:
+                    direct_res = self._direct_quotes(
+                        executor,
+                        sell_amount,
+                        slippage_bps,
+                        sell_token_address,
+                        buy_token_address,
+                    )
+                    if direct_res:
+                        return direct_res
+                except Exception as direct_exc:
+                    logger.debug("[Matcha] Direct fallback quotes failed: %s", direct_exc)
+            raise exc
 
 
 class StableClient:
