@@ -410,8 +410,8 @@ def _test_proxy_challenge_clearance(proxy_url: str) -> bool:
         return False
 
 
-def is_proxy_working(proxy_url: str, check_challenge: bool = False) -> bool:
-    """Determine whether a proxy is fully functional for routing.
+def is_proxy_working(proxy_url: str, check_challenge: bool = True) -> bool:
+    """Determine whether a proxy is fully functional for MetaMatcha quotes.
     
     Verifies that the proxy connects and has an active exit IP.
     Optionally verifies that browser clearance does not evaluate to 403 Forbidden.
