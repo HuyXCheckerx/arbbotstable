@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Direct benchmark of in-page API execution on cleared Patchright session."""
+"""Benchmark headless=False on Windows VPS with Proxy 19."""
 import json
 import time
 from urllib.parse import urlparse
@@ -23,34 +23,71 @@ payload = {
     "taker": "0x50da32e628b45abb1335924086ca0013b9d4ec1c"
 }
 
+print(f"Launching Real Non-Headless Browser with Proxy 19...")
 with sync_playwright() as pw:
-    b = pw.chromium.launch(headless=False, args=["--headless=new", "--no-sandbox"], proxy=p_cfg)
-    c = b.new_context(user_agent=UA)
+    b = pw.chromium.launch(
+        headless=False,
+        args=[
+            "--no-sandbox",
+            "--window-size=1920,1080",
+            "--start-maximized",
+        ],
+        proxy=p_cfg
+    )
+    c = b.new_context(
+        user_agent=UA,
+        viewport={"width": 1920, "height": 1080},
+        screen={"width": 1920, "height": 1080},
+    )
     page = c.new_page()
     
-    print("Navigating to https://meta.matcha.xyz/ethereum...")
-    page.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=35000)
+    wire_reqs = []
+    page.on("request", lambda r: wire_reqs.append((r.method, r.url, dict(r.headers))) if "/api/" in r.url else None)
     
-    for sec in range(25):
+    print("Navigating to https://meta.matcha.xyz/ethereum...")
+    page.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=40000)
+    
+    cleared = False
+    for sec in range(30):
         time.sleep(1)
         t = (page.title() or "").lower()
-        if "checkpoint" not in t and len(t) > 0:
-            print(f"Cleared in {sec+1}s! Title: {page.title()}")
+        if not any(k in t for k in ("checkpoint", "challenge", "403", "forbidden")) and len(t) > 0:
+            print(f"Page cleared in {sec+1}s! Title: {page.title()}")
+            cleared = True
             break
             
+    if not cleared:
+        print(f"Page title after 30s: {page.title()}")
+        
     time.sleep(4)
     
-    # 1. Test gas
+    # Behavioral warmup
+    page.mouse.move(300, 300)
+    time.sleep(0.3)
+    page.mouse.move(600, 400, steps=10)
+    time.sleep(0.5)
+    page.mouse.click(600, 400)
+    time.sleep(1.0)
+    
+    inputs = page.locator("input")
+    print(f"Found {inputs.count()} inputs.")
+    if inputs.count() > 0:
+        inputs.first.click()
+        time.sleep(0.3)
+        inputs.first.fill("100")
+        time.sleep(4.0)
+        
+    # Check gas endpoint
     gas_res = page.evaluate("""async () => {
         try {
             const r = await fetch('https://meta.matcha.xyz/api/gas?chainId=1');
-            return {status: r.status, mit: r.headers.get('x-vercel-mitigated'), body: await r.text()};
+            return {status: r.status, mit: r.headers.get('x-vercel-mitigated'), body: (await r.text()).substring(0, 100)};
         } catch(e) { return {error: e.message}; }
     }""")
     print("\n--- GAS TEST ---")
     print(json.dumps(gas_res, indent=2))
     
-    # 2. Test competitions
+    # Check competition endpoint
     comp_res = page.evaluate("""async (pl) => {
         try {
             const r = await fetch('https://meta.matcha.xyz/api/competitions', {
@@ -59,38 +96,17 @@ with sync_playwright() as pw:
                 credentials: 'include',
                 body: JSON.stringify(pl)
             });
-            return {status: r.status, mit: r.headers.get('x-vercel-mitigated'), body: await r.text()};
+            return {status: r.status, mit: r.headers.get('x-vercel-mitigated'), body: (await r.text()).substring(0, 150)};
         } catch(e) { return {error: e.message}; }
     }""", payload)
     print("\n--- COMPETITION TEST ---")
-    print("Status:", comp_res.get("status"))
-    print("Mitigation:", comp_res.get("mit"))
-    print("Body:", comp_res.get("body", "")[:300])
+    print(json.dumps(comp_res, indent=2))
     
-    # If competition succeeded, test quotes!
-    if comp_res.get("status") == 200:
-        try:
-            comp_data = json.loads(comp_res.get("body"))
-            comp_id = comp_data.get("id") or comp_data.get("competitionId")
-            print(f"Acquired competitionId: {comp_id}")
-            
-            quote_res = page.evaluate("""async (cid) => {
-                const aggs = ['0x', 'KyberSwap', 'Velora'];
-                const res = {};
-                for (const a of aggs) {
-                    const r = await fetch(`https://meta.matcha.xyz/api/quotes?aggregator=${a}`, {
-                        method: 'POST',
-                        headers: {'content-type': 'application/json'},
-                        credentials: 'include',
-                        body: JSON.stringify({competitionId: cid, aggregator: a})
-                    });
-                    res[a] = {status: r.status, body: await r.text()};
-                }
-                return res;
-            }""", comp_id)
-            print("\n--- QUOTES TEST ---")
-            print(json.dumps(quote_res, indent=2))
-        except Exception as e:
-            print("Quote parse error:", e)
+    # Check wire requests
+    print(f"\nCaptured {len(wire_reqs)} wire requests:")
+    for m, u, h in wire_reqs[-6:]:
+        print(f"  {m} {u.split('?')[0]}")
+        if "x-is-human" in h:
+            print(f"    x-is-human: {h['x-is-human']}")
             
     b.close()
