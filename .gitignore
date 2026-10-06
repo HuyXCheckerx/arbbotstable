@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+scripts/vps_cmd.py
 
 # Runtime state and logs remain on each server across git pulls.
 bot_state.db
