@@ -19,7 +19,8 @@ try:
 except ImportError:
     pass
 
-proxy_url = os.getenv("MATCHA_PROXY", "").strip()
+proxy_url = os.getenv("MATCHA_PROXY", "http://COlBMQ:bCYTai@14.224.225.135:45376").strip()
+print(f"Using proxy: {proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url}")
 p = urlparse(proxy_url)
 proxy_cfg = {"server": f"{p.scheme}://{p.hostname}:{p.port}", "username": p.username, "password": p.password} if proxy_url else None
 
@@ -62,44 +63,34 @@ with sync_playwright() as pw:
     page.goto("https://meta.matcha.xyz/ethereum", wait_until="domcontentloaded", timeout=35000)
     
     # Wait for page title
-    for _ in range(20):
+    for sec in range(25):
         time.sleep(1)
-        if "checkpoint" not in (page.title() or "").lower():
+        t = (page.title() or "").lower()
+        if "checkpoint" not in t and len(t) > 0:
+            print(f"Cleared checkpoint in {sec+1}s: {page.title()}")
             break
-    print("Title:", page.title())
-    time.sleep(3)
+            
+    time.sleep(4)
     
-    print("\nLooking for inputs on the page...")
     inputs = page.locator("input")
     print("Found inputs:", inputs.count())
     
-    for i in range(inputs.count()):
-        try:
-            inp = inputs.nth(i)
-            ph = inp.get_attribute("placeholder") or ""
-            val = inp.input_value() or ""
-            print(f"  Input {i}: placeholder='{ph}', value='{val}'")
-        except Exception:
-            pass
-            
     # Click and type into the amount input
     if inputs.count() > 0:
         inp = inputs.first
-        print("\nClicking first input and typing 1000...")
+        print("Clicking first input and typing 1000...")
         inp.click()
         time.sleep(0.5)
         inp.fill("1000")
-        time.sleep(4.0)  # Wait for debounce and quote fetch
+        time.sleep(5.0)  # Wait for debounce and quote fetch
         
     print(f"\nCaptured {len(network_events)} API network events:")
     for ev in network_events:
         if ev["type"] == "REQ":
-            print(f"--> [REQ] {ev['method']} {ev['url']}")
-            if ev.get("post_data"):
-                print(f"    Body: {ev['post_data'][:150]}")
+            print(f"--> [REQ] {ev['method']} {ev['url'][:80]}")
+            if "x-is-human" in ev.get("headers", {}):
+                print(f"    x-is-human: {ev['headers']['x-is-human'][:60]}")
         else:
-            print(f"<-- [RES] {ev['status']} {ev['url']}")
-            if "x-vercel-mitigated" in ev.get("headers", {}):
-                print(f"    Mitigation: {ev['headers']['x-vercel-mitigated']}")
+            print(f"<-- [RES] {ev['status']} {ev['url'][:80]} | Mit: {ev['headers'].get('x-vercel-mitigated', 'none')}")
                 
     browser.close()
