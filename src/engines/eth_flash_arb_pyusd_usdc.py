@@ -621,6 +621,9 @@ def capacity_limited_loan_amount(
     if stable_amount_in <= capacity_raw:
         return loan_amount
     adjusted = loan_amount * capacity_raw // stable_amount_in
+    cushion = 5_000_000  # 5 token cushion to prevent micro-fraction oscillations
+    if adjusted > cushion:
+        adjusted -= cushion
     if adjusted <= 0 or adjusted >= loan_amount:
         raise ArbError("Stable.com capacity is too small to size this route")
     return adjusted

@@ -70,6 +70,18 @@ METAMATCHA_FORBIDDEN_ERRORS = {
 
 
 class CrosschainSniperTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self._env_patch = patch.dict(
+            os.environ,
+            {"ETH_ARB_QUOTE_PROVIDER": "matcha", "SOL_FLASH_ARB_DEX_PROVIDER": "metamatcha"},
+        )
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        super().tearDown()
+
     def test_profit_metrics_support_both_engine_output_formats(self):
         ethereum = json.dumps(
             {"grossProfit": "6.25", "predictedNetProfit": "5.75"}
