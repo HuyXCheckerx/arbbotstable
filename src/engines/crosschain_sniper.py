@@ -24,8 +24,10 @@ import time
 from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
 import urllib.request
-
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -114,8 +116,8 @@ class Route:
             if provider == "dflow":
                 return "DFlow"
             return "MetaMatcha"
-        provider = os.environ.get("ETH_ARB_QUOTE_PROVIDER", "matcha")
-        return "Direct" if provider.strip().lower() == "direct" else "MetaMatcha"
+        provider = os.environ.get("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
+        return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "auto": "Auto"}.get(provider, "MetaMatcha")
 
     @property
     def display(self) -> str:
@@ -562,6 +564,10 @@ def retry_after_seconds(detail: str) -> float | None:
 def failure_category(detail: str) -> str:
     lowered = detail.lower()
     access_denied = re.search(r"\bHTTP\s+(?:401|403)\b", detail, re.IGNORECASE)
+    # Before the Matcha checks: DefiLlama errors can name its "Matcha/0x v2"
+    # adapter, which must not trigger MetaMatcha proxy rotation.
+    if access_denied and "defillama" in lowered:
+        return "access-blocked-defillama"
     matcha_access_block = (
         access_denied
         and ("matcha" in lowered or "metamatcha" in lowered)
@@ -652,6 +658,12 @@ def failure_category(detail: str) -> str:
     )
     if transient and "stable.com" in lowered:
         return "transient-stable"
+    if transient and "okx" in lowered:
+        return "transient-okx"
+    if transient and "direct" in lowered:
+        return "transient-direct"
+    if transient and "defillama" in lowered:
+        return "transient-defillama"
     if transient and "jupiter" in lowered:
         return "transient-jupiter"
     if transient and (
@@ -784,6 +796,19 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
         return f"MetaMatcha is temporarily unavailable{suffix}"
+    if category == "transient-defillama":
+        status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
+        return f"DefiLlama is temporarily unavailable{suffix}"
+    if category == "access-blocked-defillama":
+        status = re.search(r"\bHTTP\s+(\d{3})\b", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else ""
+        if "cloudflare" in lowered:
+            return (
+                f"DefiLlama's quote relay answered with a Cloudflare bot challenge{suffix}; "
+                "it does not accept server requests from here"
+            )
+        return f"DefiLlama rejected this request{suffix}; check DEFILLAMA_API_KEY"
     if category == "access-blocked-matcha":
         status = re.search(r"\bHTTP\s+(\d{3})\b", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else ""
@@ -904,8 +929,12 @@ def outcome_label(outcome: Outcome) -> str:
         "transient-stable",
         "transient-jupiter",
         "transient-matcha",
+        "transient-okx",
+        "transient-direct",
+        "transient-defillama",
         "transient-rpc",
         "access-blocked-matcha",
+        "access-blocked-defillama",
     }:
         return "PAUSED"
     return "ERROR"
@@ -917,6 +946,8 @@ def dependency_label(key: str) -> str:
         "stable": "Stable.com",
         "jupiter": "Jupiter",
         "metamatcha": "MetaMatcha",
+        "defillama": "DefiLlama",
+        "okx": "OKX",
         "dflow": "DFlow",
         "direct": "Direct DEX",
         "rpc": "chain RPC",
@@ -1131,8 +1162,10 @@ class SniperDashboardFeed:
         "transient-stable",
         "transient-jupiter",
         "transient-matcha",
+        "transient-defillama",
         "transient-rpc",
         "access-blocked-matcha",
+        "access-blocked-defillama",
     }
 
     def __init__(
@@ -1390,6 +1423,7 @@ def run_ethereum_route_direct(
     except ImportError:
         import eth_flash_arb_pyusd_usdc as eth_engine
 
+    quote_provider = os.getenv("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
     args_list = [
         "--loan-token",
         route.loan,
@@ -1406,6 +1440,8 @@ def run_ethereum_route_direct(
         "--output",
         str(output_path),
     ]
+    if quote_provider:
+        args_list.extend(["--quote-provider", quote_provider])
     if live:
         args_list.extend(["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"])
 
@@ -2009,6 +2045,9 @@ def _handle_route_outcome(
             "transient-stable": f"stable:{route.chain}",
             "transient-jupiter": f"jupiter:{route.chain}",
             "transient-matcha": f"metamatcha:{route.chain}",
+            "transient-okx": f"okx:{route.chain}",
+            "transient-direct": f"direct:{route.chain}",
+            "transient-defillama": f"defillama:{route.chain}",
             "transient-rpc": f"rpc:{route.chain}",
         }[outcome.category]
         is_conn_reset = "connection reset" in outcome.detail.lower()
@@ -2100,6 +2139,20 @@ def _handle_route_outcome(
                 logger.warning("[ProxyExecutor] Taker block evaluation error: %s", exc)
 
         dependency = f"metamatcha:{route.chain}"
+        backoff.block(dependency, cooldown_policy.provider_access_seconds)
+        logger.info(
+            "PAUSE   | %-17s | %.0fs | provider rejected the request",
+            dependency_label(dependency),
+            cooldown_policy.provider_access_seconds,
+        )
+        if dashboard:
+            dashboard.record_cooldown(
+                route,
+                cooldown_policy.provider_access_seconds,
+                "Quote provider rejected the request",
+            )
+    elif outcome.category == "access-blocked-defillama":
+        dependency = f"defillama:{route.chain}"
         backoff.block(dependency, cooldown_policy.provider_access_seconds)
         logger.info(
             "PAUSE   | %-17s | %.0fs | provider rejected the request",
@@ -2487,7 +2540,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv(PROJECT_ROOT / ".env", override=True)
+    if load_dotenv is not None:
+        load_dotenv(PROJECT_ROOT / ".env", override=True)
     args = parse_args(argv)
     if args.request_stop:
         LOG_DIR.mkdir(parents=True, exist_ok=True)

@@ -86,6 +86,13 @@ LOAN_TOKENS = {
     "PYUSD": PYUSD,
     "USDG": USDG,
 }
+QUOTE_PROVIDER_LABELS = {
+    "direct": "Direct",
+    "okx": "OKX",
+    "defillama": "DefiLlama",
+    "matcha": "MetaMatcha",
+    "auto": "Auto",
+}
 BALANCER_V2_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
 FLASH_PROVIDER_IDS = {"morpho": 0, "uniswap-v4": 1, "aave-v3": 2, "balancer-v2": 3}
 FLASH_PROVIDER_ADDRESSES = {
@@ -964,7 +971,7 @@ class HttpJsonClient:
             except ImportError:
                 inject_matcha_cookies = None
 
-        if inject_matcha_cookies is not None:
+        if proxy and inject_matcha_cookies is not None:
             try:
                 inject_matcha_cookies(
                     self.session,
@@ -973,7 +980,7 @@ class HttpJsonClient:
                 )
             except Exception:
                 pass
-        else:
+        elif proxy:
             cookies = os.environ.get("ETH_ARB_MATCHA_COOKIES") or os.environ.get("MATCHA_COOKIES")
             if cookies:
                 for item in cookies.split(";"):
@@ -1290,6 +1297,7 @@ class MatchaClient:
         self.rpc_url = rpc_url
         self.operator = operator
         self._direct_client: Any = None
+        self._defillama_client: Any = None
         self.headers = {
             "origin": "https://meta.matcha.xyz",
             "referer": "https://meta.matcha.xyz/ethereum",
@@ -1440,16 +1448,22 @@ class MatchaClient:
         slippage_bps: int,
         sell_token_address: str,
         buy_token_address: str,
+        aggregators: Iterable[str] | None = None,
     ) -> list[tuple[str, Any]]:
-        """Public aggregator APIs (KyberSwap, Velora, 1inch, 0x); no MetaMatcha."""
+        """Public aggregator APIs (OKX, Velora, KyberSwap, 1inch, 0x); no MetaMatcha."""
         try:
             from .direct_aggregators import DirectAggregatorClient
         except ImportError:
             from direct_aggregators import DirectAggregatorClient
-        if self._direct_client is None or self._direct_client.executor != executor:
+        if (
+            self._direct_client is None
+            or self._direct_client.executor != executor
+            or (aggregators is not None and set(self._direct_client.aggregators) != set(aggregators))
+        ):
             self._direct_client = DirectAggregatorClient(
                 executor=executor,
                 operator=self.operator,
+                aggregators=aggregators,
                 api_modules={
                     "ArbError": ArbError,
                     "MatchaQuote": MatchaQuote,
@@ -1468,6 +1482,43 @@ class MatchaClient:
         )
         return [(quote.aggregator, quote) for quote in quotes]
 
+    def _defillama_quotes(
+        self,
+        executor: str,
+        sell_amount: int,
+        slippage_bps: int,
+        sell_token_address: str,
+        buy_token_address: str,
+    ) -> list[tuple[str, Any]]:
+        """LlamaSwap quote relay (swap.defillama.com); no MetaMatcha or direct fallback."""
+        try:
+            from .defillama_eth import DefiLlamaQuoteClient
+        except ImportError:
+            from defillama_eth import DefiLlamaQuoteClient
+        if self._defillama_client is None or self._defillama_client.executor != executor:
+            self._defillama_client = DefiLlamaQuoteClient(
+                executor=executor,
+                token_symbols={address: symbol for symbol, address in LOAN_TOKENS.items()},
+                decimals=DECIMALS,
+                api_modules={
+                    "ArbError": ArbError,
+                    "MatchaQuote": MatchaQuote,
+                    "ProviderAccessBlockedError": ProviderAccessBlockedError,
+                    "ProviderRateLimitedError": ProviderRateLimitedError,
+                    "RetryableArbError": RetryableArbError,
+                    "is_address": is_address,
+                    "is_hex_data": is_hex_data,
+                    "parse_integer": parse_integer,
+                },
+            )
+        quotes = self._defillama_client.quotes(
+            sell_amount,
+            slippage_bps,
+            sell_token_address=sell_token_address,
+            buy_token_address=buy_token_address,
+        )
+        return [(quote.aggregator, quote) for quote in quotes]
+
     def quotes(
         self,
         executor: str,
@@ -1477,6 +1528,15 @@ class MatchaClient:
         sell_token_address: str = PYUSD,
         buy_token_address: str = USDC,
     ) -> list[tuple[str, Any]]:
+        if self.quote_provider == "okx":
+            return self._direct_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+                aggregators=["okx"],
+            )
         if self.quote_provider == "direct":
             return self._direct_quotes(
                 executor,
@@ -1485,6 +1545,27 @@ class MatchaClient:
                 sell_token_address,
                 buy_token_address,
             )
+        if self.quote_provider == "defillama":
+            return self._defillama_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+            )
+        if self.quote_provider == "auto":
+            try:
+                direct_res = self._direct_quotes(
+                    executor,
+                    sell_amount,
+                    slippage_bps,
+                    sell_token_address,
+                    buy_token_address,
+                )
+                if direct_res:
+                    return direct_res
+            except Exception as direct_exc:
+                logger.debug("[Matcha] Direct/OKX quotes failed in auto mode: %s", direct_exc)
         # Primary: MetaMatcha (Rule 1: NEVER remove meta.matcha.xyz)
         try:
             return self._matcha_quotes(
@@ -1499,7 +1580,7 @@ class MatchaClient:
             is_mock = type(self.http).__name__ != "HttpJsonClient" or hasattr(self.http, "mock_calls")
             if not is_mock:
                 logger.info(
-                    "[Matcha] MetaMatcha quote challenged or unavailable (%s); cascading to multi-aggregators (Velora)...",
+                    "[Matcha] MetaMatcha quote challenged or unavailable (%s); cascading to multi-aggregators (OKX, Velora)...",
                     exc,
                 )
                 try:
@@ -2163,11 +2244,13 @@ def prepare_transaction(
         if executor_code.removeprefix("0x"):
             with _rpc_cache_lock:
                 _executor_facts[code_fact] = executor_code
-    has_blacked_method = "f3ac40fc" in executor_code and hasattr(
-        contract.functions, "blacked"
+    has_blacked_method = (
+        ("f3ac40fc" in executor_code or len(executor_code.removeprefix("0x")) > 0)
+        and hasattr(contract.functions, "blacked")
     )
-    has_order_method = "17feadd1" in executor_code and hasattr(
-        contract.functions, "executeArbitrageWithTokensAndProviderAndOrder"
+    has_order_method = (
+        ("17feadd1" in executor_code or len(executor_code.removeprefix("0x")) > 0)
+        and hasattr(contract.functions, "executeArbitrageWithTokensAndProviderAndOrder")
     )
 
     if has_blacked_method:
@@ -2413,9 +2496,12 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--quote-provider",
-        choices=("matcha", "auto", "direct"),
+        choices=("matcha", "auto", "direct", "okx", "defillama"),
         default=setting("ETH_ARB_QUOTE_PROVIDER", "matcha"),
-        help="Ethereum DEX quote source: meta.matcha.xyz",
+        help=(
+            "Ethereum DEX quote source: matcha (meta.matcha.xyz), okx (OKX DEX Aggregator), "
+            "direct (multi-aggregator: OKX, Velora, etc.), auto, or defillama"
+        ),
     )
     result.add_argument(
         "--stable-base-url",
@@ -2545,7 +2631,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     )
-    matcha_proxy = os.getenv("MATCHA_PROXY", "").strip()
+    matcha_proxy = os.getenv("MATCHA_PROXY", "").strip() if args.quote_provider in ("matcha", "auto") else ""
     matcha_http = HttpJsonClient(args.timeout, user_agent, proxy=matcha_proxy)
     direct_http = HttpJsonClient(args.timeout, user_agent, proxy="")
     matcha_client = MatchaClient(
@@ -2672,7 +2758,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
         print(f"Leg 1 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {loan_symbol} -> {raw_to_amount(stable_quote.amount_out)} {intermediate_symbol}", file=sys.stderr)
-        print(f"Leg 2 ({'Direct' if args.quote_provider == 'direct' else 'MetaMatcha'} - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {intermediate_symbol} -> {raw_to_amount(matcha.buy_amount)} {loan_symbol}", file=sys.stderr)
+        print(f"Leg 2 ({QUOTE_PROVIDER_LABELS.get(args.quote_provider, 'MetaMatcha')} - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {intermediate_symbol} -> {raw_to_amount(matcha.buy_amount)} {loan_symbol}", file=sys.stderr)
         if flash_loan_fee:
             print(
                 f"Flash Loan Fee:          {raw_to_amount(flash_loan_fee)} "
@@ -2834,7 +2920,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             file=sys.stderr,
         )
         print(f"Loan Amount:             {raw_to_amount(loan_amount)} {loan_symbol}", file=sys.stderr)
-        print(f"Leg 1 ({'Direct' if args.quote_provider == 'direct' else 'MetaMatcha'} - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
+        print(f"Leg 1 ({QUOTE_PROVIDER_LABELS.get(args.quote_provider, 'MetaMatcha')} - {matcha.aggregator}): {raw_to_amount(matcha.sell_amount)} {loan_symbol} -> {raw_to_amount(matcha.buy_amount)} {intermediate_symbol}", file=sys.stderr)
         print(f"Leg 2 (Stable.com):       {raw_to_amount(stable_quote.amount_in)} {intermediate_symbol} -> {raw_to_amount(stable_quote.amount_out)} {loan_symbol}", file=sys.stderr)
         if flash_loan_fee:
             print(
@@ -2902,16 +2988,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     maximum_execution_cost = max_gas_cost + native_execution_cost
     predicted_net = gross_profit - maximum_execution_cost
 
+    dex_label = QUOTE_PROVIDER_LABELS.get(args.quote_provider, "MetaMatcha")
     if args.swap_order == "stable-first":
         route_flow = (
             f"{loan_symbol} -> {intermediate_symbol} (Stable.com) -> "
-            f"{loan_symbol} (MetaMatcha)"
+            f"{loan_symbol} ({dex_label})"
         )
         matcha_sell_symbol, matcha_buy_symbol = intermediate_symbol, loan_symbol
         stable_sell_symbol, stable_buy_symbol = loan_symbol, intermediate_symbol
     else:
         route_flow = (
-            f"{loan_symbol} -> {intermediate_symbol} (MetaMatcha) -> "
+            f"{loan_symbol} -> {intermediate_symbol} ({dex_label}) -> "
             f"{loan_symbol} (Stable.com)"
         )
         matcha_sell_symbol, matcha_buy_symbol = loan_symbol, intermediate_symbol

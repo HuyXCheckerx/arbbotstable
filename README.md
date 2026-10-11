@@ -29,6 +29,28 @@ requests in testing. `--headless` is available, but the headless test failed des
 obtaining a clearance cookie. Cookies alone do not guarantee endpoint access.
 The script never signs, approves, or submits transactions, or changes sniper settings.
 
+## DefiLlama quote engine for Ethereum routes
+
+`src/engines/defillama_eth.py` is a separate quote engine for the Ethereum DEX
+leg. Select it with `ETH_ARB_QUOTE_PROVIDER=defillama` (or
+`--quote-provider defillama`). It asks DefiLlama's LlamaSwap quote relay
+(`swap-api.defillama.com/dexAggregatorQuote`) for one route per adapter, with
+the executor as taker, and ranks routes by output. It never falls back to
+MetaMatcha or the direct aggregators.
+
+A third-party relay picks both the call target and the token spender. Each
+route must therefore use its aggregator's published Ethereum router (1inch,
+KyberSwap, ParaSwap, Odos, 0x AllowanceHolder), be built for the executor, and
+need no ETH. Otherwise it is rejected.
+
+The relay is not a documented public API. On 2026-10-11 it answered plain
+server requests with a Cloudflare bot challenge (HTTP 403). The engine reports
+this as an access block and the sniper pauses `DefiLlama ethereum` for
+`SNIPER_PROVIDER_ACCESS_COOLDOWN_SECONDS`. It does not try to get past the
+challenge, and it does not use the key embedded in DefiLlama's frontend. It
+returns quotes only if DefiLlama accepts your server's requests, for example
+with a key DefiLlama issued to you in `DEFILLAMA_API_KEY`.
+
 Ethereum and Solana stablecoin arbitrage bot with a live operational dashboard.
 The profit sniper checks both venue orders between Stable.com and MetaMatcha on
 Ethereum and Solana. Jupiter is an explicit Solana fallback, not the default.

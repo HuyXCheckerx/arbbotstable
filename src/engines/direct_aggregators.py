@@ -42,16 +42,21 @@ is_hex_data: Any = None
 parse_integer: Any = None
 
 
-DEFAULT_DIRECT_AGGREGATORS = "kyberswap,velora,bitget,1inch,0x"
+DEFAULT_DIRECT_AGGREGATORS = "okx,velora,bitget,1inch,0x,kyberswap"
 KYBER_BASE_URL = "https://aggregator-api.kyberswap.com/ethereum/api/v1"
 VELORA_BASE_URL = "https://api.paraswap.io"
 ONEINCH_BASE_URL = "https://api.1inch.dev/swap/v6.0/1"
 ZERO_EX_BASE_URL = "https://api.0x.org"
 BITGET_BASE_URL = "https://bopenapi.bgwapi.io"
 BITGET_SWAP_PATH = "/bgw-pro/swapx/pro/swap"
+OKX_BASE_URL = "https://www.okx.com"
+OKX_SWAP_PATH = "/api/v6/dex/aggregator/swap"
+OKX_DEFAULT_ROUTER = "0x8feAB81D36E7576107D5dE0758c1b839Be31B4F6"
+OKX_DEFAULT_SPENDER = "0x40aA958dd87FC8305b97f2BA922CDdCa374bcD7f"
 
 # Conservative default request spacing per provider (seconds between calls).
 DEFAULT_MIN_INTERVAL = {
+    "okx": 0.5,
     "kyberswap": 0.25,
     "velora": 0.25,
     "1inch": 1.05,  # Dev plan: 60 requests/minute
@@ -116,11 +121,15 @@ class DirectAggregatorClient:
 
             session = requests.Session()
             session.trust_env = False
-            proxy_url = _env("MATCHA_PROXY")
+            proxy_url = _env("ETH_ARB_DIRECT_PROXY")
             if proxy_url:
                 session.proxies = {"http": proxy_url, "https": proxy_url}
             session.headers.update({"accept": "application/json", "user-agent": "arbbotstable/1.0"})
         self.session = session
+        self.okx_key = _env("OKX_API_KEY", "afbd1cbb-fb82-4c24-9b50-c28823cd8001")
+        self.okx_secret = _env("OKX_SECRET_KEY", "E41ADC9119A47896A8ABE0E752983B31")
+        self.okx_passphrase = _env("OKX_PASSPHRASE", "Huypro159!")
+        self.okx_project_id = _env("OKX_PROJECT_ID", "4506f56deeba9843699dd86ea3253f5a")
         self.kyber_client_id = _env("KYBERSWAP_CLIENT_ID", "arbbotstable")
         self.oneinch_key = _env("ONEINCH_API_KEY")
         self.zero_ex_key = _env("ZERO_EX_API_KEY") or _env("ETH_ARB_ZERO_EX_API_KEY")
@@ -139,8 +148,11 @@ class DirectAggregatorClient:
             if getattr(self.session, "proxies", None):
                 try:
                     import requests
+                    fb_kwargs = dict(kwargs)
+                    if "headers" not in fb_kwargs:
+                        fb_kwargs["headers"] = self.session.headers
                     response = requests.request(
-                        method, url, timeout=self.timeout, headers=self.session.headers, **kwargs
+                        method, url, timeout=self.timeout, **fb_kwargs
                     )
                 except Exception:
                     raise RetryableArbError(f"{provider}: {method} {url.split('?')[0]} failed: {exc}") from exc
@@ -149,18 +161,17 @@ class DirectAggregatorClient:
         status = int(getattr(response, "status_code", 0) or 0)
         text = getattr(response, "text", "") or ""
         if status == 429:
-            # If rate-limited through proxy or direct, try alternative
-            if getattr(self.session, "proxies", None):
-                try:
-                    import requests
-                    fb = requests.request(method, url, timeout=self.timeout, headers=self.session.headers, **kwargs)
-                    if fb.status_code == 200:
-                        try:
-                            return fb.json()
-                        except ValueError:
-                            pass
-                except Exception:
-                    pass
+            time.sleep(0.5)
+            try:
+                import requests
+                retry_kwargs = dict(kwargs)
+                if "headers" not in retry_kwargs:
+                    retry_kwargs["headers"] = self.session.headers
+                retry_resp = requests.request(method, url, timeout=self.timeout, **retry_kwargs)
+                if getattr(retry_resp, "status_code", 0) == 200:
+                    return retry_resp.json()
+            except Exception:
+                pass
             raise ArbError(f"{provider}: HTTP 429 rate limited")
         if status >= 500:
             raise RetryableArbError(f"{provider}: HTTP {status}: {' '.join(text.split())[:200]}")
@@ -244,7 +255,8 @@ class DirectAggregatorClient:
         if not isinstance(route, dict):
             raise ArbError(f"velora: no route ({str(prices)[:160]})")
         dest = parse_integer(route.get("destAmount"), "velora destAmount")
-        min_dest = dest * (10_000 - int(slippage_bps)) // 10_000
+        effective_slippage = max(10, int(slippage_bps))
+        min_dest = dest * (10_000 - effective_slippage) // 10_000
         tx = self._request(
             "velora", "POST", f"{VELORA_BASE_URL}/transactions/1",
             params={"ignoreChecks": "true", "ignoreGasEstimate": "true"},
@@ -350,8 +362,73 @@ class DirectAggregatorClient:
             value=tx.get("value"), sell_amount=amount, buy_amount=data.get("outAmount"), gas=tx.get("gasAmount"),
         )
 
+    def okx_signature(self, timestamp: str, method: str, request_path: str, query_string: str = "", body: str = "") -> str:
+        """OKX API V6 HMAC-SHA256 signature."""
+        import base64
+        import hashlib
+        import hmac
+
+        message = timestamp + method.upper() + request_path
+        if query_string:
+            message += "?" + query_string
+        message += body
+        digest = hmac.new(self.okx_secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).digest()
+        return base64.b64encode(digest).decode()
+
+    def _okx(self, sell: str, buy: str, amount: int, slippage_bps: int) -> Any:
+        import time
+        from urllib.parse import urlencode
+
+        slippage_pct = f"{max(0.05, float(slippage_bps) / 100):.2f}"
+        params = {
+            "chainIndex": "1",
+            "fromTokenAddress": sell,
+            "toTokenAddress": buy,
+            "amount": str(amount),
+            "slippagePercent": slippage_pct,
+            "userWalletAddress": self.executor,
+        }
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        qs = urlencode(params)
+        signature = self.okx_signature(timestamp, "GET", OKX_SWAP_PATH, qs)
+        headers = {
+            "OK-ACCESS-KEY": self.okx_key,
+            "OK-ACCESS-SIGN": signature,
+            "OK-ACCESS-TIMESTAMP": timestamp,
+            "OK-ACCESS-PASSPHRASE": self.okx_passphrase,
+            "OK-ACCESS-PROJECT": self.okx_project_id,
+            "Content-Type": "application/json",
+        }
+        result = self._request("okx", "GET", f"{OKX_BASE_URL}{OKX_SWAP_PATH}?{qs}", headers=headers)
+        if not isinstance(result, dict) or result.get("code") != "0":
+            err_msg = result.get("msg") if isinstance(result, dict) else str(result)
+            raise ArbError(f"okx: swap failed ({err_msg})")
+        data_list = result.get("data")
+        if not isinstance(data_list, list) or not data_list:
+            raise ArbError("okx: empty response data")
+        item = data_list[0]
+        tx = item.get("tx") if isinstance(item, dict) else None
+        if not isinstance(tx, dict):
+            raise ArbError("okx: no transaction returned")
+        router = tx.get("to") or OKX_DEFAULT_ROUTER
+        spender = OKX_DEFAULT_SPENDER
+        router_res = item.get("routerResult") or {}
+        out_amount = router_res.get("toTokenAmount") or item.get("toTokenAmount")
+        buy_amount = parse_integer(out_amount, "okx buyAmount")
+        return self._quote(
+            aggregator="OKX",
+            target=router,
+            allowance_target=spender,
+            data=tx.get("data"),
+            value=tx.get("value") or 0,
+            sell_amount=amount,
+            buy_amount=buy_amount,
+            gas=tx.get("gas"),
+        )
+
     def _providers(self) -> list[tuple[str, Callable[..., Any]]]:
         table: dict[str, tuple[Callable[..., Any], bool]] = {
+            "okx": (self._okx, bool(self.okx_key and self.okx_secret and self.okx_passphrase)),
             "kyberswap": (self._kyberswap, True),
             "velora": (self._velora, True),
             "1inch": (self._oneinch, bool(self.oneinch_key)),

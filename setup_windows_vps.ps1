@@ -111,10 +111,17 @@ $venvPip = "$repoDir\venv\Scripts\pip.exe"
 Write-Host 'Upgrading pip and installing Python dependencies...' -ForegroundColor Cyan
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r requirements.txt
+if (Test-Path "$repoDir\requirements-eth.txt") {
+    & $venvPython -m pip install -r "$repoDir\requirements-eth.txt"
+}
 & $venvPython -m pip install --upgrade certifi
 
-Write-Host 'Installing Playwright Chromium browser...' -ForegroundColor Cyan
-& $venvPython -m playwright install chromium
+Write-Host 'Installing Playwright Chromium browser (optional for MetaMatcha fallback)...' -ForegroundColor Cyan
+try {
+    & $venvPython -m playwright install chromium
+} catch {
+    Write-Host "  Note: Playwright browser install skipped (not needed for OKX native routing): $_" -ForegroundColor DarkGray
+}
 
 # 4. Node.js Dependencies
 Write-Host "`n[4/6] Installing Node.js dependencies..." -ForegroundColor Yellow
