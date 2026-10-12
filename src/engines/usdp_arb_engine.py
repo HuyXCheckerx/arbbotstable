@@ -16,6 +16,7 @@ from decimal import Decimal
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Iterable
@@ -45,7 +46,7 @@ USDC_ADDRESS = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 USDP_ADDRESS = "0x8E870D67F660D95d5be530380D0eC0bd388289E1"
 MORPHO_ADDRESS = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 STABLE_POOL_ADDRESS = "0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da"
-DEFAULT_EXECUTOR = "0xD48Ab89581e77b103014DCC922279855a3b2a940"
+DEFAULT_EXECUTOR = "0x20f5Cc012bBb5323EfBFcC91A7d0C960175D3b2c"
 OKX_DEFAULT_ROUTER = "0x8feAB81D36E7576107D5dE0758c1b839Be31B4F6"
 OKX_DEFAULT_SPENDER = "0x40aA958dd87FC8305b97f2BA922CDdCa374bcD7f"
 
@@ -132,18 +133,18 @@ EXECUTOR_ABI = [
 ]
 
 ERROR_SELECTORS: dict[str, str] = {
-    "0xfcf3a30b": "InvalidLoanToken(): Token is not in the contract's supported whitelist",
-    "0x82b42900": "NotOwner(): Caller is not the executor owner",
-    "0x3565bc94": "WrongChain(): Chain ID is not 1 (Ethereum Mainnet)",
+    "0x30cd7471": "NotOwner(): Caller is not the executor owner",
+    "0x10dfc033": "WrongChain(): Chain ID is not 1 (Ethereum Mainnet)",
     "0xe6c4247b": "InvalidAddress(): Zero address passed",
     "0x2c5211c6": "InvalidAmount(): Loan or swap amount is zero",
-    "0x201445bf": "InvalidRoute(): Route parameter mismatch or expired order",
-    "0x2c6b41e7": "InvalidNativeValue(): Native ETH msg.value mismatch",
-    "0xb25d0c07": "InvalidCallback(): Unauthorized Morpho/Aave callback",
-    "0x1f2c2992": "InsufficientMatchaOutput(): Received less USDP from DEX than required",
-    "0x42f2b4c2": "InsufficientProfit(): Profit after repayment below minProfit threshold",
-    "0x98150ea4": "TokenCallFailed(): ERC20 transfer/approve failed",
-    "0x90b98a11": "ExternalCallFailed(): External DEX or Stable call failed",
+    "0x84e505d2": "InvalidRoute(): Route parameter mismatch or expired order",
+    "0xfcf3a30b": "InvalidLoanToken(): Token is not in the contract's supported whitelist",
+    "0x2723e9c2": "InvalidNativeValue(): Native ETH msg.value mismatch",
+    "0xf7a632f5": "InvalidCallback(): Unauthorized Morpho/Aave callback",
+    "0x3e0aa470": "InsufficientMatchaOutput(uint256,uint256): DEX swap output was less than required by Stable.com order",
+    "0x4e88422a": "InsufficientProfit(uint256,uint256): Ending USDC was less than required loan repayment + minProfit",
+    "0xfecb69b4": "TokenCallFailed(address): ERC20 transfer or approve failed",
+    "0xe1caab11": "ExternalCallFailed(address,bytes): External DEX or Stable call failed",
 }
 
 
@@ -156,6 +157,7 @@ class SimulationResult:
     order_nonce: int | None
     order_deadline: int | None
     maintainer_signature: str | None
+    stable_amount_in_raw: int = 0
     error_selector: str | None = None
     error_message: str | None = None
     remedy: str | None = None
@@ -743,6 +745,8 @@ class USDPTestEngine:
                 data = res.get("data")
                 if not data or not data.get("maintainerSignature"):
                     raise RuntimeError(f"Stable.com did not return maintainerSignature: {res}")
+                data["amountInHuman"] = usdp_amount
+                data["amountInRaw"] = int(usdp_amount * Decimal(10**USDP_DECIMALS))
                 return data
             except Exception as exc:
                 last_exc = exc
@@ -817,6 +821,7 @@ class USDPTestEngine:
         evaluation: ArbEvaluation,
         order_data: dict[str, Any] | None = None,
         min_profit_usdc: Decimal = Decimal("1.0"),
+        leg1_buffer_bps: int = 5,
     ) -> SimulationResult:
         """Run pre-flight on-chain simulation (eth_call) against Ethereum mainnet."""
         w3 = self.get_working_web3()
@@ -876,7 +881,7 @@ class USDPTestEngine:
                     order_nonce=None,
                     order_deadline=None,
                     maintainer_signature=None,
-                    error_selector="0x82b42900",
+                    error_selector="0x30cd7471",
                     error_message=f"Operator {operator_cs} is not the owner of executor {executor_cs} (owner is {owner_cs})",
                     remedy="Configure ETH_OPERATOR_PRIVATE_KEY for the executor owner wallet",
                 )
@@ -904,7 +909,18 @@ class USDPTestEngine:
 
         # Ensure order exists
         if order_data is None:
-            order_data = self.create_stable_order(evaluation.dex_quote.buy_amount_human)
+            buffer_factor = Decimal(1) - (Decimal(leg1_buffer_bps) / Decimal(10000))
+            safe_amount = (evaluation.dex_quote.buy_amount_human * buffer_factor).quantize(Decimal("0.000001"))
+            order_data = self.create_stable_order(safe_amount)
+
+        if "amountInRaw" in order_data:
+            stable_amount_in_raw = int(order_data["amountInRaw"])
+        elif "amountInHuman" in order_data:
+            stable_amount_in_raw = int(Decimal(str(order_data["amountInHuman"])) * Decimal(10**USDP_DECIMALS))
+        else:
+            buffer_factor = Decimal(1) - (Decimal(leg1_buffer_bps) / Decimal(10000))
+            safe_amount = (evaluation.dex_quote.buy_amount_human * buffer_factor).quantize(Decimal("0.000001"))
+            stable_amount_in_raw = int(safe_amount * Decimal(10**USDP_DECIMALS))
 
         raw_sig = order_data["maintainerSignature"]
         sig_bytes = bytes.fromhex(raw_sig[2:] if raw_sig.startswith("0x") else raw_sig)
@@ -922,7 +938,7 @@ class USDPTestEngine:
         )
 
         stable_tuple = (
-            int(evaluation.dex_quote.buy_amount_raw),
+            stable_amount_in_raw,
             int(order_data["deadline"]),
             int(order_data["nonce"]),
             sig_bytes,
@@ -952,6 +968,7 @@ class USDPTestEngine:
                 order_nonce=int(order_data["nonce"]),
                 order_deadline=int(order_data["deadline"]),
                 maintainer_signature=str(order_data["maintainerSignature"]),
+                stable_amount_in_raw=stable_amount_in_raw,
             )
         except Exception as exc:
             err_str = str(exc)
@@ -962,14 +979,45 @@ class USDPTestEngine:
                     break
 
             remedy = None
-            if matched_sel == "0xfcf3a30b":
-                remedy = "Deploy updated MorphoMatchaStableArbUsdc contract: python deploy_usdp_executor.py --send --confirm-mainnet DEPLOY_EXECUTOR"
-            elif matched_sel == "0x1f2c2992":
-                remedy = "DEX output slipped below minimum required. Try slightly higher slippage or smaller size."
-            elif matched_sel == "0x42f2b4c2":
-                remedy = "Profit after repayment was below minProfit threshold. Lower min-profit-usd."
+            error_msg = None
 
-            error_msg = ERROR_SELECTORS.get(matched_sel, f"eth_call reverted: {err_str}") if matched_sel else f"eth_call reverted: {err_str}"
+            match_matcha = re.search(r"(?:0x)?3e0aa470([0-9a-fA-F]{64})([0-9a-fA-F]{64})", err_str)
+            if match_matcha:
+                matched_sel = "0x3e0aa470"
+                rec_wei = int(match_matcha.group(1), 16)
+                req_wei = int(match_matcha.group(2), 16)
+                rec_human = Decimal(rec_wei) / Decimal(10**18)
+                req_human = Decimal(req_wei) / Decimal(10**18)
+                diff_human = req_human - rec_human
+                error_msg = (
+                    f"InsufficientMatchaOutput: DEX swap delivered {rec_human:.6f} USDP, "
+                    f"which was {diff_human:.6f} USDP short of Stable.com order requirement ({req_human:.6f} USDP)."
+                )
+                remedy = f"Apply a buffer via --leg1-buffer-bps (e.g. 5 bps = 0.05%%; shortfall was only {diff_human:.4f} USDP)"
+
+            match_profit = re.search(r"(?:0x)?4e88422a([0-9a-fA-F]{64})([0-9a-fA-F]{64})", err_str)
+            if match_profit:
+                matched_sel = "0x4e88422a"
+                avail_wei = int(match_profit.group(1), 16)
+                req_wei = int(match_profit.group(2), 16)
+                avail_human = Decimal(avail_wei) / Decimal(10**6)
+                req_human = Decimal(req_wei) / Decimal(10**6)
+                error_msg = (
+                    f"InsufficientProfit: Net available USDC was {avail_human:.6f}, "
+                    f"below required repayment + minProfit ({req_human:.6f} USDC)."
+                )
+                remedy = "Lower --min-profit-usd or choose a higher yield size."
+
+            if not error_msg:
+                if matched_sel == "0xfcf3a30b":
+                    remedy = f"Deploy/use updated USDP executor: python deploy_usdp_executor.py --send --confirm-mainnet DEPLOY_EXECUTOR"
+                elif matched_sel in ("0x30cd7471", "0x82b42900"):
+                    remedy = f"Configure operator {operator_cs} as owner of executor {executor_cs}"
+                elif matched_sel == "0x3e0aa470":
+                    remedy = "DEX output slipped below minimum required. Try slightly higher slippage or pass --leg1-buffer-bps."
+
+                error_msg = ERROR_SELECTORS.get(matched_sel, f"eth_call reverted: {err_str}") if matched_sel else f"eth_call reverted: {err_str}"
+
             return SimulationResult(
                 success=False,
                 estimated_gas=0,
@@ -978,6 +1026,7 @@ class USDPTestEngine:
                 order_nonce=int(order_data.get("nonce", 0)),
                 order_deadline=int(order_data.get("deadline", 0)),
                 maintainer_signature=str(order_data.get("maintainerSignature", "")),
+                stable_amount_in_raw=stable_amount_in_raw,
                 error_selector=matched_sel,
                 error_message=error_msg,
                 remedy=remedy,
@@ -993,6 +1042,7 @@ class USDPTestEngine:
         max_fee_gwei: Decimal | None = None,
         priority_fee_gwei: Decimal = Decimal("0.05"),
         receipt_timeout: int = 60,
+        leg1_buffer_bps: int = 5,
         dry_run: bool = False,
     ) -> ExecutionResult:
         """Execute or dry-run the USDP arbitrage transaction on Ethereum mainnet."""
@@ -1001,6 +1051,7 @@ class USDPTestEngine:
             evaluation=evaluation,
             order_data=order_data,
             min_profit_usdc=min_profit_usdc,
+            leg1_buffer_bps=leg1_buffer_bps,
         )
 
         if not sim.success:
@@ -1047,7 +1098,7 @@ class USDPTestEngine:
         )
 
         stable_tuple = (
-            int(evaluation.dex_quote.buy_amount_raw),
+            int(sim.stable_amount_in_raw or evaluation.dex_quote.buy_amount_raw),
             int(sim.order_deadline or 0),
             int(sim.order_nonce or 0),
             sig_bytes,
@@ -1375,6 +1426,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Minimum net profit in USD required to trigger execution (default: 1.0)",
     )
     parser.add_argument(
+        "--leg1-buffer-bps",
+        type=int,
+        default=5,
+        help="Slippage buffer in basis points for Leg 2 Stable.com redemption (default: 5 = 0.05%%, protects against sub-cent AMM pool variance)",
+    )
+    parser.add_argument(
         "--executor",
         type=str,
         default=None,
@@ -1455,7 +1512,9 @@ def main(argv: list[str] | None = None) -> int:
             order_data = None
             if (args.create_order or args.live or args.dry_run or args.send) and winner and winner.is_profitable:
                 try:
-                    order_data = engine.create_stable_order(winner.dex_quote.buy_amount_human)
+                    buffer_factor = Decimal(1) - (Decimal(args.leg1_buffer_bps) / Decimal(10000))
+                    safe_order_amount = (winner.dex_quote.buy_amount_human * buffer_factor).quantize(Decimal("0.000001"))
+                    order_data = engine.create_stable_order(safe_order_amount)
                     order_nonce = order_data.get("nonce")
                     order_sig = str(order_data.get("maintainerSignature"))[:16] + "..."
                 except Exception as exc:
@@ -1495,6 +1554,7 @@ def main(argv: list[str] | None = None) -> int:
                         max_fee_gwei=args.max_fee_gwei,
                         priority_fee_gwei=args.priority_fee_gwei,
                         receipt_timeout=args.receipt_timeout,
+                        leg1_buffer_bps=args.leg1_buffer_bps,
                         dry_run=not is_live_broadcast,
                     )
 

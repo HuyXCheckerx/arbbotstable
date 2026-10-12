@@ -444,6 +444,69 @@ class USDPTestEngineTests(unittest.TestCase):
             self.assertEqual(quote.buy_amount_human, Decimal("10030.0"))
             self.assertEqual(quote.target, "0xEnsoRouter")
 
+    def test_default_executor_is_usdp_whitelisted(self):
+        from src.engines.usdp_arb_engine import DEFAULT_EXECUTOR
+        self.assertEqual(DEFAULT_EXECUTOR, "0x20f5Cc012bBb5323EfBFcC91A7d0C960175D3b2c")
+
+    def test_insufficient_matcha_output_decoding(self):
+        # 0x3e0aa470 followed by 10029.464152 (received) and 10029.474843 (required)
+        received_hex = hex(10029464152885333216060)[2:].zfill(64)
+        required_hex = hex(10029474843337594652115)[2:].zfill(64)
+        err_str = f"eth_call reverted: ('0x3e0aa470{received_hex}{required_hex}',)"
+
+        dex_quote = DexQuote(
+            aggregator="meta.matcha",
+            target="0xTarget",
+            allowance_target="0xSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_029_474_843_337_594_652_115,
+            buy_amount_human=Decimal("10029.474843"),
+            data="0x1234",
+            value=0,
+            gas_estimate=300_000,
+        )
+        eval_res = ArbEvaluation(
+            loan_amount_usdc=Decimal("10000.0"),
+            dex_quote=dex_quote,
+            stable_quote=StableQuote(
+                amount_in_human=Decimal("10029.474843"),
+                amount_out_human=Decimal("10029.474843"),
+                pool_balance_human=Decimal("200000.0"),
+                min_order_human=Decimal("1000.0"),
+                token_fee_human=Decimal("0.0"),
+                native_fee_usd=Decimal("0.0"),
+                raw_response={},
+            ),
+            gross_profit_usdc=Decimal("29.474843"),
+            gas_estimate_usd=Decimal("0.20"),
+            net_profit_usd=Decimal("29.274843"),
+            is_profitable=True,
+        )
+
+        mock_w3 = MagicMock()
+        mock_w3.eth.get_code.return_value = b"\x60\x80"
+        mock_contract = MagicMock()
+        mock_contract.functions.owner().call.return_value = "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C"
+        mock_contract.functions.supportsLoanToken().call.return_value = True
+        mock_contract.functions.executeArbitrageWithTokens().call.side_effect = RuntimeError(err_str)
+        mock_w3.eth.contract.return_value = mock_contract
+        mock_w3.to_checksum_address.side_effect = lambda a: a
+
+        with patch.object(self.engine, "get_working_web3", return_value=mock_w3), \
+             patch.object(self.engine, "create_stable_order", return_value={
+                 "nonce": 1,
+                 "deadline": 1800000000,
+                 "maintainerSignature": "0x" + "aa" * 65,
+                 "executionFeeNative": 0,
+             }):
+            sim = self.engine.simulate_live_arbitrage(eval_res)
+            self.assertFalse(sim.success)
+            self.assertEqual(sim.error_selector, "0x3e0aa470")
+            self.assertIn("InsufficientMatchaOutput", sim.error_message)
+            self.assertIn("DEX swap delivered 10029.464153 USDP", sim.error_message)
+            self.assertIn("short of Stable.com order requirement", sim.error_message)
+            self.assertIn("--leg1-buffer-bps", sim.remedy)
+
 
 if __name__ == "__main__":
     unittest.main()
