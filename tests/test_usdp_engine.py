@@ -8,6 +8,7 @@ from src.engines.usdp_arb_engine import (
     StableQuote,
     ArbEvaluation,
     format_evaluation,
+    format_scaling_table,
     USDC_DECIMALS,
     USDP_DECIMALS,
 )
@@ -96,6 +97,99 @@ class USDPTestEngineTests(unittest.TestCase):
         self.assertIn("+20.000000 USDC", formatted)
         self.assertIn("PROFITABLE", formatted)
 
+    def test_scale_scan(self):
+        def fake_eval(amount_usdc, **kwargs):
+            dq = DexQuote(
+                aggregator="OKX",
+                target="0xTarget",
+                allowance_target="0xSpender",
+                sell_amount_raw=int(amount_usdc * 10**6),
+                buy_amount_raw=int((amount_usdc + Decimal("20.0")) * 10**18),
+                buy_amount_human=amount_usdc + Decimal("20.0"),
+                data="0x",
+                value=0,
+                gas_estimate=200_000,
+            )
+            sq = StableQuote(
+                amount_in_human=amount_usdc + Decimal("20.0"),
+                amount_out_human=amount_usdc + Decimal("20.0"),
+                pool_balance_human=Decimal("200000.0"),
+                min_order_human=Decimal("1000.0"),
+                token_fee_human=Decimal("0.0"),
+                native_fee_usd=Decimal("0.10"),
+                raw_response={},
+            )
+            # Make 30,000 yield the most profit
+            profit = Decimal("40.0") if amount_usdc == Decimal("30000.0") else Decimal("15.0")
+            return ArbEvaluation(
+                loan_amount_usdc=amount_usdc,
+                dex_quote=dq,
+                stable_quote=sq,
+                gross_profit_usdc=profit,
+                gas_estimate_usd=Decimal("0.50"),
+                net_profit_usd=profit - Decimal("0.60"),
+                is_profitable=True,
+            )
+
+        with patch.object(self.engine, "evaluate_arbitrage", side_effect=fake_eval):
+            results = self.engine.scale_scan(
+                min_amount=Decimal("10000.0"),
+                max_amount=Decimal("30000.0"),
+                step=Decimal("10000.0"),
+                delay=0.0,
+            )
+            self.assertEqual(len(results), 3)
+            winner = max(results, key=lambda e: e.net_profit_usd)
+            self.assertEqual(winner.loan_amount_usdc, Decimal("30000.0"))
+            self.assertGreater(winner.net_profit_usd, Decimal("30.0"))
+
+    def test_format_scaling_table(self):
+        dq = DexQuote(
+            aggregator="OKX",
+            target="0xTarget",
+            allowance_target="0xSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_018_000_000_000_000_000_000,
+            buy_amount_human=Decimal("10018.0"),
+            data="0x",
+            value=0,
+            gas_estimate=200_000,
+        )
+        sq = StableQuote(
+            amount_in_human=Decimal("10018.0"),
+            amount_out_human=Decimal("10018.0"),
+            pool_balance_human=Decimal("200000.0"),
+            min_order_human=Decimal("1000.0"),
+            token_fee_human=Decimal("0.0"),
+            native_fee_usd=Decimal("0.10"),
+            raw_response={},
+        )
+        ev1 = ArbEvaluation(
+            loan_amount_usdc=Decimal("10000.0"),
+            dex_quote=dq,
+            stable_quote=sq,
+            gross_profit_usdc=Decimal("18.0"),
+            gas_estimate_usd=Decimal("0.50"),
+            net_profit_usd=Decimal("17.40"),
+            is_profitable=True,
+        )
+        ev2 = ArbEvaluation(
+            loan_amount_usdc=Decimal("20000.0"),
+            dex_quote=dq,
+            stable_quote=sq,
+            gross_profit_usdc=Decimal("35.0"),
+            gas_estimate_usd=Decimal("0.50"),
+            net_profit_usd=Decimal("34.40"),
+            is_profitable=True,
+        )
+        table = format_scaling_table([ev1, ev2], ev2, Decimal("1.0"), Decimal("2500.0"))
+        self.assertIn("USDP ARBITRAGE YIELD CURVE SCAN", table)
+        self.assertIn("10,000 USDC", table)
+        self.assertIn("20,000 USDC", table)
+        self.assertIn("★ HIGHEST YIELD ★", table)
+        self.assertIn("WINNING ROUTE DETAILS", table)
+
 
 if __name__ == "__main__":
     unittest.main()
+

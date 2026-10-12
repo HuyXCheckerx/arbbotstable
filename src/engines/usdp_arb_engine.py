@@ -398,6 +398,35 @@ class USDPTestEngine:
         )
 
 
+    def scale_scan(
+        self,
+        min_amount: Decimal = Decimal("10000.0"),
+        max_amount: Decimal = Decimal("100000.0"),
+        step: Decimal = Decimal("10000.0"),
+        aggregator: str = "okx",
+        slippage_bps: int = 10,
+        delay: float = 0.35,
+    ) -> list[ArbEvaluation]:
+        """Scan candidate amounts from min_amount to max_amount and evaluate yields."""
+        results: list[ArbEvaluation] = []
+        current = min_amount
+        while current <= max_amount:
+            try:
+                eval_res = self.evaluate_arbitrage(
+                    amount_usdc=current,
+                    aggregator=aggregator,
+                    slippage_bps=slippage_bps,
+                )
+                results.append(eval_res)
+            except Exception as exc:
+                # Log but continue scanning other sizes
+                print(f"[!] Sizing scan warning at {current:,.0f} USDC: {exc}", file=sys.stderr)
+            current += step
+            if current <= max_amount and delay > 0:
+                time.sleep(delay)
+        return results
+
+
 def format_evaluation(eval_result: ArbEvaluation, gas_price_gwei: Decimal, eth_usd: Decimal) -> str:
     dq = eval_result.dex_quote
     sq = eval_result.stable_quote
@@ -408,9 +437,9 @@ def format_evaluation(eval_result: ArbEvaluation, gas_price_gwei: Decimal, eth_u
     status_str = f"PROFITABLE (+${net:.2f})" if eval_result.is_profitable else f"UNPROFITABLE (${net:.2f})"
     
     lines = [
-        "=" * 72,
+        "=" * 74,
         "   USDP ARBITRAGE TEST ENGINE (STANDALONE TESTING ONLY)",
-        "=" * 72,
+        "=" * 74,
         f"Timestamp:             {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
         f"Network:               Ethereum Mainnet (Chain ID 1)",
         f"Flash Provider:        Morpho (USDC Fee: 0 bps)",
@@ -439,20 +468,83 @@ def format_evaluation(eval_result: ArbEvaluation, gas_price_gwei: Decimal, eth_u
         f"Estimated Gas Cost:    ${eval_result.gas_estimate_usd:.2f} USD ({gas_price_gwei:.2f} Gwei @ ${eth_usd:,.0f}/ETH)",
         f"Predicted Net Profit:  {net:+,.2f} USD",
         f"Result:                {status_str}",
-        "=" * 72,
+        "=" * 74,
     ]
+    return "\n".join(lines)
+
+
+def format_scaling_table(
+    evaluations: list[ArbEvaluation],
+    winner: ArbEvaluation | None,
+    gas_price_gwei: Decimal,
+    eth_usd: Decimal,
+) -> str:
+    lines = [
+        "=" * 86,
+        "          USDP ARBITRAGE YIELD CURVE SCAN (10,000 -> 100,000 USDC)",
+        "=" * 86,
+        f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())} | Gas: {gas_price_gwei:.2f} Gwei | ETH: ${eth_usd:,.0f}",
+        "-" * 86,
+        f" {'Size (USDC)':<13} | {'USDP Received':<14} | {'Gross Profit':<14} | {'Est. Net':<13} | {'Margin':<7} | {'Yield Rank'}",
+        "-" * 86,
+    ]
+    for ev in evaluations:
+        size_str = f"{ev.loan_amount_usdc:,.0f} USDC"
+        usdp_str = f"{ev.dex_quote.buy_amount_human:,.2f}"
+        gross_str = f"{ev.gross_profit_usdc:+,.2f} USDC"
+        net_str = f"{ev.net_profit_usd:+,.2f} USD"
+        margin_pct = (ev.gross_profit_usdc / ev.loan_amount_usdc) * 100
+        margin_str = f"{margin_pct:+.2f}%"
+
+        if winner and ev.loan_amount_usdc == winner.loan_amount_usdc and ev.net_profit_usd > 0:
+            rank_str = "★ HIGHEST YIELD ★"
+        elif ev.net_profit_usd > 0:
+            rank_str = "Profitable"
+        else:
+            rank_str = "(Unprofitable)"
+
+        lines.append(
+            f" {size_str:<13} | {usdp_str:<14} | {gross_str:<14} | {net_str:<13} | {margin_str:<7} | {rank_str}"
+        )
+    lines.append("=" * 86)
+    
+    if winner:
+        lines.append("")
+        lines.append("  >>> WINNING ROUTE DETAILS (MAXIMUM NET YIELD) <<<")
+        lines.append(format_evaluation(winner, gas_price_gwei, eth_usd))
+    else:
+        lines.append("\n[!] No profitable size found in scan range.")
+        
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Standalone USDP Arbitrage Test Engine (Testing Only - NOT added to bot)"
+        description="Standalone USDP Arbitrage Test Engine (Scales from 10k to 100k & prints top yield)"
     )
     parser.add_argument(
         "--amount",
         type=Decimal,
+        default=None,
+        help="Test a specific single USDC amount (if omitted, scans 10k to 100k)",
+    )
+    parser.add_argument(
+        "--min-amount",
+        type=Decimal,
         default=Decimal("10000.0"),
-        help="USDC loan/swap amount (default: 10000)",
+        help="Minimum USDC amount for scaling scan (default: 10000)",
+    )
+    parser.add_argument(
+        "--max-amount",
+        type=Decimal,
+        default=Decimal("100000.0"),
+        help="Maximum USDC amount for scaling scan (default: 100000)",
+    )
+    parser.add_argument(
+        "--step",
+        type=Decimal,
+        default=Decimal("10000.0"),
+        help="Increment step for scaling scan (default: 10000)",
     )
     parser.add_argument(
         "--aggregator",
@@ -469,18 +561,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--create-order",
         action="store_true",
-        help="Also call Stable.com /swap/create/singleChain to verify maintainer signature",
+        help="Also call Stable.com /swap/create/singleChain on the winning route",
     )
     parser.add_argument(
         "--continuous",
         action="store_true",
-        help="Continuously monitor quotes in a loop",
+        help="Continuously monitor in a loop",
     )
     parser.add_argument(
         "--interval",
         type=float,
-        default=5.0,
-        help="Interval in seconds for continuous mode (default: 5.0)",
+        default=6.0,
+        help="Interval in seconds for continuous mode (default: 6.0)",
     )
     parser.add_argument(
         "--json",
@@ -494,44 +586,76 @@ def main(argv: list[str] | None = None) -> int:
     
     while True:
         try:
-            eval_res = engine.evaluate_arbitrage(
-                amount_usdc=args.amount,
-                aggregator=args.aggregator,
-                slippage_bps=args.slippage_bps,
-            )
-            
-            if args.create_order:
-                order_data = engine.create_stable_order(eval_res.dex_quote.buy_amount_human)
-                order_nonce = order_data.get("nonce")
-                order_sig = order_data.get("maintainerSignature")[:16] + "..."
+            gas_price = engine.get_gas_price_gwei()
+            eth_usd = engine.get_eth_usd()
+
+            if args.amount is not None:
+                # Single amount evaluation
+                eval_res = engine.evaluate_arbitrage(
+                    amount_usdc=args.amount,
+                    aggregator=args.aggregator,
+                    slippage_bps=args.slippage_bps,
+                )
+                winner = eval_res
+                evaluations = [eval_res]
             else:
-                order_nonce = "N/A (run with --create-order)"
+                # Full scaling scan from min_amount to max_amount
+                evaluations = engine.scale_scan(
+                    min_amount=args.min_amount,
+                    max_amount=args.max_amount,
+                    step=args.step,
+                    aggregator=args.aggregator,
+                    slippage_bps=args.slippage_bps,
+                )
+                if not evaluations:
+                    raise RuntimeError("No candidate sizes could be evaluated successfully")
+                winner = max(evaluations, key=lambda e: e.net_profit_usd)
+
+            order_data = None
+            if args.create_order and winner and winner.is_profitable:
+                order_data = engine.create_stable_order(winner.dex_quote.buy_amount_human)
+                order_nonce = order_data.get("nonce")
+                order_sig = str(order_data.get("maintainerSignature"))[:16] + "..."
+            else:
+                order_nonce = "N/A"
                 order_sig = "N/A"
 
             if args.json:
                 data = {
                     "timestamp": time.time(),
-                    "loanAmountUsdc": float(eval_res.loan_amount_usdc),
-                    "dexOutputUsdp": float(eval_res.dex_quote.buy_amount_human),
-                    "dexAggregator": eval_res.dex_quote.aggregator,
-                    "stableOutputUsdc": float(eval_res.stable_quote.amount_out_human),
-                    "grossProfitUsdc": float(eval_res.gross_profit_usdc),
-                    "gasEstimateUsd": float(eval_res.gas_estimate_usd),
-                    "netProfitUsd": float(eval_res.net_profit_usd),
-                    "isProfitable": eval_res.is_profitable,
-                    "stablePoolBalance": float(eval_res.stable_quote.pool_balance_human),
-                    "orderNonce": order_nonce,
+                    "winner": {
+                        "loanAmountUsdc": float(winner.loan_amount_usdc),
+                        "dexOutputUsdp": float(winner.dex_quote.buy_amount_human),
+                        "dexAggregator": winner.dex_quote.aggregator,
+                        "stableOutputUsdc": float(winner.stable_quote.amount_out_human),
+                        "grossProfitUsdc": float(winner.gross_profit_usdc),
+                        "gasEstimateUsd": float(winner.gas_estimate_usd),
+                        "netProfitUsd": float(winner.net_profit_usd),
+                        "isProfitable": winner.is_profitable,
+                        "orderNonce": order_nonce,
+                    } if winner else None,
+                    "scan": [
+                        {
+                            "loanAmountUsdc": float(e.loan_amount_usdc),
+                            "grossProfitUsdc": float(e.gross_profit_usdc),
+                            "netProfitUsd": float(e.net_profit_usd),
+                            "marginPct": float(e.gross_profit_usdc / e.loan_amount_usdc * 100),
+                            "isProfitable": e.is_profitable,
+                        }
+                        for e in evaluations
+                    ],
                 }
                 print(json.dumps(data, indent=2))
             else:
-                gas_price = engine.get_gas_price_gwei()
-                eth_usd = engine.get_eth_usd()
-                print(format_evaluation(eval_res, gas_price, eth_usd))
-                if args.create_order:
-                    print(f"Verified Stable.com Order: Nonce={order_nonce}, Signature={order_sig}")
+                if args.amount is not None:
+                    print(format_evaluation(winner, gas_price, eth_usd))
+                else:
+                    print(format_scaling_table(evaluations, winner, gas_price, eth_usd))
+                if args.create_order and winner and winner.is_profitable:
+                    print(f"Verified Stable.com Order for Winner: Nonce={order_nonce}, Signature={order_sig}")
 
         except Exception as exc:
-            print(f"[ERROR] Quote evaluation failed: {exc}", file=sys.stderr)
+            print(f"[ERROR] Evaluation failed: {exc}", file=sys.stderr)
             if not args.continuous:
                 return 1
 
@@ -544,3 +668,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
