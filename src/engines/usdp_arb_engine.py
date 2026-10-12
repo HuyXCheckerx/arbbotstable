@@ -65,6 +65,11 @@ MATCHA_AGGREGATORS = (
     "ParaSwap",
     "Enso",
 )
+ENSO_BASE_URLS = [
+    "https://api.enso.finance",
+    "https://api.enso.build",
+]
+DEFAULT_ENSO_KEY = "eea2af9c-7bb8-4f79-bb78-d84d194c33f1"
 DEFAULT_RPC_URLS = [
     "https://rpc.mevblocker.io",
     "https://1rpc.io/eth",
@@ -230,6 +235,7 @@ class USDPTestEngine:
         self.okx_secret = os.getenv("OKX_SECRET_KEY", "E41ADC9119A47896A8ABE0E752983B31")
         self.okx_passphrase = os.getenv("OKX_PASSPHRASE", "Huypro159!")
         self.okx_project_id = os.getenv("OKX_PROJECT_ID", "4506f56deeba9843699dd86ea3253f5a")
+        self.enso_key = os.getenv("ENSO_API_KEY", DEFAULT_ENSO_KEY)
         
         self.session = requests.Session()
         self.session.headers.update({"accept": "application/json", "user-agent": "arbbot-usdp-test/1.0"})
@@ -524,37 +530,127 @@ class USDPTestEngine:
             return best_quote
 
         # 4. If MetaMatcha endpoint is challenged/blocked by WAF or returns no liquidity,
-        # cascade to OKX DEX Aggregator fallback (preserving seamless execution)
-        fallback = self.quote_dex_okx(usdc_amount, slippage_bps)
-        return DexQuote(
-            aggregator="meta.matcha (OKX)",
-            target=fallback.target,
-            allowance_target=fallback.allowance_target,
-            sell_amount_raw=fallback.sell_amount_raw,
-            buy_amount_raw=fallback.buy_amount_raw,
-            buy_amount_human=fallback.buy_amount_human,
-            data=fallback.data,
-            value=fallback.value,
-            gas_estimate=fallback.gas_estimate,
-        )
+        # fall back to Enso or OKX, selecting whichever yields the higher USDP output
+        candidates: list[DexQuote] = []
+        try:
+            candidates.append(self.quote_dex_enso(usdc_amount, slippage_bps))
+        except Exception:
+            pass
+
+        try:
+            candidates.append(self.quote_dex_okx(usdc_amount, slippage_bps))
+        except Exception:
+            pass
+
+        if candidates:
+            best_fallback = max(candidates, key=lambda q: q.buy_amount_raw)
+            return DexQuote(
+                aggregator=f"meta.matcha ({best_fallback.aggregator})",
+                target=best_fallback.target,
+                allowance_target=best_fallback.allowance_target,
+                sell_amount_raw=best_fallback.sell_amount_raw,
+                buy_amount_raw=best_fallback.buy_amount_raw,
+                buy_amount_human=best_fallback.buy_amount_human,
+                data=best_fallback.data,
+                value=best_fallback.value,
+                gas_estimate=best_fallback.gas_estimate,
+            )
+
+        # 5. Last resort fallback to Velora
+        return self.quote_dex_velora(usdc_amount, slippage_bps)
+
+    def quote_dex_enso(self, usdc_amount: Decimal, slippage_bps: int = 10) -> DexQuote:
+        """Fetch quote from Enso Router API for USDC -> USDP on Ethereum."""
+        raw_in = int(usdc_amount * Decimal(10**USDC_DECIMALS))
+        headers = {
+            "Authorization": f"Bearer {self.enso_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "chainId": 1,
+            "fromAddress": self.executor,
+            "tokenIn": [USDC_ADDRESS],
+            "tokenOut": [USDP_ADDRESS],
+            "amountIn": [str(raw_in)],
+            "routingStrategy": "router",
+            "slippage": str(max(10, slippage_bps)),
+        }
+        
+        last_exc: Exception | None = None
+        for base_url in ENSO_BASE_URLS:
+            try:
+                resp = self.session.post(
+                    f"{base_url}/api/v1/shortcuts/route",
+                    headers=headers,
+                    json=payload,
+                    timeout=min(6.0, self.timeout),
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    out_raw = int(data.get("amountOut") or 0)
+                    if out_raw <= 0:
+                        raise RuntimeError(f"Enso returned invalid amountOut: {data}")
+                    out_human = Decimal(out_raw) / Decimal(10**USDP_DECIMALS)
+                    
+                    tx = data.get("tx") or {}
+                    target = tx.get("to")
+                    calldata = tx.get("data", "0x")
+                    value = int(tx.get("value") or 0)
+                    gas_est = int(data.get("gas") or 320_000)
+                    
+                    pre_txs = data.get("preTransactions") or []
+                    allowance_target = None
+                    for ptx in pre_txs:
+                        if isinstance(ptx, dict) and ptx.get("spender"):
+                            allowance_target = ptx.get("spender")
+                            break
+                    if not allowance_target:
+                        allowance_target = target
+                        
+                    if not target or not calldata:
+                        raise RuntimeError(f"Enso response missing target or calldata: {data}")
+                        
+                    return DexQuote(
+                        aggregator="Enso",
+                        target=target,
+                        allowance_target=allowance_target,
+                        sell_amount_raw=raw_in,
+                        buy_amount_raw=out_raw,
+                        buy_amount_human=out_human,
+                        data=calldata,
+                        value=value,
+                        gas_estimate=gas_est,
+                    )
+                else:
+                    last_exc = RuntimeError(f"Enso HTTP {resp.status_code}: {resp.text[:200]}")
+            except Exception as exc:
+                last_exc = exc
+                continue
+                
+        raise RuntimeError(f"Enso quote failed across endpoints: {last_exc}")
 
     def quote_dex(self, usdc_amount: Decimal, aggregator: str = "matcha", slippage_bps: int = 10) -> DexQuote:
         agg = aggregator.lower().strip()
         if agg in ("matcha", "meta.matcha", "metamatcha"):
             return self.quote_dex_matcha(usdc_amount, slippage_bps)
+        if agg == "enso":
+            return self.quote_dex_enso(usdc_amount, slippage_bps)
         if agg == "okx":
             return self.quote_dex_okx(usdc_amount, slippage_bps)
         if agg == "velora":
             return self.quote_dex_velora(usdc_amount, slippage_bps)
         
-        # auto: try matcha first, then okx, then velora
-        try:
-            return self.quote_dex_matcha(usdc_amount, slippage_bps)
-        except Exception:
+        # auto: try matcha, enso, okx, velora and return best quote
+        quotes: list[DexQuote] = []
+        for fn in (self.quote_dex_matcha, self.quote_dex_enso, self.quote_dex_okx, self.quote_dex_velora):
             try:
-                return self.quote_dex_okx(usdc_amount, slippage_bps)
+                quotes.append(fn(usdc_amount, slippage_bps))
             except Exception:
-                return self.quote_dex_velora(usdc_amount, slippage_bps)
+                continue
+        if quotes:
+            return max(quotes, key=lambda q: q.buy_amount_raw)
+        raise RuntimeError("All DEX aggregators (Matcha, Enso, OKX, Velora) failed to return a quote")
 
     def quote_stable(self, usdp_amount: Decimal, attempts: int = 3) -> StableQuote:
         """Query Stable.com status for swapping USDP -> USDC on Ethereum."""
@@ -1236,9 +1332,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--aggregator",
-        choices=["matcha", "meta.matcha", "okx", "velora", "auto"],
+        choices=["matcha", "meta.matcha", "enso", "okx", "velora", "auto"],
         default="matcha",
-        help="DEX aggregator for USDC -> USDP (default: matcha [meta.matcha.xyz])",
+        help="DEX aggregator for USDC -> USDP (default: matcha [meta.matcha.xyz] with Enso/OKX fallback)",
     )
     parser.add_argument(
         "--slippage-bps",

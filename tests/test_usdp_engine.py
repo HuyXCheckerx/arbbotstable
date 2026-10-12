@@ -383,6 +383,67 @@ class USDPTestEngineTests(unittest.TestCase):
         self.assertIn("DRY-RUN", exec_rep)
         self.assertIn("PASSED", exec_rep)
 
+    def test_quote_dex_enso_success(self):
+        mock_enso_resp = {
+            "gas": "310000",
+            "amountOut": "10029500000000000000000",
+            "tx": {
+                "to": "0xEnsoRouter",
+                "data": "0xenso1234",
+                "value": "0",
+            },
+            "preTransactions": [
+                {
+                    "type": "tokenApproval",
+                    "spender": "0xEnsoSpender",
+                }
+            ],
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = mock_enso_resp
+
+        with patch.object(self.engine.session, "post", return_value=mock_resp):
+            quote = self.engine.quote_dex_enso(Decimal("10000.0"))
+            self.assertEqual(quote.aggregator, "Enso")
+            self.assertEqual(quote.target, "0xEnsoRouter")
+            self.assertEqual(quote.allowance_target, "0xEnsoSpender")
+            self.assertEqual(quote.buy_amount_human, Decimal("10029.5"))
+            self.assertEqual(quote.gas_estimate, 310_000)
+
+    def test_quote_dex_matcha_fallback_prefers_best(self):
+        mock_enso = DexQuote(
+            aggregator="Enso",
+            target="0xEnsoRouter",
+            allowance_target="0xEnsoSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_030_000_000_000_000_000_000,
+            buy_amount_human=Decimal("10030.0"),
+            data="0x11",
+            value=0,
+            gas_estimate=300_000,
+        )
+        mock_okx = DexQuote(
+            aggregator="OKX",
+            target="0xOkxRouter",
+            allowance_target="0xOkxSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_020_000_000_000_000_000_000,
+            buy_amount_human=Decimal("10020.0"),
+            data="0x22",
+            value=0,
+            gas_estimate=250_000,
+        )
+        with patch.object(self.engine, "quote_dex_enso", return_value=mock_enso), \
+             patch.object(self.engine, "quote_dex_okx", return_value=mock_okx), \
+             patch("src.engines.matcha_browser_bridge.fetch_bridge_quotes", side_effect=RuntimeError("no bridge")), \
+             patch.object(self.engine.session, "post", side_effect=RuntimeError("WAF challenge")):
+            quote = self.engine.quote_dex_matcha(Decimal("10000.0"))
+            # Enso yields 10030 > OKX 10020, so Enso should be selected as fallback winner
+            self.assertEqual(quote.aggregator, "meta.matcha (Enso)")
+            self.assertEqual(quote.buy_amount_human, Decimal("10030.0"))
+            self.assertEqual(quote.target, "0xEnsoRouter")
+
 
 if __name__ == "__main__":
     unittest.main()
