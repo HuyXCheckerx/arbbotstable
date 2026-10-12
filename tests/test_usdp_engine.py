@@ -189,7 +189,69 @@ class USDPTestEngineTests(unittest.TestCase):
         self.assertIn("★ HIGHEST YIELD ★", table)
         self.assertIn("WINNING ROUTE DETAILS", table)
 
+    def test_quote_dex_matcha_direct(self):
+        mock_bridge_response = {
+            "0x": {
+                "allowanceHolder": {
+                    "allowanceTarget": "0xMatchaSpender",
+                    "quote": {
+                        "to": "0xMatchaRouter",
+                        "buyAmount": "10022000000000000000000",  # 10,022 USDP (18 dec)
+                        "gas": "225000",
+                        "value": "0",
+                        "data": "0xabcdef1234",
+                    },
+                }
+            }
+        }
+        with patch("src.engines.matcha_browser_bridge.fetch_bridge_quotes", return_value=mock_bridge_response), \
+             patch.object(self.engine, "get_gas_price_gwei", return_value=Decimal("1.0")):
+            quote = self.engine.quote_dex_matcha(Decimal("10000.0"))
+            self.assertEqual(quote.aggregator, "meta.matcha (0x)")
+            self.assertEqual(quote.target, "0xMatchaRouter")
+            self.assertEqual(quote.allowance_target, "0xMatchaSpender")
+            self.assertEqual(quote.buy_amount_human, Decimal("10022.0"))
+            self.assertEqual(quote.gas_estimate, 225_000)
+
+    def test_quote_dex_matcha_fallback_okx(self):
+        mock_okx = DexQuote(
+            aggregator="OKX",
+            target="0xOkxRouter",
+            allowance_target="0xOkxSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_020_000_000_000_000_000_000,
+            buy_amount_human=Decimal("10020.0"),
+            data="0x1122",
+            value=0,
+            gas_estimate=240_000,
+        )
+        with patch.object(self.engine, "quote_dex_okx", return_value=mock_okx), \
+             patch("src.engines.matcha_browser_bridge.fetch_bridge_quotes", side_effect=RuntimeError("no bridge")), \
+             patch.object(self.engine.session, "post", side_effect=RuntimeError("WAF challenge")):
+            quote = self.engine.quote_dex_matcha(Decimal("10000.0"))
+            self.assertEqual(quote.aggregator, "meta.matcha (OKX)")
+            self.assertEqual(quote.buy_amount_human, Decimal("10020.0"))
+            self.assertEqual(quote.target, "0xOkxRouter")
+
+    def test_quote_dex_dispatch_default(self):
+        mock_matcha = DexQuote(
+            aggregator="meta.matcha (0x)",
+            target="0xMatchaRouter",
+            allowance_target="0xMatchaSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_025_000_000_000_000_000_000,
+            buy_amount_human=Decimal("10025.0"),
+            data="0x99",
+            value=0,
+            gas_estimate=210_000,
+        )
+        with patch.object(self.engine, "quote_dex_matcha", return_value=mock_matcha) as mock_fn:
+            quote = self.engine.quote_dex(Decimal("10000.0"))
+            mock_fn.assert_called_once()
+            self.assertEqual(quote.aggregator, "meta.matcha (0x)")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
