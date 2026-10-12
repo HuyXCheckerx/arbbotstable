@@ -7,10 +7,15 @@ from src.engines.usdp_arb_engine import (
     DexQuote,
     StableQuote,
     ArbEvaluation,
+    SimulationResult,
+    ExecutionResult,
     format_evaluation,
     format_scaling_table,
+    format_simulation_report,
+    format_execution_report,
     USDC_DECIMALS,
     USDP_DECIMALS,
+    main,
 )
 
 
@@ -249,6 +254,134 @@ class USDPTestEngineTests(unittest.TestCase):
             quote = self.engine.quote_dex(Decimal("10000.0"))
             mock_fn.assert_called_once()
             self.assertEqual(quote.aggregator, "meta.matcha (0x)")
+
+    def _sample_eval(self) -> ArbEvaluation:
+        dq = DexQuote(
+            aggregator="meta.matcha (OKX)",
+            target="0xTarget",
+            allowance_target="0xSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_025_000_000_000_000_000_000,
+            buy_amount_human=Decimal("10025.0"),
+            data="0x1234",
+            value=0,
+            gas_estimate=250_000,
+        )
+        sq = StableQuote(
+            amount_in_human=Decimal("10025.0"),
+            amount_out_human=Decimal("10025.0"),
+            pool_balance_human=Decimal("200000.0"),
+            min_order_human=Decimal("1000.0"),
+            token_fee_human=Decimal("0.0"),
+            native_fee_usd=Decimal("0.10"),
+            raw_response={},
+        )
+        return ArbEvaluation(
+            loan_amount_usdc=Decimal("10000.0"),
+            dex_quote=dq,
+            stable_quote=sq,
+            gross_profit_usdc=Decimal("25.0"),
+            gas_estimate_usd=Decimal("0.50"),
+            net_profit_usd=Decimal("24.40"),
+            is_profitable=True,
+        )
+
+    def test_simulate_live_arbitrage_success(self):
+        eval_res = self._sample_eval()
+        order_data = {
+            "nonce": 42,
+            "deadline": 1790000000,
+            "maintainerSignature": "0x1234567890abcdef",
+            "executionFeeNative": 1000,
+        }
+
+        mock_w3 = MagicMock()
+        mock_w3.to_checksum_address.side_effect = lambda a: str(a)
+        mock_w3.eth.get_code.return_value = b"\x60\x80\x60\x40"
+
+        mock_contract = MagicMock()
+        mock_contract.functions.owner().call.return_value = "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C"
+        mock_contract.functions.supportsLoanToken().call.return_value = True
+
+        mock_fn = MagicMock()
+        mock_fn.call.return_value = None
+        mock_fn.estimate_gas.return_value = 320_000
+        mock_contract.functions.executeArbitrageWithTokens.return_value = mock_fn
+        mock_w3.eth.contract.return_value = mock_contract
+
+        with patch.object(self.engine, "get_working_web3", return_value=mock_w3):
+            sim = self.engine.simulate_live_arbitrage(eval_res, order_data=order_data)
+            self.assertTrue(sim.success)
+            self.assertEqual(sim.estimated_gas, 320_000)
+            self.assertEqual(sim.order_nonce, 42)
+            self.assertEqual(sim.native_value_wei, 1000)
+
+    def test_simulate_live_arbitrage_unsupported_token(self):
+        eval_res = self._sample_eval()
+        mock_w3 = MagicMock()
+        mock_w3.to_checksum_address.side_effect = lambda a: str(a)
+        mock_w3.eth.get_code.return_value = b"\x60\x80\x60\x40"
+
+        mock_contract = MagicMock()
+        mock_contract.functions.owner().call.return_value = "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C"
+        mock_contract.functions.supportsLoanToken().call.return_value = False
+        mock_w3.eth.contract.return_value = mock_contract
+
+        with patch.object(self.engine, "get_working_web3", return_value=mock_w3):
+            sim = self.engine.simulate_live_arbitrage(eval_res, order_data={"maintainerSignature": "0x", "deadline": 0, "nonce": 1})
+            self.assertFalse(sim.success)
+            self.assertEqual(sim.error_selector, "0xfcf3a30b")
+            self.assertIn("InvalidLoanToken", sim.error_message)
+
+    def test_execute_live_arbitrage_dry_run(self):
+        eval_res = self._sample_eval()
+        mock_sim = SimulationResult(
+            success=True,
+            estimated_gas=310_000,
+            native_value_wei=500,
+            min_profit_raw=1_000_000,
+            order_nonce=10,
+            order_deadline=1790000000,
+            maintainer_signature="0xabcdef",
+        )
+
+        mock_w3 = MagicMock()
+        mock_w3.to_checksum_address.side_effect = lambda a: str(a)
+        mock_w3.eth.get_block.return_value = {"baseFeePerGas": 100_000_000}
+        mock_w3.to_wei.return_value = 50_000_000
+        mock_w3.from_wei.return_value = Decimal("0.15")
+        mock_w3.eth.get_balance.return_value = 10**18
+        mock_w3.eth.get_transaction_count.return_value = 5
+
+        with patch.object(self.engine, "simulate_live_arbitrage", return_value=mock_sim), \
+             patch.object(self.engine, "get_working_web3", return_value=mock_w3):
+            res = self.engine.execute_live_arbitrage(eval_res, dry_run=True)
+            self.assertTrue(res.success)
+            self.assertEqual(res.mode, "dry-run")
+            self.assertEqual(res.gas_used, 310_000)
+
+    def test_format_reports(self):
+        sim_ok = SimulationResult(
+            success=True,
+            estimated_gas=280_000,
+            native_value_wei=1000,
+            min_profit_raw=1_000_000,
+            order_nonce=15,
+            order_deadline=1790000000,
+            maintainer_signature="0x123",
+        )
+        sim_rep = format_simulation_report(sim_ok, "0xExecutor", "0xOperator")
+        self.assertIn("PASSED", sim_rep)
+        self.assertIn("280,000", sim_rep)
+
+        exec_res = ExecutionResult(
+            mode="dry-run",
+            success=True,
+            simulation=sim_ok,
+        )
+        exec_rep = format_execution_report(exec_res)
+        self.assertIn("DRY-RUN", exec_rep)
+        self.assertIn("PASSED", exec_rep)
 
 
 if __name__ == "__main__":

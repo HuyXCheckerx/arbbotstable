@@ -33,6 +33,11 @@ try:
 except ImportError:
     pass
 
+try:
+    from web3 import Web3
+except ImportError:
+    Web3 = None
+
 import requests
 
 # Contract Addresses on Ethereum Mainnet
@@ -67,6 +72,104 @@ DEFAULT_RPC_URLS = [
     "https://eth.drpc.org",
     "https://ethereum.publicnode.com",
 ]
+
+EXECUTOR_ABI = [
+    {
+        "inputs": [{"internalType": "address", "name": "token", "type": "address"}],
+        "name": "supportsLoanToken",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "loanAmount", "type": "uint256"},
+            {"internalType": "address", "name": "loanToken", "type": "address"},
+            {"internalType": "address", "name": "intermediateToken", "type": "address"},
+            {
+                "components": [
+                    {"internalType": "address", "name": "target", "type": "address"},
+                    {"internalType": "address", "name": "allowanceTarget", "type": "address"},
+                    {"internalType": "uint256", "name": "sellAmount", "type": "uint256"},
+                    {"internalType": "uint256", "name": "value", "type": "uint256"},
+                    {"internalType": "bytes", "name": "data", "type": "bytes"},
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.MatchaRoute",
+                "name": "matcha",
+                "type": "tuple",
+            },
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint64", "name": "deadline", "type": "uint64"},
+                    {"internalType": "uint256", "name": "nonce", "type": "uint256"},
+                    {"internalType": "bytes", "name": "maintainerSignature", "type": "bytes"},
+                    {"internalType": "uint256", "name": "executionFeeNative", "type": "uint256"},
+                ],
+                "internalType": "struct MorphoMatchaStableArbUsdc.StableOrder",
+                "name": "stable",
+                "type": "tuple",
+            },
+            {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+        ],
+        "name": "executeArbitrageWithTokens",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+]
+
+ERROR_SELECTORS: dict[str, str] = {
+    "0xfcf3a30b": "InvalidLoanToken(): Token is not in the contract's supported whitelist",
+    "0x82b42900": "NotOwner(): Caller is not the executor owner",
+    "0x3565bc94": "WrongChain(): Chain ID is not 1 (Ethereum Mainnet)",
+    "0xe6c4247b": "InvalidAddress(): Zero address passed",
+    "0x2c5211c6": "InvalidAmount(): Loan or swap amount is zero",
+    "0x201445bf": "InvalidRoute(): Route parameter mismatch or expired order",
+    "0x2c6b41e7": "InvalidNativeValue(): Native ETH msg.value mismatch",
+    "0xb25d0c07": "InvalidCallback(): Unauthorized Morpho/Aave callback",
+    "0x1f2c2992": "InsufficientMatchaOutput(): Received less USDP from DEX than required",
+    "0x42f2b4c2": "InsufficientProfit(): Profit after repayment below minProfit threshold",
+    "0x98150ea4": "TokenCallFailed(): ERC20 transfer/approve failed",
+    "0x90b98a11": "ExternalCallFailed(): External DEX or Stable call failed",
+}
+
+
+@dataclass
+class SimulationResult:
+    success: bool
+    estimated_gas: int
+    native_value_wei: int
+    min_profit_raw: int
+    order_nonce: int | None
+    order_deadline: int | None
+    maintainer_signature: str | None
+    error_selector: str | None = None
+    error_message: str | None = None
+    remedy: str | None = None
+    raw_error: str | None = None
+
+
+@dataclass
+class ExecutionResult:
+    mode: str  # "dry-run" | "live"
+    success: bool
+    simulation: SimulationResult
+    tx_hash: str | None = None
+    block_number: int | None = None
+    gas_used: int | None = None
+    effective_gas_price_gwei: Decimal | None = None
+    actual_gas_cost_usd: Decimal | None = None
+    net_realized_profit_usd: Decimal | None = None
+    etherscan_url: str | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -107,18 +210,22 @@ class ArbEvaluation:
 class USDPTestEngine:
     def __init__(
         self,
-        executor: str = DEFAULT_EXECUTOR,
+        executor: str | None = None,
         operator: str | None = None,
         rpc_url: str | None = None,
         timeout: float = 12.0,
     ):
-        self.executor = executor
+        self.executor = (
+            executor
+            or os.getenv("ETH_ARB_STABLECOIN_EXECUTOR")
+            or os.getenv("ETH_EXECUTOR_ADDRESS")
+            or DEFAULT_EXECUTOR
+        )
         self.operator = operator or os.getenv("ETH_OPERATOR_ADDRESS")
         self.timeout = timeout
         
         env_rpc = os.getenv("ETH_RPC_URL")
         self.rpc_urls = [r for r in ([rpc_url] if rpc_url else []) + ([env_rpc] if env_rpc else []) + DEFAULT_RPC_URLS if r]
-        
         self.okx_key = os.getenv("OKX_API_KEY", "afbd1cbb-fb82-4c24-9b50-c28823cd8001")
         self.okx_secret = os.getenv("OKX_SECRET_KEY", "E41ADC9119A47896A8ABE0E752983B31")
         self.okx_passphrase = os.getenv("OKX_PASSPHRASE", "Huypro159!")
@@ -128,6 +235,18 @@ class USDPTestEngine:
         self.session.headers.update({"accept": "application/json", "user-agent": "arbbot-usdp-test/1.0"})
         self._cookies_injected = False
         self._bridge_disabled_until = 0.0
+
+    def get_working_web3(self) -> Any:
+        if Web3 is None:
+            raise RuntimeError("web3 library is required for live simulation and execution. Run: pip install web3")
+        for url in self.rpc_urls:
+            try:
+                cand = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": self.timeout}))
+                if cand.is_connected():
+                    return cand
+            except Exception:
+                continue
+        raise RuntimeError(f"All RPC endpoints failed to connect for Web3: {self.rpc_urls}")
 
     def _rpc_call(self, method: str, params: list[Any]) -> Any:
         last_err = None
@@ -437,7 +556,7 @@ class USDPTestEngine:
             except Exception:
                 return self.quote_dex_velora(usdc_amount, slippage_bps)
 
-    def quote_stable(self, usdp_amount: Decimal) -> StableQuote:
+    def quote_stable(self, usdp_amount: Decimal, attempts: int = 3) -> StableQuote:
         """Query Stable.com status for swapping USDP -> USDC on Ethereum."""
         headers = {
             "origin": "https://stable.com",
@@ -456,35 +575,43 @@ class USDPTestEngine:
             "addressTo": self.executor,
             "gasLess": False,
         }
-        resp = self.session.post(
-            f"{STABLE_BASE_URL}/swap/status",
-            json=body,
-            headers=headers,
-            timeout=self.timeout,
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Stable.com /swap/status HTTP {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        asset = data.get("asset") or {}
-        
-        amount_in = Decimal(str(asset.get("amountFrom", amount_str)))
-        amount_out = Decimal(str(asset.get("amountTo", amount_str)))
-        balance = Decimal(str(asset.get("balance", "0")))
-        min_order = Decimal(str(asset.get("min", "1000")))
-        token_fee = Decimal(str(asset.get("tokenFee", "0")))
-        native_fee_usd = Decimal(str(asset.get("nativeFeeUsd", "0")))
-        
-        return StableQuote(
-            amount_in_human=amount_in,
-            amount_out_human=amount_out,
-            pool_balance_human=balance,
-            min_order_human=min_order,
-            token_fee_human=token_fee,
-            native_fee_usd=native_fee_usd,
-            raw_response=data,
-        )
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = self.session.post(
+                    f"{STABLE_BASE_URL}/swap/status",
+                    json=body,
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Stable.com /swap/status HTTP {resp.status_code}: {resp.text[:200]}")
+                data = resp.json()
+                asset = data.get("asset") or {}
+                
+                amount_in = Decimal(str(asset.get("amountFrom", amount_str)))
+                amount_out = Decimal(str(asset.get("amountTo", amount_str)))
+                balance = Decimal(str(asset.get("balance", "0")))
+                min_order = Decimal(str(asset.get("min", "1000")))
+                token_fee = Decimal(str(asset.get("tokenFee", "0")))
+                native_fee_usd = Decimal(str(asset.get("nativeFeeUsd", "0")))
+                
+                return StableQuote(
+                    amount_in_human=amount_in,
+                    amount_out_human=amount_out,
+                    pool_balance_human=balance,
+                    min_order_human=min_order,
+                    token_fee_human=token_fee,
+                    native_fee_usd=native_fee_usd,
+                    raw_response=data,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    time.sleep(0.4 * attempt)
+        raise RuntimeError(f"Failed to quote Stable.com after {attempts} attempts: {last_exc}")
 
-    def create_stable_order(self, usdp_amount: Decimal) -> dict[str, Any]:
+    def create_stable_order(self, usdp_amount: Decimal, attempts: int = 3) -> dict[str, Any]:
         """Create singleChain order on Stable.com for maintainer signature."""
         headers = {
             "origin": "https://stable.com",
@@ -505,19 +632,27 @@ class USDPTestEngine:
             "device": str(uuid.uuid4()),
             "gasLess": False,
         }
-        resp = self.session.post(
-            f"{STABLE_BASE_URL}/swap/create/singleChain",
-            json=body,
-            headers=headers,
-            timeout=self.timeout,
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Stable.com order creation HTTP {resp.status_code}: {resp.text[:200]}")
-        res = resp.json()
-        data = res.get("data")
-        if not data or not data.get("maintainerSignature"):
-            raise RuntimeError(f"Stable.com did not return maintainerSignature: {res}")
-        return data
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = self.session.post(
+                    f"{STABLE_BASE_URL}/swap/create/singleChain",
+                    json=body,
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Stable.com order creation HTTP {resp.status_code}: {resp.text[:200]}")
+                res = resp.json()
+                data = res.get("data")
+                if not data or not data.get("maintainerSignature"):
+                    raise RuntimeError(f"Stable.com did not return maintainerSignature: {res}")
+                return data
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    time.sleep(0.5 * attempt)
+        raise RuntimeError(f"Failed to create Stable.com order after {attempts} attempts: {last_exc}")
 
     def evaluate_arbitrage(
         self,
@@ -580,6 +715,333 @@ class USDPTestEngine:
             if current <= max_amount and delay > 0:
                 time.sleep(delay)
         return results
+
+    def simulate_live_arbitrage(
+        self,
+        evaluation: ArbEvaluation,
+        order_data: dict[str, Any] | None = None,
+        min_profit_usdc: Decimal = Decimal("1.0"),
+    ) -> SimulationResult:
+        """Run pre-flight on-chain simulation (eth_call) against Ethereum mainnet."""
+        w3 = self.get_working_web3()
+        executor_cs = w3.to_checksum_address(self.executor)
+
+        # Determine operator address
+        operator_addr = self.operator
+        if not operator_addr:
+            priv_key = os.getenv("ETH_OPERATOR_PRIVATE_KEY")
+            if priv_key:
+                try:
+                    operator_addr = w3.eth.account.from_key(priv_key).address
+                except Exception:
+                    pass
+        if not operator_addr:
+            operator_addr = "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C"
+        operator_cs = w3.to_checksum_address(operator_addr)
+
+        # Check executor bytecode
+        try:
+            code = w3.eth.get_code(executor_cs)
+            if len(code) == 0:
+                return SimulationResult(
+                    success=False,
+                    estimated_gas=0,
+                    native_value_wei=0,
+                    min_profit_raw=0,
+                    order_nonce=None,
+                    order_deadline=None,
+                    maintainer_signature=None,
+                    error_message=f"Executor contract {executor_cs} has no deployed bytecode on Ethereum mainnet",
+                    remedy="Deploy the contract using python deploy_usdp_executor.py --send --confirm-mainnet DEPLOY_EXECUTOR",
+                )
+        except Exception as exc:
+            return SimulationResult(
+                success=False,
+                estimated_gas=0,
+                native_value_wei=0,
+                min_profit_raw=0,
+                order_nonce=None,
+                order_deadline=None,
+                maintainer_signature=None,
+                error_message=f"Failed to check executor code: {exc}",
+                remedy="Check RPC connection and executor address configuration",
+            )
+
+        # Check contract owner
+        contract = w3.eth.contract(address=executor_cs, abi=EXECUTOR_ABI)
+        try:
+            owner_cs = w3.to_checksum_address(contract.functions.owner().call())
+            if owner_cs.lower() != operator_cs.lower():
+                return SimulationResult(
+                    success=False,
+                    estimated_gas=0,
+                    native_value_wei=0,
+                    min_profit_raw=0,
+                    order_nonce=None,
+                    order_deadline=None,
+                    maintainer_signature=None,
+                    error_selector="0x82b42900",
+                    error_message=f"Operator {operator_cs} is not the owner of executor {executor_cs} (owner is {owner_cs})",
+                    remedy="Configure ETH_OPERATOR_PRIVATE_KEY for the executor owner wallet",
+                )
+        except Exception:
+            pass
+
+        # Check if contract supports USDP loan token
+        try:
+            is_supported = contract.functions.supportsLoanToken(w3.to_checksum_address(USDP_ADDRESS)).call()
+            if not is_supported:
+                return SimulationResult(
+                    success=False,
+                    estimated_gas=0,
+                    native_value_wei=0,
+                    min_profit_raw=0,
+                    order_nonce=None,
+                    order_deadline=None,
+                    maintainer_signature=None,
+                    error_selector="0xfcf3a30b",
+                    error_message=f"InvalidLoanToken(): Executor contract {executor_cs} whitelists [USDC, PYUSD, USDG, USDT], but does not yet whitelist USDP ({USDP_ADDRESS})",
+                    remedy="Deploy updated USDP executor: python deploy_usdp_executor.py --send --confirm-mainnet DEPLOY_EXECUTOR",
+                )
+        except Exception:
+            pass
+
+        # Ensure order exists
+        if order_data is None:
+            order_data = self.create_stable_order(evaluation.dex_quote.buy_amount_human)
+
+        raw_sig = order_data["maintainerSignature"]
+        sig_bytes = bytes.fromhex(raw_sig[2:] if raw_sig.startswith("0x") else raw_sig)
+        data_hex = evaluation.dex_quote.data
+        data_bytes = bytes.fromhex(data_hex[2:] if data_hex.startswith("0x") else data_hex)
+        native_fee = int(order_data.get("executionFeeNative") or order_data.get("nativeFee") or 0)
+        native_val = int(evaluation.dex_quote.value) + native_fee
+
+        matcha_tuple = (
+            w3.to_checksum_address(evaluation.dex_quote.target),
+            w3.to_checksum_address(evaluation.dex_quote.allowance_target),
+            int(evaluation.dex_quote.sell_amount_raw),
+            int(evaluation.dex_quote.value),
+            data_bytes,
+        )
+
+        stable_tuple = (
+            int(evaluation.dex_quote.buy_amount_raw),
+            int(order_data["deadline"]),
+            int(order_data["nonce"]),
+            sig_bytes,
+            native_fee,
+        )
+
+        min_profit_raw = int(min_profit_usdc * Decimal(10**USDC_DECIMALS))
+
+        fn = contract.functions.executeArbitrageWithTokens(
+            int(evaluation.dex_quote.sell_amount_raw),
+            w3.to_checksum_address(USDC_ADDRESS),
+            w3.to_checksum_address(USDP_ADDRESS),
+            matcha_tuple,
+            stable_tuple,
+            min_profit_raw,
+        )
+
+        call_params = {"from": operator_cs, "value": native_val}
+        try:
+            fn.call(call_params)
+            estimated_gas = fn.estimate_gas(call_params)
+            return SimulationResult(
+                success=True,
+                estimated_gas=int(estimated_gas),
+                native_value_wei=native_val,
+                min_profit_raw=min_profit_raw,
+                order_nonce=int(order_data["nonce"]),
+                order_deadline=int(order_data["deadline"]),
+                maintainer_signature=str(order_data["maintainerSignature"]),
+            )
+        except Exception as exc:
+            err_str = str(exc)
+            matched_sel = None
+            for sel in ERROR_SELECTORS:
+                if sel in err_str:
+                    matched_sel = sel
+                    break
+
+            remedy = None
+            if matched_sel == "0xfcf3a30b":
+                remedy = "Deploy updated MorphoMatchaStableArbUsdc contract: python deploy_usdp_executor.py --send --confirm-mainnet DEPLOY_EXECUTOR"
+            elif matched_sel == "0x1f2c2992":
+                remedy = "DEX output slipped below minimum required. Try slightly higher slippage or smaller size."
+            elif matched_sel == "0x42f2b4c2":
+                remedy = "Profit after repayment was below minProfit threshold. Lower min-profit-usd."
+
+            error_msg = ERROR_SELECTORS.get(matched_sel, f"eth_call reverted: {err_str}") if matched_sel else f"eth_call reverted: {err_str}"
+            return SimulationResult(
+                success=False,
+                estimated_gas=0,
+                native_value_wei=native_val,
+                min_profit_raw=min_profit_raw,
+                order_nonce=int(order_data.get("nonce", 0)),
+                order_deadline=int(order_data.get("deadline", 0)),
+                maintainer_signature=str(order_data.get("maintainerSignature", "")),
+                error_selector=matched_sel,
+                error_message=error_msg,
+                remedy=remedy,
+                raw_error=err_str,
+            )
+
+    def execute_live_arbitrage(
+        self,
+        evaluation: ArbEvaluation,
+        order_data: dict[str, Any] | None = None,
+        min_profit_usdc: Decimal = Decimal("1.0"),
+        gas_multiplier: Decimal = Decimal("1.15"),
+        max_fee_gwei: Decimal | None = None,
+        priority_fee_gwei: Decimal = Decimal("0.05"),
+        receipt_timeout: int = 60,
+        dry_run: bool = False,
+    ) -> ExecutionResult:
+        """Execute or dry-run the USDP arbitrage transaction on Ethereum mainnet."""
+        # 1. Run Pre-flight On-Chain Simulation
+        sim = self.simulate_live_arbitrage(
+            evaluation=evaluation,
+            order_data=order_data,
+            min_profit_usdc=min_profit_usdc,
+        )
+
+        if not sim.success:
+            return ExecutionResult(
+                mode="dry-run" if dry_run else "live",
+                success=False,
+                simulation=sim,
+                error=sim.error_message,
+            )
+
+        w3 = self.get_working_web3()
+        private_key = os.getenv("ETH_OPERATOR_PRIVATE_KEY", "").strip()
+        if not private_key and not dry_run:
+            return ExecutionResult(
+                mode="dry-run",
+                success=False,
+                simulation=sim,
+                error="ETH_OPERATOR_PRIVATE_KEY is missing from environment; cannot sign transaction",
+            )
+
+        if private_key:
+            account = w3.eth.account.from_key(private_key)
+            operator_cs = account.address
+        else:
+            operator_cs = w3.to_checksum_address(self.operator or "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C")
+
+        executor_cs = w3.to_checksum_address(self.executor)
+        contract = w3.eth.contract(address=executor_cs, abi=EXECUTOR_ABI)
+
+        raw_sig = sim.maintainer_signature or ""
+        sig_bytes = bytes.fromhex(raw_sig[2:] if raw_sig.startswith("0x") else raw_sig)
+        data_hex = evaluation.dex_quote.data
+        data_bytes = bytes.fromhex(data_hex[2:] if data_hex.startswith("0x") else data_hex)
+
+        native_val = sim.native_value_wei
+        native_fee = native_val - int(evaluation.dex_quote.value)
+
+        matcha_tuple = (
+            w3.to_checksum_address(evaluation.dex_quote.target),
+            w3.to_checksum_address(evaluation.dex_quote.allowance_target),
+            int(evaluation.dex_quote.sell_amount_raw),
+            int(evaluation.dex_quote.value),
+            data_bytes,
+        )
+
+        stable_tuple = (
+            int(evaluation.dex_quote.buy_amount_raw),
+            int(sim.order_deadline or 0),
+            int(sim.order_nonce or 0),
+            sig_bytes,
+            native_fee,
+        )
+
+        fn = contract.functions.executeArbitrageWithTokens(
+            int(evaluation.dex_quote.sell_amount_raw),
+            w3.to_checksum_address(USDC_ADDRESS),
+            w3.to_checksum_address(USDP_ADDRESS),
+            matcha_tuple,
+            stable_tuple,
+            sim.min_profit_raw,
+        )
+
+        # 2. Gas settings (EIP-1559)
+        gas_limit = int((Decimal(sim.estimated_gas) * gas_multiplier).to_integral_value())
+        latest = w3.eth.get_block("latest")
+        base_fee = int(latest.get("baseFeePerGas", w3.eth.gas_price))
+        priority_fee_wei = int(w3.to_wei(priority_fee_gwei, "gwei"))
+
+        if max_fee_gwei is not None:
+            max_fee_wei = int(w3.to_wei(max_fee_gwei, "gwei"))
+        else:
+            max_fee_wei = int(Decimal(base_fee) * Decimal("1.35")) + priority_fee_wei
+
+        if max_fee_wei < priority_fee_wei:
+            max_fee_wei = base_fee + priority_fee_wei
+
+        nonce = w3.eth.get_transaction_count(operator_cs, "pending")
+
+        tx_dict = {
+            "chainId": 1,
+            "from": operator_cs,
+            "to": executor_cs,
+            "value": native_val,
+            "data": fn._encode_transaction_data(),
+            "nonce": nonce,
+            "gas": gas_limit,
+            "maxFeePerGas": max_fee_wei,
+            "maxPriorityFeePerGas": priority_fee_wei,
+            "type": 2,
+        }
+
+        # 3. Check operator balance
+        bal = w3.eth.get_balance(operator_cs)
+        max_cost = gas_limit * max_fee_wei + native_val
+        if bal < max_cost and not dry_run:
+            return ExecutionResult(
+                mode="live",
+                success=False,
+                simulation=sim,
+                error=f"Operator balance {w3.from_wei(bal, 'ether')} ETH is insufficient for maximum tx cost {w3.from_wei(max_cost, 'ether')} ETH",
+            )
+
+        if dry_run:
+            return ExecutionResult(
+                mode="dry-run",
+                success=True,
+                simulation=sim,
+                gas_used=sim.estimated_gas,
+                effective_gas_price_gwei=Decimal(w3.from_wei(base_fee + priority_fee_wei, "gwei")),
+            )
+
+        # 4. Live Broadcast & Receipt Wait
+        signed = account.sign_transaction(tx_dict)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        tx_hex = tx_hash.hex()
+        etherscan_url = f"https://etherscan.io/tx/{tx_hex}"
+
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=receipt_timeout)
+        success = (receipt.status == 1)
+        gas_used = int(receipt.gasUsed)
+        effective_gas_price = Decimal(receipt.effectiveGasPrice) / Decimal(10**9)
+        eth_usd = self.get_eth_usd()
+        actual_gas_cost_usd = (Decimal(gas_used) * effective_gas_price / Decimal(10**9)) * eth_usd
+
+        return ExecutionResult(
+            mode="live",
+            success=success,
+            simulation=sim,
+            tx_hash=tx_hex,
+            block_number=int(receipt.blockNumber),
+            gas_used=gas_used,
+            effective_gas_price_gwei=effective_gas_price,
+            actual_gas_cost_usd=actual_gas_cost_usd,
+            net_realized_profit_usd=evaluation.gross_profit_usdc - actual_gas_cost_usd,
+            etherscan_url=etherscan_url,
+            error=None if success else "Transaction reverted on-chain during execution",
+        )
 
 
 def format_evaluation(eval_result: ArbEvaluation, gas_price_gwei: Decimal, eth_usd: Decimal) -> str:
@@ -673,9 +1135,80 @@ def format_scaling_table(
     return "\n".join(lines)
 
 
+def format_simulation_report(sim: SimulationResult, executor: str, operator: str | None) -> str:
+    lines = [
+        "=" * 86,
+        "          LIVE RUN ENGINE: PRE-FLIGHT ON-CHAIN SIMULATION (eth_call)",
+        "=" * 86,
+        f"Executor:        {executor}",
+        f"Operator:        {operator or 'Auto-resolved'}",
+        f"Stable Nonce:    {sim.order_nonce if sim.order_nonce is not None else 'N/A'}",
+        f"Deadline:        {sim.order_deadline if sim.order_deadline is not None else 'N/A'}",
+        f"Native Value:    {sim.native_value_wei} wei ({Decimal(sim.native_value_wei) / Decimal(10**18):.6f} ETH)",
+    ]
+    if sim.success:
+        lines.extend([
+            "Simulation:      PASSED (0 Reverts)",
+            f"Estimated Gas:   {sim.estimated_gas:,} gas units",
+            "Pre-Flight:      READY FOR BROADCAST",
+        ])
+    else:
+        lines.extend([
+            "Simulation:      FAILED (Reverted)",
+            f"Error Selector:  {sim.error_selector or 'Unknown'}",
+            f"Diagnostics:     {sim.error_message}",
+        ])
+        if sim.remedy:
+            lines.append(f"Remedy:          {sim.remedy}")
+    lines.append("=" * 86)
+    return "\n".join(lines)
+
+
+def format_execution_report(result: ExecutionResult) -> str:
+    lines = [
+        "=" * 86,
+        f"          LIVE RUN ENGINE: EXECUTION SUMMARY ({result.mode.upper()})",
+        "=" * 86,
+    ]
+    if result.mode == "dry-run":
+        if result.success:
+            lines.extend([
+                "Mode:            DRY-RUN (Simulated on-chain; no transaction broadcast)",
+                "Pre-Flight:      PASSED",
+                f"Estimated Gas:   {result.simulation.estimated_gas:,} units",
+                "Action:          To broadcast live transaction, run with: --live --confirm-live LIVE",
+            ])
+        else:
+            lines.extend([
+                "Mode:            DRY-RUN",
+                "Pre-Flight:      FAILED",
+                f"Error:           {result.error}",
+            ])
+    else:
+        if result.success:
+            lines.extend([
+                "Status:          TRANSACTION MINED & CONFIRMED (SUCCESS)",
+                f"Tx Hash:         {result.tx_hash}",
+                f"Block Number:    {result.block_number}",
+                f"Gas Used:        {result.gas_used:,}",
+                f"Gas Price:       {result.effective_gas_price_gwei:.3f} Gwei",
+                f"Actual Gas Cost: ${result.actual_gas_cost_usd:.2f} USD",
+                f"Net Profit:      ${result.net_realized_profit_usd:.2f} USD",
+                f"Etherscan:       {result.etherscan_url}",
+            ])
+        else:
+            lines.extend([
+                "Status:          TRANSACTION FAILED",
+                f"Tx Hash:         {result.tx_hash or 'None'}",
+                f"Error:           {result.error}",
+            ])
+    lines.append("=" * 86)
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Standalone USDP Arbitrage Test Engine (Scales from 10k to 100k & prints top yield)"
+        description="Standalone USDP Arbitrage Test & Live Run Engine"
     )
     parser.add_argument(
         "--amount",
@@ -719,6 +1252,63 @@ def main(argv: list[str] | None = None) -> int:
         help="Also call Stable.com /swap/create/singleChain on the winning route",
     )
     parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Enable live run engine (runs pre-flight simulation and executes if confirmed)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run full on-chain pre-flight simulation and order creation without broadcasting",
+    )
+    parser.add_argument(
+        "--send",
+        action="store_true",
+        help="Broadcast live transaction without requiring safety confirmation token",
+    )
+    parser.add_argument(
+        "--confirm-live",
+        type=str,
+        default="",
+        help="Confirmation token for live execution (e.g. --confirm-live LIVE)",
+    )
+    parser.add_argument(
+        "--min-profit-usd",
+        type=Decimal,
+        default=Decimal("1.0"),
+        help="Minimum net profit in USD required to trigger execution (default: 1.0)",
+    )
+    parser.add_argument(
+        "--executor",
+        type=str,
+        default=None,
+        help="Executor contract address override (defaults to ETH_ARB_STABLECOIN_EXECUTOR or DEFAULT_EXECUTOR)",
+    )
+    parser.add_argument(
+        "--gas-multiplier",
+        type=Decimal,
+        default=Decimal("1.15"),
+        help="Gas multiplier on estimated gas (default: 1.15)",
+    )
+    parser.add_argument(
+        "--max-fee-gwei",
+        type=Decimal,
+        default=None,
+        help="Cap on max fee per gas in Gwei",
+    )
+    parser.add_argument(
+        "--priority-fee-gwei",
+        type=Decimal,
+        default=Decimal("0.05"),
+        help="Priority fee in Gwei (default: 0.05)",
+    )
+    parser.add_argument(
+        "--receipt-timeout",
+        type=int,
+        default=60,
+        help="Receipt timeout in seconds (default: 60)",
+    )
+    parser.add_argument(
         "--continuous",
         action="store_true",
         help="Continuously monitor in a loop",
@@ -737,7 +1327,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    engine = USDPTestEngine()
+    engine = USDPTestEngine(executor=args.executor)
     
     while True:
         try:
@@ -767,13 +1357,50 @@ def main(argv: list[str] | None = None) -> int:
                 winner = max(evaluations, key=lambda e: e.net_profit_usd)
 
             order_data = None
-            if args.create_order and winner and winner.is_profitable:
-                order_data = engine.create_stable_order(winner.dex_quote.buy_amount_human)
-                order_nonce = order_data.get("nonce")
-                order_sig = str(order_data.get("maintainerSignature"))[:16] + "..."
+            if (args.create_order or args.live or args.dry_run or args.send) and winner and winner.is_profitable:
+                try:
+                    order_data = engine.create_stable_order(winner.dex_quote.buy_amount_human)
+                    order_nonce = order_data.get("nonce")
+                    order_sig = str(order_data.get("maintainerSignature"))[:16] + "..."
+                except Exception as exc:
+                    order_nonce = f"Failed: {exc}"
+                    order_sig = "N/A"
             else:
                 order_nonce = "N/A"
                 order_sig = "N/A"
+
+            exec_result: ExecutionResult | None = None
+            if (args.live or args.dry_run or args.send) and winner:
+                if not winner.is_profitable or winner.net_profit_usd < args.min_profit_usd:
+                    if not args.json:
+                        print(
+                            f"\n[INFO] Winning route net profit (${winner.net_profit_usd:.2f}) "
+                            f"is below execution threshold (${args.min_profit_usd:.2f}). Skipping execution."
+                        )
+                else:
+                    is_live_broadcast = False
+                    if args.send:
+                        is_live_broadcast = True
+                    elif args.live:
+                        if args.confirm_live.strip().upper() == "LIVE":
+                            is_live_broadcast = True
+                        else:
+                            if not args.json:
+                                print(
+                                    "\n[NOTICE] --live specified without '--confirm-live LIVE'. "
+                                    "Performing pre-flight on-chain simulation (DRY-RUN)."
+                                )
+
+                    exec_result = engine.execute_live_arbitrage(
+                        evaluation=winner,
+                        order_data=order_data,
+                        min_profit_usdc=args.min_profit_usd,
+                        gas_multiplier=args.gas_multiplier,
+                        max_fee_gwei=args.max_fee_gwei,
+                        priority_fee_gwei=args.priority_fee_gwei,
+                        receipt_timeout=args.receipt_timeout,
+                        dry_run=not is_live_broadcast,
+                    )
 
             if args.json:
                 data = {
@@ -799,6 +1426,22 @@ def main(argv: list[str] | None = None) -> int:
                         }
                         for e in evaluations
                     ],
+                    "execution": {
+                        "mode": exec_result.mode,
+                        "success": exec_result.success,
+                        "txHash": exec_result.tx_hash,
+                        "blockNumber": exec_result.block_number,
+                        "gasUsed": exec_result.gas_used,
+                        "etherscanUrl": exec_result.etherscan_url,
+                        "error": exec_result.error,
+                        "simulation": {
+                            "success": exec_result.simulation.success,
+                            "estimatedGas": exec_result.simulation.estimated_gas,
+                            "errorSelector": exec_result.simulation.error_selector,
+                            "errorMessage": exec_result.simulation.error_message,
+                            "remedy": exec_result.simulation.remedy,
+                        } if exec_result and exec_result.simulation else None,
+                    } if exec_result else None,
                 }
                 print(json.dumps(data, indent=2))
             else:
@@ -806,11 +1449,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(format_evaluation(winner, gas_price, eth_usd))
                 else:
                     print(format_scaling_table(evaluations, winner, gas_price, eth_usd))
-                if args.create_order and winner and winner.is_profitable:
+
+                if (args.create_order or args.live or args.dry_run or args.send) and winner and winner.is_profitable:
                     print(f"Verified Stable.com Order for Winner: Nonce={order_nonce}, Signature={order_sig}")
 
+                if exec_result and exec_result.simulation:
+                    print("\n" + format_simulation_report(exec_result.simulation, engine.executor, engine.operator))
+                    print("\n" + format_execution_report(exec_result))
+
         except Exception as exc:
-            print(f"[ERROR] Evaluation failed: {exc}", file=sys.stderr)
+            print(f"[ERROR] Engine run failed: {exc}", file=sys.stderr)
             if not args.continuous:
                 return 1
 

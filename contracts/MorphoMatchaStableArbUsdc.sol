@@ -56,6 +56,7 @@ contract MorphoMatchaStableArbUsdc {
     address public constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
     address public constant PYUSD = 0x6c3ea9036406852006290770BEdFcAbA0e23A0e8;
     address public constant USDG = 0xe343167631d89B6Ffc58B88d6b7fB0228795491D;
+    address public constant USDP = 0x8E870D67F660D95d5be530380D0eC0bd388289E1;
     address public constant STABLE_POOL = 0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da;
 
     struct MatchaRoute {
@@ -568,7 +569,7 @@ contract MorphoMatchaStableArbUsdc {
     }
 
     function _isSupportedToken(address token) private pure returns (bool) {
-        return token == USDC || token == PYUSD || token == USDG || token == USDT;
+        return token == USDC || token == PYUSD || token == USDG || token == USDT || token == USDP;
     }
 
     function _balanceOf(address token) private view returns (uint256 balance) {
