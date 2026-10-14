@@ -873,18 +873,18 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertIsNone(args.pairs)
         self.assertEqual(args.swap_orders, ["dex-first", "stable-first"])
         routes = selected_routes(args.chains, args.pairs, args.swap_orders)
-        self.assertEqual(len(routes), 16)
+        self.assertEqual(len(routes), 20)
 
         eth_routes = [r for r in routes if r.chain == "ethereum"]
         sol_routes = [r for r in routes if r.chain == "solana"]
 
-        self.assertEqual(len(eth_routes), 4)
+        self.assertEqual(len(eth_routes), 8)
         self.assertEqual(len(sol_routes), 12)
 
-        # Ethereum: only PYUSD/USDG and USDG/PYUSD
-        self.assertEqual({r.pair for r in eth_routes}, {"PYUSD/USDG", "USDG/PYUSD"})
-        # No USDC routes on Ethereum
-        self.assertTrue(all("USDC" not in r.pair for r in eth_routes))
+        # Ethereum: USDP pairs and PYUSD/USDG
+        self.assertEqual({r.pair for r in eth_routes}, {"USDC/USDP", "USDP/USDC", "PYUSD/USDG", "USDG/PYUSD"})
+        # USDC routes on Ethereum are specifically paired with USDP
+        self.assertEqual({r.pair for r in eth_routes if "USDC" in r.pair}, {"USDC/USDP", "USDP/USDC"})
 
         # Solana: all pairs between USDC, PYUSD, and USDG
         self.assertEqual(
@@ -895,16 +895,22 @@ class CrosschainSniperTests(unittest.TestCase):
     def test_arbitrage_groups_prioritizes_primary_loan_for_eth_and_solana(self):
         routes = selected_routes(["ethereum", "solana"])
         groups = arbitrage_groups(routes)
-        self.assertEqual(len(groups), 8)  # 2 on eth, 6 on sol
+        self.assertEqual(len(groups), 10)  # 4 on eth, 6 on sol
 
         # Each group has exactly 2 routes (1 preferred, 1 fallback)
         self.assertTrue(all(len(g) == 2 for g in groups))
 
-        # On Ethereum: PYUSD is always preferred (index 0), USDG is fallback (index 1)
+        # On Ethereum:
+        # For USDP pairs, USDC is preferred (index 0), USDP is fallback (index 1)
+        # For PYUSD/USDG, PYUSD is preferred (index 0), USDG is fallback (index 1)
         for g in groups:
             if g[0].chain == "ethereum":
-                self.assertEqual(g[0].loan, "PYUSD")
-                self.assertEqual(g[1].loan, "USDG")
+                if "USDP" in g[0].pair:
+                    self.assertEqual(g[0].loan, "USDC")
+                    self.assertEqual(g[1].loan, "USDP")
+                else:
+                    self.assertEqual(g[0].loan, "PYUSD")
+                    self.assertEqual(g[1].loan, "USDG")
 
         # On Solana:
         # For pairs with USDC, USDC is always preferred (index 0)
@@ -924,11 +930,16 @@ class CrosschainSniperTests(unittest.TestCase):
 
         # Normal scan: 8 routes active (2 on ETH loaning PYUSD; on SOL: 4 loaning USDC, 2 loaning PYUSD)
         active = active_routes(groups, {}, now=100.0)
-        self.assertEqual(len(active), 8)
+        self.assertEqual(len(active), 10)
         eth_active = [r for r in active if r.chain == "ethereum"]
         sol_active = [r for r in active if r.chain == "solana"]
-        self.assertEqual(len(eth_active), 2)
-        self.assertTrue(all(r.loan == "PYUSD" for r in eth_active))
+        self.assertEqual(len(eth_active), 4)
+        eth_usdc_active = [r for r in eth_active if "USDP" in r.pair]
+        eth_pyusd_active = [r for r in eth_active if "USDP" not in r.pair]
+        self.assertEqual(len(eth_usdc_active), 2)
+        self.assertTrue(all(r.loan == "USDC" for r in eth_usdc_active))
+        self.assertEqual(len(eth_pyusd_active), 2)
+        self.assertTrue(all(r.loan == "PYUSD" for r in eth_pyusd_active))
         self.assertEqual(len(sol_active), 6)
         sol_usdc_active = [r for r in sol_active if "USDC" in r.pair]
         sol_pyusd_active = [r for r in sol_active if "USDC" not in r.pair]
@@ -938,10 +949,10 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertTrue(all(r.loan == "PYUSD" for r in sol_pyusd_active))
 
         # When a preferred route's flash loan capacity / liquidity is blocked:
-        blocked_route = eth_active[0]
+        blocked_route = eth_pyusd_active[0]
         blocked = {blocked_route.key: 200.0}
         fallback_active = active_routes(groups, blocked, now=100.0)
-        self.assertEqual(len(fallback_active), 8)
+        self.assertEqual(len(fallback_active), 10)
         # The blocked PYUSD route is replaced by its USDG twin
         self.assertNotIn(blocked_route, fallback_active)
         self.assertTrue(any(r.chain == "ethereum" and r.loan == "USDG" for r in fallback_active))
@@ -1082,6 +1093,135 @@ class CrosschainSniperTests(unittest.TestCase):
             self.assertEqual(outcome.category, "unprofitable")
             self.assertIn("-2.000000 USDC", outcome.detail)
 
+    def test_run_ethereum_usdp_route_direct_eligible(self):
+        from src.engines.usdp_arb_engine import ArbEvaluation, DexQuote, StableQuote, ExecutionResult, SimulationResult
+        route = Route("ethereum", "USDC/USDP", "dex-first")
+        dex_q = DexQuote(
+            aggregator="meta.matcha",
+            target="0xTarget",
+            allowance_target="0xSpender",
+            sell_amount_raw=10_000_000_000,
+            buy_amount_raw=10_029_474_843_337_594_652_115,
+            buy_amount_human=Decimal("10029.474843"),
+            data="0x1234",
+            value=0,
+            gas_estimate=250_000,
+        )
+        stable_q = StableQuote(
+            amount_in_human=Decimal("10029.474843"),
+            amount_out_human=Decimal("10029.474843"),
+            pool_balance_human=Decimal("200000.0"),
+            min_order_human=Decimal("1000.0"),
+            token_fee_human=Decimal("0.0"),
+            native_fee_usd=Decimal("0.10"),
+            raw_response={},
+        )
+        mock_eval = ArbEvaluation(
+            loan_amount_usdc=Decimal("10000.0"),
+            dex_quote=dex_q,
+            stable_quote=stable_q,
+            gross_profit_usdc=Decimal("29.474843"),
+            gas_estimate_usd=Decimal("0.194843"),
+            net_profit_usd=Decimal("29.18"),
+            is_profitable=True,
+        )
+        mock_sim = SimulationResult(
+            success=True,
+            estimated_gas=1_430_000,
+            native_value_wei=0,
+            min_profit_raw=4_000_001,
+            order_nonce=123,
+            order_deadline=1800000000,
+            maintainer_signature="0x" + "bb" * 65,
+        )
+        mock_exec = ExecutionResult(
+            mode="dry-run",
+            success=True,
+            simulation=mock_sim,
+        )
+
+        with patch("src.engines.usdp_arb_engine.USDPTestEngine.evaluate_arbitrage", return_value=mock_eval), \
+             patch("src.engines.usdp_arb_engine.USDPTestEngine.create_stable_order", return_value={"nonce": 123}), \
+             patch("src.engines.usdp_arb_engine.USDPTestEngine.execute_live_arbitrage", return_value=mock_exec):
+            outcome = run_ethereum_route_direct(
+                route,
+                live=False,
+                execution_floor=Decimal("4.000001"),
+                timeout_seconds=30.0,
+            )
+            self.assertEqual(outcome.category, "eligible")
+            self.assertEqual(outcome.gross_profit, "29.474843")
+            self.assertEqual(outcome.net_profit, "29.180000")
+            self.assertIn("guaranteed net 29.180000 USDC", outcome.detail)
+
+    def test_run_ethereum_usdp_route_direct_below_floor(self):
+        from src.engines.usdp_arb_engine import ArbEvaluation, DexQuote, StableQuote
+        route = Route("ethereum", "USDC/USDP", "dex-first")
+        dex_q = DexQuote("meta.matcha", "0xTarget", "0xSpender", 10_000_000_000, 10_002_000_000_000_000_000_000, Decimal("10002.0"), "0x", 0, 200_000)
+        stable_q = StableQuote(Decimal("10002.0"), Decimal("10002.0"), Decimal("200000.0"), Decimal("1000.0"), Decimal("0.0"), Decimal("0.10"), {})
+        mock_eval = ArbEvaluation(Decimal("10000.0"), dex_q, stable_q, Decimal("2.0"), Decimal("0.20"), Decimal("1.70"), True)
+
+        with patch("src.engines.usdp_arb_engine.USDPTestEngine.evaluate_arbitrage", return_value=mock_eval):
+            outcome = run_ethereum_route_direct(
+                route,
+                live=False,
+                execution_floor=Decimal("4.000001"),
+                timeout_seconds=30.0,
+            )
+            self.assertEqual(outcome.category, "below-floor")
+            self.assertIn("is below execution floor 4.000001 USDC", outcome.detail)
+
+    def test_run_ethereum_usdp_route_direct_fast_fails_stable_first_and_usdp_loan(self):
+        stable_first = Route("ethereum", "USDC/USDP", "stable-first")
+        outcome1 = run_ethereum_route_direct(stable_first, live=False, execution_floor=Decimal("4.000001"), timeout_seconds=30.0)
+        self.assertEqual(outcome1.category, "unprofitable")
+        self.assertIn("discount", outcome1.detail)
+
+        usdp_loan = Route("ethereum", "USDP/USDC", "dex-first")
+        outcome2 = run_ethereum_route_direct(usdp_loan, live=False, execution_floor=Decimal("4.000001"), timeout_seconds=30.0)
+        self.assertEqual(outcome2.category, "flash-liquidity")
+        self.assertIn("unsupported", outcome2.detail)
+
+    def test_build_route_invocation_for_usdp(self):
+        route = Route("ethereum", "USDC/USDP", "dex-first")
+        inv = build_route_invocation(route, live=True, execution_floor=Decimal("4.000001"))
+        cmd = list(inv.command)
+        self.assertTrue(cmd[1].endswith("usdp_arb.py"))
+        self.assertEqual(cmd[cmd.index("--loan-token") + 1], "USDC")
+        self.assertEqual(cmd[cmd.index("--intermediate-token") + 1], "USDP")
+        self.assertEqual(cmd[cmd.index("--swap-order") + 1], "dex-first")
+        self.assertEqual(cmd[cmd.index("--amount") + 1], "10000")
+        self.assertEqual(cmd[cmd.index("--min-profit-usd") + 1], "4.000001")
+        self.assertEqual(cmd[cmd.index("--leg1-buffer-bps") + 1], "5")
+        self.assertIn("--live", cmd)
+        self.assertIn("LIVE", cmd)
+
+    def test_execution_reference_with_usdp_json(self):
+        import json
+        usdp_json = json.dumps({
+            "timestamp": 1728800000,
+            "grossProfit": "29.474843",
+            "predictedNetProfit": "29.18",
+            "execution": {
+                "mode": "live",
+                "success": True,
+                "txHash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "etherscanUrl": "https://etherscan.io/tx/0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            },
+            "winner": {
+                "loanAmountUsdc": 10000.0,
+                "grossProfitUsdc": 29.474843,
+                "netProfitUsd": 29.18
+            }
+        })
+        route = Route("ethereum", "USDC/USDP", "dex-first")
+        status, link = execution_reference(route, usdp_json)
+        self.assertEqual(status, "confirmed")
+        self.assertEqual(link, "https://etherscan.io/tx/0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+        gross, net = profit_metrics(route, usdp_json)
+        self.assertEqual(gross, "29.474843")
+        self.assertEqual(net, "29.18")
+
     def test_parallel_route_scanning_evaluates_all_eligible_routes(self):
         routes = [
             Route("ethereum", "USDC/USDG", "stable-first"),
@@ -1187,15 +1327,15 @@ class EquivalentRouteSchedulingTests(unittest.TestCase):
             Route("ethereum", "PYUSD/USDG", "stable-first").arbitrage_key,
         )
 
-    def test_default_routes_form_twelve_pairs_of_equivalent_routes(self):
+    def test_default_routes_form_sixteen_pairs_of_equivalent_routes(self):
         routes = selected_routes(
             ["ethereum", "solana"],
             list(DEFAULT_ROUTE_PAIRS),
             list(DEFAULT_SWAP_ORDERS),
         )
         groups = arbitrage_groups(routes)
-        self.assertEqual(len(routes), 24)
-        self.assertEqual(len(groups), 12)
+        self.assertEqual(len(routes), 32)
+        self.assertEqual(len(groups), 16)
         self.assertTrue(all(len(group) == 2 for group in groups))
 
     def test_active_routes_prefer_the_first_fundable_route(self):

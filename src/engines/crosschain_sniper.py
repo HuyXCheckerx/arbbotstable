@@ -31,6 +31,9 @@ except ImportError:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if load_dotenv is not None:
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+
 # sniper.py executes this file with runpy, which does not add its directory to
 # sys.path or establish a package. Use the same absolute package imports for
 # that launcher, direct script execution, and python -m execution.
@@ -56,8 +59,12 @@ DEFAULT_ROUTE_PAIRS = tuple(
     for loan in ROUTE_TOKENS
     for counter in ROUTE_TOKENS
     if loan != counter
+) + ("USDC/USDP", "USDP/USDC")
+DEFAULT_ETH_PAIRS = (
+    tuple(p.strip() for p in os.getenv("ETH_ARB_PAIRS").split(",") if p.strip())
+    if os.getenv("ETH_ARB_PAIRS")
+    else ("USDC/USDP", "USDP/USDC", "PYUSD/USDG", "USDG/PYUSD")
 )
-DEFAULT_ETH_PAIRS = ("PYUSD/USDG", "USDG/PYUSD")
 DEFAULT_SOL_PAIRS = (
     "USDC/PYUSD", "PYUSD/USDC",
     "USDC/USDG", "USDG/USDC",
@@ -67,6 +74,20 @@ CHAIN_DEFAULT_PAIRS: dict[str, tuple[str, ...]] = {
     "ethereum": DEFAULT_ETH_PAIRS,
     "solana": DEFAULT_SOL_PAIRS,
 }
+
+
+def get_chain_default_pairs(chain: str) -> tuple[str, ...]:
+    if chain == "ethereum":
+        env_pairs = os.getenv("ETH_ARB_PAIRS")
+        if env_pairs:
+            return tuple(p.strip() for p in env_pairs.split(",") if p.strip())
+        return DEFAULT_ETH_PAIRS
+    if chain == "solana":
+        env_pairs = os.getenv("SOL_ARB_PAIRS")
+        if env_pairs:
+            return tuple(p.strip() for p in env_pairs.split(",") if p.strip())
+        return DEFAULT_SOL_PAIRS
+    return ()
 _consecutive_bridge_failures: int = 0
 _last_bridge_failure_restart: float = 0.0
 
@@ -116,6 +137,13 @@ class Route:
             if provider == "dflow":
                 return "DFlow"
             return "MetaMatcha"
+        if "USDP" in self.pair:
+            provider = (
+                os.environ.get("ETH_USDP_AGGREGATOR")
+                or os.environ.get("ETH_ARB_QUOTE_PROVIDER")
+                or "matcha"
+            ).strip().lower()
+            return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "enso": "Enso", "auto": "Auto"}.get(provider, "MetaMatcha")
         provider = os.environ.get("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
         return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "auto": "Auto"}.get(provider, "MetaMatcha")
 
@@ -304,7 +332,7 @@ def selected_routes(
 ) -> list[Route]:
     routes: list[Route] = []
     for chain in chains:
-        allowed = CHAIN_DEFAULT_PAIRS.get(chain)
+        allowed = get_chain_default_pairs(chain) or CHAIN_DEFAULT_PAIRS.get(chain)
         if pairs is None:
             active_pairs = list(allowed) if allowed is not None else list(DEFAULT_ROUTE_PAIRS)
         elif filter_chain_defaults and allowed is not None:
@@ -326,6 +354,8 @@ FUNDING_UNAVAILABLE_CATEGORIES = frozenset({"flash-liquidity", "flash-conflict",
 def route_preference_priority(r: Route) -> int:
     """Return priority for sorting within an arbitrage group (0 = preferred, 1 = fallback)."""
     if r.chain == "ethereum":
+        if "USDP" in r.pair:
+            return 0 if r.loan == "USDC" else 1
         # On Ethereum, prefer Morpho-funded loans (PYUSD) over Uniswap v4 (USDG)
         return 0 if r.loan == "PYUSD" else 1
     if r.chain == "solana":
@@ -380,36 +410,61 @@ def build_route_invocation(
     output_path = str(PLAN_DIR / f"{route.key}.json")
 
     if route.chain == "ethereum":
-        environment["ETH_QUOTE_USER_AGENT"] = (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-        command = [
-            sys.executable,
-            str(PROJECT_ROOT / "src" / "engines" / "eth_flash_arb_pyusd_usdc.py"),
-            "--loan-token",
-            route.loan,
-            "--intermediate-token",
-            route.intermediate,
-            "--swap-order",
-            route.swap_order,
-            "--base-amount",
-            os.getenv("ETH_ARB_BASE_AMOUNT", "100000"),
-            "--min-profit",
-            floor,
-            "--min-net-profit",
-            floor,
-            "--output",
-            output_path,
-        ]
-        quote_provider = os.getenv("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
-        if quote_provider:
-            command.extend(["--quote-provider", quote_provider])
-            environment["ETH_ARB_QUOTE_PROVIDER"] = quote_provider
-        if live:
-            command.extend(
-                ["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"]
+        if "USDP" in (route.loan, route.intermediate):
+            base_amount = os.getenv("ETH_USDP_BASE_AMOUNT", "10000")
+            leg1_buffer_bps = os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "5")
+            command = [
+                sys.executable,
+                str(PROJECT_ROOT / "usdp_arb.py"),
+                "--loan-token",
+                route.loan,
+                "--intermediate-token",
+                route.intermediate,
+                "--swap-order",
+                route.swap_order,
+                "--amount",
+                base_amount,
+                "--min-profit-usd",
+                floor,
+                "--leg1-buffer-bps",
+                leg1_buffer_bps,
+                "--json",
+            ]
+            if live:
+                command.extend(["--live", "--confirm-live", "LIVE"])
+            else:
+                command.append("--dry-run")
+        else:
+            environment["ETH_QUOTE_USER_AGENT"] = (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             )
+            command = [
+                sys.executable,
+                str(PROJECT_ROOT / "src" / "engines" / "eth_flash_arb_pyusd_usdc.py"),
+                "--loan-token",
+                route.loan,
+                "--intermediate-token",
+                route.intermediate,
+                "--swap-order",
+                route.swap_order,
+                "--base-amount",
+                os.getenv("ETH_ARB_BASE_AMOUNT", "100000"),
+                "--min-profit",
+                floor,
+                "--min-net-profit",
+                floor,
+                "--output",
+                output_path,
+            ]
+            quote_provider = os.getenv("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
+            if quote_provider:
+                command.extend(["--quote-provider", quote_provider])
+                environment["ETH_ARB_QUOTE_PROVIDER"] = quote_provider
+            if live:
+                command.extend(
+                    ["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"]
+                )
     elif route.chain == "solana":
         environment.pop("SOL_FLASH_ARB_SLIPPAGE_BPS", None)
         appdata = os.environ.get("APPDATA")
@@ -500,9 +555,15 @@ def execution_reference(route: Route, stdout: str) -> tuple[str | None, str | No
             )
             return ("submitted", submitted.group(1)) if submitted else (None, None)
         tx_hash = plan.get("transactionHash") if isinstance(plan, dict) else None
+        if not tx_hash and isinstance(plan, dict) and isinstance(plan.get("execution"), dict):
+            tx_hash = plan["execution"].get("txHash")
         if not tx_hash:
             return None, None
-        status = str(plan.get("transactionStatus") or "submitted").lower()
+        status = str(
+            plan.get("transactionStatus")
+            or (plan.get("execution", {}).get("success") and "confirmed")
+            or "submitted"
+        ).lower()
         link = f"https://etherscan.io/tx/0x{str(tx_hash).removeprefix('0x')}"
         return status, link
     try:
@@ -890,11 +951,15 @@ def dry_run_detail(route: Route, stdout: str, elapsed: float) -> str:
             plan = json.loads(stdout)
         except (json.JSONDecodeError, TypeError):
             plan = None
-        if isinstance(plan, dict) and plan.get("predictedNetProfit") is not None:
-            return (
-                f"guaranteed net {plan['predictedNetProfit']} {route.loan}; "
-                f"simulation passed in {elapsed:.1f}s; not sent"
-            )
+        if isinstance(plan, dict):
+            net = plan.get("predictedNetProfit")
+            if net is None and isinstance(plan.get("winner"), dict):
+                net = plan["winner"].get("netProfitUsd") or plan["winner"].get("predictedNetProfit")
+            if net is not None:
+                return (
+                    f"guaranteed net {net} {route.loan}; "
+                    f"simulation passed in {elapsed:.1f}s; not sent"
+                )
     match = re.search(
         r"Guaranteed net result:\s*([-+\d.]+\s+[A-Z]+)",
         stdout,
@@ -1120,6 +1185,12 @@ def profit_metrics(route: Route, stdout: str, stderr: str = "") -> tuple[str | N
     if isinstance(plan, dict):
         gross = _profit_value(plan.get("grossProfit"))
         net = _profit_value(plan.get("predictedNetProfit"))
+        if (gross is None or net is None) and isinstance(plan.get("winner"), dict):
+            winner = plan["winner"]
+            if gross is None:
+                gross = _profit_value(winner.get("grossProfitUsdc") or winner.get("grossProfit"))
+            if net is None:
+                net = _profit_value(winner.get("netProfitUsd") or winner.get("predictedNetProfit"))
         if gross is not None or net is not None:
             return gross, net
 
@@ -1406,6 +1477,207 @@ def is_subprocess_mocked() -> bool:
     )
 
 
+def run_ethereum_usdp_route_direct(
+    route: Route,
+    *,
+    live: bool,
+    execution_floor: Decimal,
+    timeout_seconds: float,
+) -> Outcome:
+    started = time.monotonic()
+    floor = amount_text(execution_floor)
+    PLAN_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = PLAN_DIR / f"{route.key}.json"
+
+    if route.swap_order != "dex-first":
+        elapsed = time.monotonic() - started
+        return Outcome(
+            False,
+            "USDP stable-first arbitrage is structurally unexecutable (USDP trades at a discount on DEX)",
+            "unprofitable",
+            profit_token=route.loan,
+            elapsed_seconds=elapsed,
+        )
+
+    if route.loan != "USDC":
+        elapsed = time.monotonic() - started
+        return Outcome(
+            False,
+            "USDP flash loan is unsupported on Ethereum; use USDC loan",
+            "flash-liquidity",
+            profit_token=route.loan,
+            elapsed_seconds=elapsed,
+        )
+
+    try:
+        from src.engines.usdp_arb_engine import USDPTestEngine
+    except ImportError:
+        try:
+            import usdp_arb_engine as _eng
+            USDPTestEngine = _eng.USDPTestEngine
+        except ImportError:
+            from engines.usdp_arb_engine import USDPTestEngine
+
+    base_amount = Decimal(os.getenv("ETH_USDP_BASE_AMOUNT", "10000"))
+    leg1_buffer_bps = int(os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "5"))
+    quote_provider = (
+        os.getenv("ETH_USDP_AGGREGATOR")
+        or os.getenv("ETH_ARB_QUOTE_PROVIDER")
+        or "matcha"
+    ).strip().lower()
+    aggregator = "matcha" if quote_provider in ("matcha", "meta.matcha") else quote_provider
+    if aggregator not in ("matcha", "meta.matcha", "enso", "okx", "velora", "auto"):
+        aggregator = "matcha"
+
+    try:
+        engine = USDPTestEngine(timeout=min(timeout_seconds, 15.0))
+        eval_res = engine.evaluate_arbitrage(
+            amount_usdc=base_amount,
+            aggregator=aggregator,
+            slippage_bps=10,
+        )
+        gross_profit = str(eval_res.gross_profit_usdc.quantize(TOKEN_QUANTUM))
+        net_profit = str(eval_res.net_profit_usd.quantize(TOKEN_QUANTUM))
+
+        plan = {
+            "timestamp": time.time(),
+            "route": route.key,
+            "loanAmount": str(eval_res.loan_amount_usdc),
+            "dexAggregator": eval_res.dex_quote.aggregator,
+            "dexOutputUsdp": str(eval_res.dex_quote.buy_amount_human),
+            "stableOutputUsdc": str(eval_res.stable_quote.amount_out_human),
+            "grossProfit": gross_profit,
+            "gasEstimateUsd": str(eval_res.gas_estimate_usd),
+            "predictedNetProfit": net_profit,
+            "isProfitable": eval_res.is_profitable,
+        }
+
+        if eval_res.net_profit_usd < execution_floor:
+            try:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(plan, f, indent=2)
+            except OSError:
+                pass
+            elapsed = time.monotonic() - started
+            detail = f"guaranteed net {net_profit} USDC is below execution floor {floor} USDC"
+            return Outcome(
+                False,
+                detail,
+                "below-floor",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=elapsed,
+            )
+
+        buffer_factor = Decimal(1) - (Decimal(leg1_buffer_bps) / Decimal(10000))
+        safe_order_amount = (eval_res.dex_quote.buy_amount_human * buffer_factor).quantize(Decimal("0.000001"))
+        order_data = engine.create_stable_order(safe_order_amount)
+        plan["orderNonce"] = order_data.get("nonce")
+
+        exec_res = engine.execute_live_arbitrage(
+            evaluation=eval_res,
+            order_data=order_data,
+            min_profit_usdc=execution_floor,
+            leg1_buffer_bps=leg1_buffer_bps,
+            dry_run=not live,
+        )
+
+        plan["execution"] = {
+            "mode": exec_res.mode,
+            "success": exec_res.success,
+            "txHash": exec_res.tx_hash,
+            "blockNumber": exec_res.block_number,
+            "gasUsed": exec_res.gas_used,
+            "etherscanUrl": exec_res.etherscan_url,
+            "error": exec_res.error,
+        }
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(plan, f, indent=2)
+        except OSError:
+            pass
+
+        elapsed = time.monotonic() - started
+        tx_hash = exec_res.tx_hash
+        tx_link = exec_res.etherscan_url or (f"https://etherscan.io/tx/{tx_hash}" if tx_hash else None)
+
+        if exec_res.success and tx_link:
+            return Outcome(
+                True,
+                f"confirmed in {elapsed:.1f}s via USDP engine: {tx_link}",
+                "confirmed",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=elapsed,
+                transaction=tx_link,
+            )
+
+        if not live:
+            sim_ok = exec_res.simulation.success if exec_res.simulation else False
+            if sim_ok:
+                detail = (
+                    f"guaranteed net {net_profit} {route.loan}; "
+                    f"simulation passed in {elapsed:.1f}s; not sent"
+                )
+                return Outcome(
+                    False,
+                    detail,
+                    "eligible",
+                    gross_profit=gross_profit,
+                    net_profit=net_profit,
+                    profit_token=route.loan,
+                    elapsed_seconds=elapsed,
+                )
+            else:
+                sim_err = (
+                    exec_res.simulation.error_message
+                    if exec_res.simulation
+                    else (exec_res.error or "Simulation failed")
+                )
+                detail = f"simulation failed: {sim_err}"
+                category = failure_category(detail)
+                return Outcome(
+                    False,
+                    readable_failure(route, detail, category),
+                    category,
+                    gross_profit=gross_profit,
+                    net_profit=net_profit,
+                    profit_token=route.loan,
+                    elapsed_seconds=elapsed,
+                )
+
+        detail = exec_res.error or "Execution failed without details"
+        category = "reverted" if "revert" in detail.lower() else failure_category(detail)
+        return Outcome(
+            False,
+            readable_failure(route, detail, category),
+            category,
+            gross_profit=gross_profit,
+            net_profit=net_profit,
+            profit_token=route.loan,
+            elapsed_seconds=elapsed,
+            transaction=tx_link,
+        )
+
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        detail = str(exc)
+        category = failure_category(detail)
+        gross_profit, net_profit = profit_metrics(route, "", detail)
+        return Outcome(
+            False,
+            readable_failure(route, detail, category),
+            category,
+            gross_profit=gross_profit,
+            net_profit=net_profit,
+            profit_token=route.loan,
+            elapsed_seconds=elapsed,
+            retry_after_seconds=retry_after_seconds(detail),
+        )
+
+
 def run_ethereum_route_direct(
     route: Route,
     *,
@@ -1413,6 +1685,14 @@ def run_ethereum_route_direct(
     execution_floor: Decimal,
     timeout_seconds: float,
 ) -> Outcome:
+    if "USDP" in (route.loan, route.intermediate):
+        return run_ethereum_usdp_route_direct(
+            route,
+            live=live,
+            execution_floor=execution_floor,
+            timeout_seconds=timeout_seconds,
+        )
+
     started = time.monotonic()
     floor = amount_text(execution_floor)
     PLAN_DIR.mkdir(parents=True, exist_ok=True)

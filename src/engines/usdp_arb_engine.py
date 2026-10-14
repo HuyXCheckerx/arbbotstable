@@ -1473,12 +1473,56 @@ def main(argv: list[str] | None = None) -> int:
         help="Interval in seconds for continuous mode (default: 6.0)",
     )
     parser.add_argument(
+        "--loan-token",
+        type=str,
+        default="USDC",
+        help="Loan token (default: USDC)",
+    )
+    parser.add_argument(
+        "--intermediate-token",
+        type=str,
+        default="USDP",
+        help="Intermediate token (default: USDP)",
+    )
+    parser.add_argument(
+        "--swap-order",
+        choices=["dex-first", "stable-first"],
+        default="dex-first",
+        help="Swap venue order (default: dex-first)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Output results as JSON",
     )
 
     args = parser.parse_args(argv)
+
+    if args.swap_order != "dex-first":
+        err_msg = "USDP stable-first arbitrage is structurally unexecutable (USDP trades at a discount on DEX)"
+        if args.json:
+            print(json.dumps({
+                "error": err_msg,
+                "grossProfit": "-999999",
+                "predictedNetProfit": "-999999",
+                "isProfitable": False,
+            }))
+        else:
+            print(f"[ERROR] {err_msg}", file=sys.stderr)
+        return 1
+
+    if args.loan_token and args.loan_token.strip().upper() != "USDC":
+        err_msg = f"{args.loan_token} flash loan is unsupported on Ethereum; use USDC loan"
+        if args.json:
+            print(json.dumps({
+                "error": err_msg,
+                "grossProfit": "0",
+                "predictedNetProfit": "0",
+                "isProfitable": False,
+            }))
+        else:
+            print(f"[ERROR] {err_msg}", file=sys.stderr)
+        return 1
 
     engine = USDPTestEngine(executor=args.executor)
     
@@ -1561,14 +1605,25 @@ def main(argv: list[str] | None = None) -> int:
             if args.json:
                 data = {
                     "timestamp": time.time(),
+                    "grossProfit": str(winner.gross_profit_usdc) if winner else "0",
+                    "predictedNetProfit": str(winner.net_profit_usd) if winner else "0",
+                    "transactionHash": exec_result.tx_hash if exec_result else None,
+                    "transactionStatus": (
+                        "confirmed" if exec_result and exec_result.success
+                        else "reverted" if exec_result and exec_result.error and "revert" in exec_result.error.lower()
+                        else "submitted" if exec_result and exec_result.tx_hash
+                        else "dry-run"
+                    ),
                     "winner": {
                         "loanAmountUsdc": float(winner.loan_amount_usdc),
                         "dexOutputUsdp": float(winner.dex_quote.buy_amount_human),
                         "dexAggregator": winner.dex_quote.aggregator,
                         "stableOutputUsdc": float(winner.stable_quote.amount_out_human),
                         "grossProfitUsdc": float(winner.gross_profit_usdc),
+                        "grossProfit": str(winner.gross_profit_usdc),
                         "gasEstimateUsd": float(winner.gas_estimate_usd),
                         "netProfitUsd": float(winner.net_profit_usd),
+                        "predictedNetProfit": str(winner.net_profit_usd),
                         "isProfitable": winner.is_profitable,
                         "orderNonce": order_nonce,
                     } if winner else None,
