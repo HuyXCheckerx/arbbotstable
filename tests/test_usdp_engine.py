@@ -1,3 +1,4 @@
+import os
 import unittest
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -359,6 +360,80 @@ class USDPTestEngineTests(unittest.TestCase):
             self.assertTrue(res.success)
             self.assertEqual(res.mode, "dry-run")
             self.assertEqual(res.gas_used, 310_000)
+
+    def test_execute_live_arbitrage_flashbots_success(self):
+        eval_res = self._sample_eval()
+        mock_sim = SimulationResult(
+            success=True,
+            estimated_gas=310_000,
+            native_value_wei=500,
+            min_profit_raw=1_000_000,
+            order_nonce=10,
+            order_deadline=1790000000,
+            maintainer_signature="0xabcdef",
+        )
+
+        mock_w3 = MagicMock()
+        mock_w3.to_checksum_address.side_effect = lambda a: str(a)
+        mock_w3.eth.get_block.return_value = {"baseFeePerGas": 100_000_000}
+        mock_w3.to_wei.return_value = 50_000_000
+        mock_w3.from_wei.return_value = Decimal("0.15")
+        mock_w3.eth.get_balance.return_value = 10**18
+        mock_w3.eth.get_transaction_count.return_value = 5
+        mock_w3.eth.account.from_key.return_value = MagicMock(address="0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C", sign_transaction=lambda t: MagicMock(raw_transaction=b"raw", hash=b"\xaa\xbb"))
+
+        mock_receipt = MagicMock(
+            status=1,
+            gasUsed=250_000,
+            effectiveGasPrice=100_000_000,
+            blockNumber=20000000,
+        )
+        mock_w3.eth.wait_for_transaction_receipt.return_value = mock_receipt
+
+        with patch.dict(os.environ, {"ETH_OPERATOR_PRIVATE_KEY": "0x" + "11" * 32, "ETH_ENABLE_FLASHBOTS": "true"}), \
+             patch.object(self.engine, "simulate_live_arbitrage", return_value=mock_sim), \
+             patch.object(self.engine, "get_working_web3", return_value=mock_w3), \
+             patch("src.engines.eth_flash_arb_pyusd_usdc.broadcast_flashbots_or_fallback", return_value=(b"\xaa\xbb", "flashbots-protect")), \
+             patch.object(self.engine, "get_eth_usd", return_value=Decimal("2500")):
+            res = self.engine.execute_live_arbitrage(eval_res, dry_run=False)
+            self.assertTrue(res.success)
+            self.assertEqual(res.mode, "live")
+            self.assertEqual(res.broadcast_method, "flashbots-protect")
+            self.assertEqual(res.tx_hash, "0xaabb")
+            self.assertEqual(res.gas_used, 250_000)
+
+    def test_execute_live_arbitrage_flashbots_timeout_dropped(self):
+        eval_res = self._sample_eval()
+        mock_sim = SimulationResult(
+            success=True,
+            estimated_gas=310_000,
+            native_value_wei=500,
+            min_profit_raw=1_000_000,
+            order_nonce=10,
+            order_deadline=1790000000,
+            maintainer_signature="0xabcdef",
+        )
+
+        mock_w3 = MagicMock()
+        mock_w3.to_checksum_address.side_effect = lambda a: str(a)
+        mock_w3.eth.get_block.return_value = {"baseFeePerGas": 100_000_000}
+        mock_w3.to_wei.return_value = 50_000_000
+        mock_w3.from_wei.return_value = Decimal("0.15")
+        mock_w3.eth.get_balance.return_value = 10**18
+        mock_w3.eth.get_transaction_count.return_value = 5
+        mock_w3.eth.account.from_key.return_value = MagicMock(address="0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C", sign_transaction=lambda t: MagicMock(raw_transaction=b"raw", hash=b"\xcc\xdd"))
+        mock_w3.eth.wait_for_transaction_receipt.side_effect = TimeoutError("Transaction timed out")
+
+        with patch.dict(os.environ, {"ETH_OPERATOR_PRIVATE_KEY": "0x" + "11" * 32, "ETH_ENABLE_FLASHBOTS": "true"}), \
+             patch.object(self.engine, "simulate_live_arbitrage", return_value=mock_sim), \
+             patch.object(self.engine, "get_working_web3", return_value=mock_w3), \
+             patch("src.engines.eth_flash_arb_pyusd_usdc.broadcast_flashbots_or_fallback", return_value=(b"\xcc\xdd", "flashbots-relay")):
+            res = self.engine.execute_live_arbitrage(eval_res, dry_run=False)
+            self.assertFalse(res.success)
+            self.assertEqual(res.mode, "live")
+            self.assertEqual(res.gas_used, 0)
+            self.assertEqual(res.actual_gas_cost_usd, Decimal("0"))
+            self.assertIn("Transaction not mined within", str(res.error))
 
     def test_format_reports(self):
         sim_ok = SimulationResult(

@@ -1590,6 +1590,7 @@ def run_ethereum_usdp_route_direct(
             "blockNumber": exec_res.block_number,
             "gasUsed": exec_res.gas_used,
             "etherscanUrl": exec_res.etherscan_url,
+            "broadcastMethod": exec_res.broadcast_method,
             "error": exec_res.error,
         }
         try:
@@ -1605,8 +1606,20 @@ def run_ethereum_usdp_route_direct(
         if exec_res.success and tx_link:
             return Outcome(
                 True,
-                f"confirmed in {elapsed:.1f}s via USDP engine: {tx_link}",
+                f"confirmed in {elapsed:.1f}s via {exec_res.broadcast_method or 'USDP engine'}: {tx_link}",
                 "confirmed",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=elapsed,
+                transaction=tx_link,
+            )
+
+        if live and not exec_res.success:
+            return Outcome(
+                False,
+                f"failed in {elapsed:.1f}s via {exec_res.broadcast_method or 'USDP engine'}: {exec_res.error}",
+                "reverted" if "reverted" in str(exec_res.error).lower() else "unconfirmed",
                 gross_profit=gross_profit,
                 net_profit=net_profit,
                 profit_token=route.loan,

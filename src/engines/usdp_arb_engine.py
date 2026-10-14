@@ -176,6 +176,7 @@ class ExecutionResult:
     actual_gas_cost_usd: Decimal | None = None
     net_realized_profit_usd: Decimal | None = None
     etherscan_url: str | None = None
+    broadcast_method: str | None = None
     error: str | None = None
 
 
@@ -233,6 +234,7 @@ class USDPTestEngine:
         
         env_rpc = os.getenv("ETH_RPC_URL")
         self.rpc_urls = [r for r in ([rpc_url] if rpc_url else []) + ([env_rpc] if env_rpc else []) + DEFAULT_RPC_URLS if r]
+        self.rpc_url = self.rpc_urls[0] if self.rpc_urls else "https://rpc.mevblocker.io"
         self.okx_key = os.getenv("OKX_API_KEY", "afbd1cbb-fb82-4c24-9b50-c28823cd8001")
         self.okx_secret = os.getenv("OKX_SECRET_KEY", "E41ADC9119A47896A8ABE0E752983B31")
         self.okx_passphrase = os.getenv("OKX_PASSPHRASE", "Huypro159!")
@@ -1165,29 +1167,78 @@ class USDPTestEngine:
 
         # 4. Live Broadcast & Receipt Wait
         signed = account.sign_transaction(tx_dict)
-        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        tx_hex = tx_hash.hex()
+        broadcast_method = "standard-rpc"
+        enable_flashbots = os.getenv("ETH_ENABLE_FLASHBOTS", "true").strip().lower() not in (
+            "false", "0", "no",
+        )
+
+        try:
+            from src.engines.eth_flash_arb_pyusd_usdc import broadcast_flashbots_or_fallback
+        except ImportError:
+            try:
+                from eth_flash_arb_pyusd_usdc import broadcast_flashbots_or_fallback
+            except ImportError:
+                broadcast_flashbots_or_fallback = None
+
+        if broadcast_flashbots_or_fallback is not None and enable_flashbots:
+            try:
+                tx_hash_val, broadcast_method = broadcast_flashbots_or_fallback(
+                    web3=w3,
+                    signed_tx=signed,
+                    private_key=private_key,
+                    rpc_url=self.rpc_url,
+                    receipt_timeout=receipt_timeout,
+                )
+                tx_hex = tx_hash_val.hex() if hasattr(tx_hash_val, "hex") else str(tx_hash_val)
+                if not tx_hex.startswith("0x"):
+                    tx_hex = f"0x{tx_hex}"
+            except Exception as exc:
+                return ExecutionResult(
+                    mode="live",
+                    success=False,
+                    simulation=sim,
+                    broadcast_method="flashbots-failed",
+                    error=f"Flashbots submission rejected or not acknowledged: {exc}",
+                )
+        else:
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            tx_hex = tx_hash.hex()
+            if not tx_hex.startswith("0x"):
+                tx_hex = f"0x{tx_hex}"
+            broadcast_method = "standard-rpc"
+
         etherscan_url = f"https://etherscan.io/tx/{tx_hex}"
 
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=receipt_timeout)
-        success = (receipt.status == 1)
-        gas_used = int(receipt.gasUsed)
-        effective_gas_price = Decimal(receipt.effectiveGasPrice) / Decimal(10**9)
-        eth_usd = self.get_eth_usd()
-        actual_gas_cost_usd = (Decimal(gas_used) * effective_gas_price / Decimal(10**9)) * eth_usd
+        try:
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hex, timeout=receipt_timeout)
+            success = (receipt.status == 1)
+            gas_used = int(receipt.gasUsed)
+            effective_gas_price = Decimal(receipt.effectiveGasPrice) / Decimal(10**9)
+            eth_usd = self.get_eth_usd()
+            actual_gas_cost_usd = (Decimal(gas_used) * effective_gas_price / Decimal(10**9)) * eth_usd
+            block_number = int(receipt.blockNumber)
+            error_msg = None if success else "Transaction reverted on-chain during execution"
+        except Exception as exc:
+            success = False
+            gas_used = 0
+            effective_gas_price = Decimal("0")
+            actual_gas_cost_usd = Decimal("0")
+            block_number = None
+            error_msg = f"Transaction not mined within {receipt_timeout}s: {exc}"
 
         return ExecutionResult(
             mode="live",
             success=success,
             simulation=sim,
             tx_hash=tx_hex,
-            block_number=int(receipt.blockNumber),
+            block_number=block_number,
             gas_used=gas_used,
             effective_gas_price_gwei=effective_gas_price,
             actual_gas_cost_usd=actual_gas_cost_usd,
-            net_realized_profit_usd=evaluation.gross_profit_usdc - actual_gas_cost_usd,
+            net_realized_profit_usd=(evaluation.gross_profit_usdc - actual_gas_cost_usd) if success else Decimal("0"),
             etherscan_url=etherscan_url,
-            error=None if success else "Transaction reverted on-chain during execution",
+            broadcast_method=broadcast_method,
+            error=error_msg,
         )
 
 
