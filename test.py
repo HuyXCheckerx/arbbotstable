@@ -1,3 +1,4 @@
+import os
 import time
 import hmac
 import base64
@@ -5,11 +6,23 @@ import hashlib
 import requests
 from urllib.parse import urlencode
 
-# ===== OKX API credentials =====
-API_KEY = "afbd1cbb-fb82-4c24-9b50-c28823cd8001"
-SECRET_KEY = "E41ADC9119A47896A8ABE0E752983B31"
-PASSPHRASE = "Huypro159!"
-PROJECT_ID = "4506f56deeba9843699dd86ea3253f5a"
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ===== OKX API credentials (from .env) =====
+API_KEY = os.getenv("OKX_API_KEY", "").strip()
+SECRET_KEY = os.getenv("OKX_SECRET_KEY", "").strip()
+PASSPHRASE = os.getenv("OKX_PASSPHRASE", "").strip()
+PROJECT_ID = os.getenv("OKX_PROJECT_ID", "").strip()
+_missing = [name for name, value in (
+    ("OKX_API_KEY", API_KEY),
+    ("OKX_SECRET_KEY", SECRET_KEY),
+    ("OKX_PASSPHRASE", PASSPHRASE),
+    ("OKX_PROJECT_ID", PROJECT_ID),
+) if not value]
+if _missing:
+    raise SystemExit(f"OKX credentials missing: set {', '.join(_missing)} in .env")
 # ===== Quote settings =====
 BASE_URL = "https://www.okx.com"
 REQUEST_PATH = "/api/v6/dex/aggregator/quote"

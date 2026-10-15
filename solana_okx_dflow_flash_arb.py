@@ -35,11 +35,11 @@ BASE_UNITS = 10 ** DECIMALS
 DEFAULT_LOAN_AMOUNT_USDT = 100.0
 LOAN_AMOUNT_RAW = int(DEFAULT_LOAN_AMOUNT_USDT * BASE_UNITS)
 
-# OKX API V6 Credentials (Loaded from .env with fallback to test.py keys)
-OKX_API_KEY = os.environ.get("OKX_API_KEY", "afbd1cbb-fb82-4c24-9b50-c28823cd8001")
-OKX_SECRET_KEY = os.environ.get("OKX_SECRET_KEY", "E41ADC9119A47896A8ABE0E752983B31")
-OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "Huypro159!")
-OKX_PROJECT_ID = os.environ.get("OKX_PROJECT_ID", "4506f56deeba9843699dd86ea3253f5a")
+# OKX API V6 Credentials (loaded from .env only)
+OKX_API_KEY = os.environ.get("OKX_API_KEY", "").strip()
+OKX_SECRET_KEY = os.environ.get("OKX_SECRET_KEY", "").strip()
+OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "").strip()
+OKX_PROJECT_ID = os.environ.get("OKX_PROJECT_ID", "").strip()
 OKX_BASE_URL = "https://www.okx.com"
 OKX_CHAIN_INDEX = "501"  # Solana
 
@@ -408,6 +408,15 @@ def main():
     )
 
     args = parser.parse_args()
+
+    missing = [name for name, value in (
+        ("OKX_API_KEY", OKX_API_KEY),
+        ("OKX_SECRET_KEY", OKX_SECRET_KEY),
+        ("OKX_PASSPHRASE", OKX_PASSPHRASE),
+        ("OKX_PROJECT_ID", OKX_PROJECT_ID),
+    ) if not value]
+    if missing:
+        sys.exit(f"[!] OKX credentials missing: set {', '.join(missing)} in .env")
 
     if args.poll:
         print(f"[*] Starting continuous quote monitor (interval: {args.interval}s)...")

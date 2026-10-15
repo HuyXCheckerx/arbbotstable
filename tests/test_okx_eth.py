@@ -60,18 +60,35 @@ def okx_swap_payload(
     }
 
 
+FAKE_OKX_CREDENTIALS = {
+    "OKX_API_KEY": "test-okx-key",
+    "OKX_SECRET_KEY": "test-okx-secret",
+    "OKX_PASSPHRASE": "test-okx-passphrase",
+    "OKX_PROJECT_ID": "test-okx-project",
+}
+
+
 class OKXQuoteClientTests(unittest.TestCase):
-    def client(self, handler, aggregators=("okx",)):
+    def client(self, handler, aggregators=("okx",), env=FAKE_OKX_CREDENTIALS):
         session = MagicMock()
         session.request.side_effect = handler
         session.headers = {"accept": "application/json"}
-        return DirectAggregatorClient(
-            executor=EXECUTOR,
-            operator=None,
-            aggregators=aggregators,
-            session=session,
-            api_modules=MODULES,
-        ), session
+        with patch.dict(os.environ, env):
+            return DirectAggregatorClient(
+                executor=EXECUTOR,
+                operator=None,
+                aggregators=aggregators,
+                session=session,
+                api_modules=MODULES,
+            ), session
+
+    def test_okx_skipped_without_credentials(self):
+        client, session = self.client(lambda *a, **k: None, env={name: "" for name in FAKE_OKX_CREDENTIALS})
+        self.assertEqual(client.okx_key, "")
+        self.assertEqual(client.okx_secret, "")
+        self.assertEqual(client._providers(), [])
+        self.assertEqual(client.last_skipped, ["okx: no API key configured"])
+        session.request.assert_not_called()
 
     def test_okx_quote_and_swap_calldata_structure(self):
         def handler(method, url, **kwargs):

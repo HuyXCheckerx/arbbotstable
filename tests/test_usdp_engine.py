@@ -20,9 +20,19 @@ from src.engines.usdp_arb_engine import (
 )
 
 
+FAKE_API_CREDENTIALS = {
+    "OKX_API_KEY": "test-okx-key",
+    "OKX_SECRET_KEY": "test-okx-secret",
+    "OKX_PASSPHRASE": "test-okx-passphrase",
+    "OKX_PROJECT_ID": "test-okx-project",
+    "ENSO_API_KEY": "test-enso-key",
+}
+
+
 class USDPTestEngineTests(unittest.TestCase):
     def setUp(self):
-        self.engine = USDPTestEngine()
+        with patch.dict(os.environ, FAKE_API_CREDENTIALS):
+            self.engine = USDPTestEngine()
 
     def test_decimal_conversion(self):
         raw_usdc = 10_000_000_000
@@ -485,6 +495,38 @@ class USDPTestEngineTests(unittest.TestCase):
             self.assertEqual(quote.allowance_target, "0xEnsoSpender")
             self.assertEqual(quote.buy_amount_human, Decimal("10029.5"))
             self.assertEqual(quote.gas_estimate, 310_000)
+
+    def test_api_credentials_have_no_builtin_defaults(self):
+        with patch.dict(os.environ, {}):
+            for name in FAKE_API_CREDENTIALS:
+                os.environ.pop(name, None)
+            engine = USDPTestEngine()
+        self.assertEqual(engine.okx_key, "")
+        self.assertEqual(engine.okx_secret, "")
+        self.assertEqual(engine.okx_passphrase, "")
+        self.assertEqual(engine.okx_project_id, "")
+        self.assertEqual(engine.enso_key, "")
+
+    def test_quote_dex_okx_fails_cleanly_without_credentials(self):
+        env = dict(FAKE_API_CREDENTIALS, OKX_SECRET_KEY="", OKX_PROJECT_ID="")
+        with patch.dict(os.environ, env):
+            engine = USDPTestEngine()
+        with patch.object(engine.session, "get") as mock_get:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.quote_dex_okx(Decimal("10000.0"))
+        mock_get.assert_not_called()
+        message = str(ctx.exception)
+        self.assertEqual(message, "OKX quote unavailable: set OKX_SECRET_KEY, OKX_PROJECT_ID in .env")
+        self.assertNotIn(FAKE_API_CREDENTIALS["OKX_API_KEY"], message)
+        self.assertNotIn(FAKE_API_CREDENTIALS["OKX_PASSPHRASE"], message)
+
+    def test_quote_dex_enso_fails_cleanly_without_api_key(self):
+        with patch.dict(os.environ, dict(FAKE_API_CREDENTIALS, ENSO_API_KEY="")):
+            engine = USDPTestEngine()
+        with patch.object(engine.session, "post") as mock_post:
+            with self.assertRaisesRegex(RuntimeError, "set ENSO_API_KEY in .env"):
+                engine.quote_dex_enso(Decimal("10000.0"))
+        mock_post.assert_not_called()
 
     def test_quote_dex_matcha_fallback_prefers_best(self):
         mock_enso = DexQuote(

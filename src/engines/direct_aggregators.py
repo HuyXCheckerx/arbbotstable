@@ -126,10 +126,10 @@ class DirectAggregatorClient:
                 session.proxies = {"http": proxy_url, "https": proxy_url}
             session.headers.update({"accept": "application/json", "user-agent": "arbbotstable/1.0"})
         self.session = session
-        self.okx_key = _env("OKX_API_KEY", "afbd1cbb-fb82-4c24-9b50-c28823cd8001")
-        self.okx_secret = _env("OKX_SECRET_KEY", "E41ADC9119A47896A8ABE0E752983B31")
-        self.okx_passphrase = _env("OKX_PASSPHRASE", "Huypro159!")
-        self.okx_project_id = _env("OKX_PROJECT_ID", "4506f56deeba9843699dd86ea3253f5a")
+        self.okx_key = _env("OKX_API_KEY")
+        self.okx_secret = _env("OKX_SECRET_KEY")
+        self.okx_passphrase = _env("OKX_PASSPHRASE")
+        self.okx_project_id = _env("OKX_PROJECT_ID")
         self.kyber_client_id = _env("KYBERSWAP_CLIENT_ID", "arbbotstable")
         self.oneinch_key = _env("ONEINCH_API_KEY")
         self.zero_ex_key = _env("ZERO_EX_API_KEY") or _env("ETH_ARB_ZERO_EX_API_KEY")

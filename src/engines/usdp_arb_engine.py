@@ -70,7 +70,6 @@ ENSO_BASE_URLS = [
     "https://api.enso.finance",
     "https://api.enso.build",
 ]
-DEFAULT_ENSO_KEY = "eea2af9c-7bb8-4f79-bb78-d84d194c33f1"
 DEFAULT_RPC_URLS = [
     "https://rpc.mevblocker.io",
     "https://1rpc.io/eth",
@@ -235,11 +234,11 @@ class USDPTestEngine:
         env_rpc = os.getenv("ETH_RPC_URL")
         self.rpc_urls = [r for r in ([rpc_url] if rpc_url else []) + ([env_rpc] if env_rpc else []) + DEFAULT_RPC_URLS if r]
         self.rpc_url = self.rpc_urls[0] if self.rpc_urls else "https://rpc.mevblocker.io"
-        self.okx_key = os.getenv("OKX_API_KEY", "afbd1cbb-fb82-4c24-9b50-c28823cd8001")
-        self.okx_secret = os.getenv("OKX_SECRET_KEY", "E41ADC9119A47896A8ABE0E752983B31")
-        self.okx_passphrase = os.getenv("OKX_PASSPHRASE", "Huypro159!")
-        self.okx_project_id = os.getenv("OKX_PROJECT_ID", "4506f56deeba9843699dd86ea3253f5a")
-        self.enso_key = os.getenv("ENSO_API_KEY", DEFAULT_ENSO_KEY)
+        self.okx_key = os.getenv("OKX_API_KEY", "").strip()
+        self.okx_secret = os.getenv("OKX_SECRET_KEY", "").strip()
+        self.okx_passphrase = os.getenv("OKX_PASSPHRASE", "").strip()
+        self.okx_project_id = os.getenv("OKX_PROJECT_ID", "").strip()
+        self.enso_key = os.getenv("ENSO_API_KEY", "").strip()
         
         self.session = requests.Session()
         self.session.headers.update({"accept": "application/json", "user-agent": "arbbot-usdp-test/1.0"})
@@ -297,8 +296,22 @@ class USDPTestEngine:
             pass
         return Decimal("2500.0")
 
+    def missing_okx_credentials(self) -> list[str]:
+        """Names of the OKX credential env vars that are not set (never their values)."""
+        configured = {
+            "OKX_API_KEY": self.okx_key,
+            "OKX_SECRET_KEY": self.okx_secret,
+            "OKX_PASSPHRASE": self.okx_passphrase,
+            "OKX_PROJECT_ID": self.okx_project_id,
+        }
+        return [name for name, value in configured.items() if not value]
+
     def quote_dex_okx(self, usdc_amount: Decimal, slippage_bps: int = 10) -> DexQuote:
         """Fetch quote from OKX DEX Aggregator for USDC -> USDP."""
+        missing = self.missing_okx_credentials()
+        if missing:
+            raise RuntimeError(f"OKX quote unavailable: set {', '.join(missing)} in .env")
+
         import base64
         import hashlib
         import hmac
@@ -565,6 +578,8 @@ class USDPTestEngine:
 
     def quote_dex_enso(self, usdc_amount: Decimal, slippage_bps: int = 10) -> DexQuote:
         """Fetch quote from Enso Router API for USDC -> USDP on Ethereum."""
+        if not self.enso_key:
+            raise RuntimeError("Enso quote unavailable: set ENSO_API_KEY in .env")
         raw_in = int(usdc_amount * Decimal(10**USDC_DECIMALS))
         headers = {
             "Authorization": f"Bearer {self.enso_key}",
