@@ -1,6 +1,11 @@
+import contextlib
+import io
+import os
+import tempfile
 import unittest
 from decimal import Decimal
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from eth_abi import decode, encode
 from eth_utils import keccak
@@ -10,15 +15,21 @@ from src.engines.usdp_backrunner import (
     CURVE_ROUTER_NG,
     DEFAULT_V4_POOLS,
     DEFAULT_VENUES,
+    TRANSFER_TOPIC,
+    USDG_ADDRESS,
+    USDP_ADDRESS,
     V4_QUOTE_GAS,
     STABLE_POOL_ADDRESS,
     USDC_ADDRESS,
     USDP_3CRV_POOL,
+    FloatInventory,
     USDPBackrunner,
     Opportunity,
+    choose_payout,
     choose_size,
     main,
     refine_sizes,
+    token_overrides,
 )
 
 E6, E18 = 10**6, 10**18
@@ -230,9 +241,338 @@ class V4Tests(unittest.TestCase):
         self.assertEqual(self.bot._w3.eth.call.call_count, 1)
 
 
+WALLET = "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C"
+SEL_BALANCE = keccak(text="balanceOf(address)")[:4]
+SEL_ALLOWANCE = keccak(text="allowance(address,address)")[:4]
+SEL_ETH_BALANCE = keccak(text="getEthBalance(address)")[:4]
+SWAP_LOCAL = "(uint256,address,address,uint64,address,uint64,uint256)"
+
+
+class FakeChain:
+    """Multicall stand-in: the 3Crv pool sells USDP `discount` under $1 up to `dip_until` USDC, then 0.5% above $1.
+
+    Token balances and allowances come from dicts keyed by lower-case addresses; other venues fail to quote.
+    """
+
+    def __init__(self, balances=None, allowances=None, discount=Decimal("0.003"), dip_until=usdc(500), eth=10**18):
+        self.balances = {(t.lower(), o.lower()): v for (t, o), v in (balances or {}).items()}
+        self.allowances = {(t.lower(), o.lower(), s.lower()): v for (t, o, s), v in (allowances or {}).items()}
+        self.balances.setdefault((USDC_ADDRESS.lower(), STABLE_POOL_ADDRESS.lower()), usdc(158_000))
+        self.discount, self.dip_until, self.eth = discount, dip_until, eth
+
+    def __call__(self, calls, block=None):
+        out = []
+        for target, data in calls:
+            sel, args = data[:4], data[4:]
+            if sel == SEL_BALANCE:
+                owner = decode(["address"], args)[0]
+                out.append(encode(["uint256"], [self.balances.get((target.lower(), owner.lower()), 0)]))
+            elif sel == SEL_ALLOWANCE:
+                owner, spender = decode(["address", "address"], args)
+                out.append(encode(["uint256"], [self.allowances.get((target.lower(), owner.lower(), spender.lower()), 0)]))
+            elif sel == SEL_ETH_BALANCE:
+                out.append(encode(["uint256"], [self.eth]))
+            elif target == USDP_3CRV_POOL:
+                amount = decode(["int128", "int128", "uint256"], args)[2]
+                rate = 1 + self.discount if amount <= self.dip_until else Decimal("0.995")
+                out.append(encode(["uint256"], [int(Decimal(amount) * rate) * 10**12]))
+            else:
+                out.append(None)
+        return out
+
+
+def float_bot(chain, **kwargs):
+    kwargs.setdefault("float_usdc", Decimal("2000"))
+    bot = USDPBackrunner(engine=fake_engine(), v4_pools=(), float_wallet=WALLET, **kwargs)
+    bot.multicall = MagicMock(side_effect=chain)
+    bot._w3 = MagicMock()
+    return bot
+
+
+def transfer_log(token, to, amount):
+    return {"address": token, "topics": [TRANSFER_TOPIC, bytes(12) + bytes.fromhex(USDP_3CRV_POOL[2:]),
+                                          bytes(12) + bytes.fromhex(to[2:])], "data": encode(["uint256"], [amount])}
+
+
+class FloatScanTests(unittest.TestCase):
+    def test_small_dip_becomes_a_float_buy_refined_inside_the_dip(self):
+        bot = float_bot(FakeChain(balances={(USDC_ADDRESS, WALLET): usdc(5000)}))
+        opps = bot.scan(block=123)
+        self.assertEqual([(o.venue, o.kind) for o in opps], [("curve-3crv", "float")])
+        # 400 USDC is the last float ladder point inside the 500 USDC dip; refinement towards 550 finds 485.7
+        self.assertEqual(opps[0].amount_in_raw, 485_714_285)
+        self.assertGreaterEqual(opps[0].net_profit_usd, Decimal("0.10"))
+
+    def test_float_mode_is_off_by_default(self):
+        bot = USDPBackrunner(engine=fake_engine(), v4_pools=())
+        bot.multicall = MagicMock(side_effect=FakeChain())
+        self.assertEqual(bot.scan(block=123), [])
+
+    def test_unsold_inventory_cost_shrinks_the_budget(self):
+        bot = float_bot(FakeChain())
+        bot.inventory.cost_raw = usdc(1800)
+        self.assertEqual(bot.scan(block=123)[0].amount_in_raw, usdc(200))
+
+    def test_live_budget_is_also_capped_by_the_wallet_usdc(self):
+        bot = float_bot(FakeChain(balances={(USDC_ADDRESS, WALLET): usdc(300)}), paper=False)
+        opp = bot.scan(block=123)[0]
+        self.assertEqual(opp.amount_in_raw, usdc(300))
+        self.assertEqual(bot.wallet_usdc_raw, usdc(300))
+
+    def test_dip_big_enough_for_the_flash_path_is_not_also_a_float_buy(self):
+        bot = float_bot(FakeChain(discount=Decimal("0.004"), dip_until=usdc(5000)))
+        self.assertEqual([o.kind for o in bot.scan(block=123)], ["flash"])
+
+    def test_stable_com_fee_share_is_part_of_the_float_cost(self):
+        bot = float_bot(FakeChain())
+        bot.stable_fee_usd = Decimal("5")  # 0.5% of a 1,000 USDP order eats the whole 0.3% dip
+        self.assertEqual(bot.scan(block=123), [])
+
+
+class FloatBuyTests(unittest.TestCase):
+    OPP = Opportunity("curve-3crv", 123, usdc(400), usdp(401.2), Decimal("0.10"), kind="float")
+
+    def test_dry_run_simulates_a_missing_float_and_books_a_paper_buy(self):
+        bot = float_bot(FakeChain())
+        bot._w3.eth.call.return_value = encode(["uint256"], [usdp(401.1)])
+        res = bot.execute_float_buy(self.OPP, live=False, block=123)
+        self.assertTrue(res.success)
+        self.assertTrue(res.virtual)
+        tx, block, overrides = bot._w3.eth.call.call_args.args
+        self.assertEqual((tx["from"], tx["to"], block), (WALLET, USDP_3CRV_POOL, 123))
+        i, j, amount, min_out = decode(["int128", "int128", "uint256", "uint256"], bytes.fromhex(tx["data"][10:]))
+        self.assertEqual((i, j, amount, min_out), (2, 0, usdc(400), usdp(401.2) * 9999 // 10000))
+        self.assertEqual(overrides, token_overrides(USDC_ADDRESS, WALLET, USDP_3CRV_POOL, usdc(400), usdc(400)))
+        self.assertEqual((bot.inventory.usdp_raw, bot.inventory.cost_raw), (usdp(401.1), usdc(400)))
+
+    def test_paper_mode_counts_an_unchanged_dip_once(self):
+        bot = float_bot(FakeChain())
+        bot._w3.eth.call.return_value = encode(["uint256"], [usdp(401.1)])
+        bot.execute_float_buy(self.OPP, live=False)
+        self.assertIsNone(bot.execute_float_buy(self.OPP, live=False))
+        self.assertEqual(bot.inventory.buys, 1)
+
+    def test_funded_wallet_is_preflighted_without_overrides(self):
+        chain = FakeChain(balances={(USDC_ADDRESS, WALLET): usdc(1000)},
+                          allowances={(USDC_ADDRESS, WALLET, USDP_3CRV_POOL): usdc(1000)})
+        bot = float_bot(chain)
+        bot._w3.eth.call.return_value = encode(["uint256"], [usdp(401.1)])
+        res = bot.execute_float_buy(self.OPP, live=False)
+        self.assertFalse(res.virtual)
+        self.assertIsNone(bot._w3.eth.call.call_args.args[2])
+
+    def test_min_out_never_drops_below_the_usdc_paid(self):
+        bot = float_bot(FakeChain(), buffer_bps=500)
+        bot._w3.eth.call.return_value = encode(["uint256"], [usdp(401.1)])
+        bot.execute_float_buy(self.OPP, live=False)
+        tx = bot._w3.eth.call.call_args.args[0]
+        self.assertEqual(decode(["int128", "int128", "uint256", "uint256"], bytes.fromhex(tx["data"][10:]))[3], usdp(400))
+
+    def test_preflight_revert_is_reported_and_not_booked(self):
+        bot = float_bot(FakeChain())
+        bot._w3.eth.call.side_effect = Exception("execution reverted: Exchange resulted in fewer coins than expected")
+        res = bot.execute_float_buy(self.OPP, live=False)
+        self.assertFalse(res.success)
+        self.assertIn("pre-flight reverted", res.error)
+        self.assertEqual(bot.inventory.buys, 0)
+
+    def test_live_refuses_when_the_wallet_lacks_usdc(self):
+        bot = float_bot(FakeChain(balances={(USDC_ADDRESS, WALLET): usdc(100)}), paper=False)
+        bot._send = MagicMock()
+        res = bot.execute_float_buy(self.OPP, live=True)
+        self.assertFalse(res.success)
+        self.assertIn("wallet holds 100.00 USDC", res.error)
+        bot._send.assert_not_called()
+
+    def test_live_approves_the_venue_then_swaps_and_books_the_usdp_received(self):
+        bot = float_bot(FakeChain(balances={(USDC_ADDRESS, WALLET): usdc(1000)}), paper=False)
+        bot._w3.eth.call.return_value = encode(["uint256"], [usdp(401.1)])
+        swap_receipt = {"status": 1, "logs": [transfer_log(USDP_ADDRESS, WALLET, usdp(401.05))]}
+        bot._send = MagicMock(side_effect=[("0xa", {"status": 1, "logs": []}, Decimal("0.01")),
+                                           ("0xb", swap_receipt, Decimal("0.05"))])
+        res = bot.execute_float_buy(self.OPP, live=True)
+        approve_tx, swap_tx = (c.args[0] for c in bot._send.call_args_list)
+        self.assertEqual(approve_tx["to"], USDC_ADDRESS)
+        self.assertEqual(decode(["address", "uint256"], bytes.fromhex(approve_tx["data"][10:])),
+                         (USDP_3CRV_POOL.lower(), usdc(2000)))  # approves the float cap, not unlimited
+        self.assertEqual(swap_tx["to"], USDP_3CRV_POOL)
+        self.assertEqual((res.success, res.usdp_raw, res.gas_usd, res.tx_hashes), (True, usdp(401.05), Decimal("0.05"), ["0xa", "0xb"]))
+        self.assertEqual(bot.inventory.usdp_raw, usdp(401.05))
+        self.assertEqual(bot.inventory.gas_usd, Decimal("0.05"))
+        self.assertEqual(bot.inventory.realized_pnl_usd, Decimal("-0.01"))  # the approval serves later buys too
+
+    def test_live_approval_gas_is_booked_even_when_the_buy_then_fails(self):
+        bot = float_bot(FakeChain(balances={(USDC_ADDRESS, WALLET): usdc(1000)}), paper=False)
+        bot._w3.eth.call.side_effect = Exception("execution reverted")
+        bot._send = MagicMock(return_value=("0xa", {"status": 1, "logs": []}, Decimal("0.01")))
+        self.assertFalse(bot.execute_float_buy(self.OPP, live=True).success)
+        self.assertEqual(bot.inventory.realized_pnl_usd, Decimal("-0.01"))
+
+    def test_live_revert_books_the_gas_as_a_loss(self):
+        bot = float_bot(FakeChain(balances={(USDC_ADDRESS, WALLET): usdc(1000)},
+                                  allowances={(USDC_ADDRESS, WALLET, USDP_3CRV_POOL): usdc(2000)}), paper=False)
+        bot._w3.eth.call.return_value = encode(["uint256"], [usdp(401.1)])
+        bot._send = MagicMock(return_value=("0xb", {"status": 0, "logs": []}, Decimal("0.05")))
+        res = bot.execute_float_buy(self.OPP, live=True)
+        self.assertFalse(res.success)
+        self.assertEqual(bot.inventory.realized_pnl_usd, Decimal("-0.05"))
+        self.assertEqual(bot.inventory.usdp_raw, 0)
+
+
+def fake_stable(amount_to=None, fee_native=123):
+    def post(path, body):
+        if path == "/swap/status":
+            return {"asset": {"amountTo": amount_to or body["amountFrom"], "nativeFeeUsd": "0.40"}}
+        return {"data": {"maintainerSignature": "0x" + "11" * 65, "deadline": 1792000000, "nonce": 7,
+                         "executionFeeNative": fee_native}}
+    return MagicMock(side_effect=post)
+
+
+class FloatSellTests(unittest.TestCase):
+    def paper_bot(self, held=usdp(1000.4), cost=usdc(999), chain=None, **kwargs):
+        bot = float_bot(chain or FakeChain(), **kwargs)
+        bot.inventory.usdp_raw, bot.inventory.cost_raw = held, cost
+        bot._stable_post = fake_stable()
+        bot._w3.eth.call.return_value = b""
+        return bot
+
+    def test_nothing_to_sell_under_the_minimum_order(self):
+        bot = self.paper_bot(held=usdp(999.99))
+        self.assertIsNone(bot.maybe_sell_float(live=False))
+        bot._stable_post.assert_not_called()
+
+    def test_paper_sell_preflights_the_signed_order_from_the_wallet(self):
+        bot = self.paper_bot()
+        res = bot.maybe_sell_float(live=False)
+        self.assertTrue(res.success)
+        self.assertTrue(res.virtual)
+        quote_body = bot._stable_post.call_args_list[0].args[1]
+        self.assertEqual((quote_body["assetTo"], quote_body["amountFrom"], quote_body["addressFrom"], quote_body["addressTo"]),
+                         ("USDC", "1000.400000", WALLET, WALLET))
+        tx, block, overrides = bot._w3.eth.call.call_args.args
+        self.assertEqual((tx["to"], tx["value"], block), (STABLE_POOL_ADDRESS, 123, "latest"))
+        swap, signature, fee = decode([SWAP_LOCAL, "bytes", "uint256"], bytes.fromhex(tx["data"][10:]))
+        self.assertEqual(swap, (usdp(1000.4), USDP_ADDRESS.lower(), USDC_ADDRESS.lower(), 1, WALLET.lower(), 1792000000, 7))
+        self.assertEqual((signature, fee), (bytes([0x11]) * 65, 123))
+        self.assertIn(USDP_ADDRESS, overrides)
+        self.assertEqual(overrides[WALLET], {"balance": hex(10**18)})  # keeps the real ETH when it covers the fee
+        # 1,000.40 USDC back for 999 USDC paid, minus 150k gas ($0.0375) and the $0.40 Stable.com fee
+        self.assertEqual(res.pnl_usd, Decimal("0.9625"))
+        self.assertEqual((bot.inventory.usdp_raw, bot.inventory.cost_raw, bot.inventory.sells), (0, 0, 1))
+
+    def test_order_is_cut_to_stable_com_six_decimals(self):
+        bot = self.paper_bot(held=usdp(1000.4) + 999_999_999_999)
+        bot.maybe_sell_float(live=False)
+        self.assertEqual(bot._stable_post.call_args_list[0].args[1]["amountFrom"], "1000.400000")
+        self.assertEqual(bot.inventory.usdp_raw, 999_999_999_999)
+
+    def test_falls_back_to_the_next_payout_token_when_stable_com_is_short_of_usdc(self):
+        chain = FakeChain(balances={(USDC_ADDRESS, STABLE_POOL_ADDRESS): usdc(500), (USDG_ADDRESS, STABLE_POOL_ADDRESS): usdc(50_000)})
+        bot = self.paper_bot(chain=chain, float_sell_assets=("USDC", "USDG"))
+        res = bot.maybe_sell_float(live=False)
+        self.assertEqual(res.target, "USDG")
+        swap = decode([SWAP_LOCAL, "bytes", "uint256"], bytes.fromhex(bot._w3.eth.call.call_args.args[0]["data"][10:]))[0]
+        self.assertEqual(swap[2], USDG_ADDRESS.lower())
+
+    def test_holds_when_stable_com_quotes_below_one_to_one(self):
+        bot = self.paper_bot()
+        bot._stable_post = fake_stable(amount_to="999.000000")
+        res = bot.maybe_sell_float(live=False)
+        self.assertFalse(res.success)
+        self.assertIn("holding", res.error)
+        self.assertIsNone(bot.maybe_sell_float(live=False))  # same reason is reported once
+        self.assertEqual(bot._stable_post.call_count, 2)  # quotes only, no order created
+        self.assertEqual(bot.inventory.usdp_raw, usdp(1000.4))
+
+    def test_failed_sell_waits_before_creating_another_order(self):
+        bot = self.paper_bot()
+        bot._w3.eth.call.side_effect = Exception("execution reverted")
+        self.assertIn("pre-flight reverted", bot.maybe_sell_float(live=False).error)
+        self.assertIsNone(bot.maybe_sell_float(live=False))
+        self.assertEqual(bot._stable_post.call_count, 2)
+
+    def test_live_sell_approves_usdp_and_books_the_usdc_received(self):
+        chain = FakeChain(balances={(USDP_ADDRESS, WALLET): usdp(1000.4)})
+        bot = self.paper_bot(chain=chain, paper=False)
+        bot.wallet_usdp_raw = usdp(1000.4)
+        swap_receipt = {"status": 1, "logs": [transfer_log(USDC_ADDRESS, WALLET, usdc(1000.4))]}
+        bot._send = MagicMock(side_effect=[("0xa", {"status": 1, "logs": []}, Decimal("0.01")),
+                                           ("0xb", swap_receipt, Decimal("0.03"))])
+        res = bot.maybe_sell_float(live=True)
+        approve_tx, swap_tx = (c.args[0] for c in bot._send.call_args_list)
+        self.assertEqual((approve_tx["to"], swap_tx["to"], swap_tx["value"]), (USDP_ADDRESS, STABLE_POOL_ADDRESS, 123))
+        self.assertIsNone(bot._w3.eth.call.call_args.args[2])  # live pre-flight never simulates balances
+        self.assertEqual(res.pnl_usd, Decimal("1000.4") - 999 - Decimal("0.03") - Decimal("0.40"))
+        self.assertEqual(bot.inventory.realized_pnl_usd, res.pnl_usd - Decimal("0.01"))  # plus the approval
+        self.assertEqual(bot.wallet_usdp_raw, 0)
+
+
+class ChoosePayoutTests(unittest.TestCase):
+    def test_first_token_that_covers_the_whole_order_wins(self):
+        room = {"USDC": usdc(500), "USDG": usdc(2000), "PYUSD": usdc(9000)}
+        self.assertEqual(choose_payout(("USDC", "USDG", "PYUSD"), room, usdp(1500)), ("USDG", usdp(1500)))
+
+    def test_partial_order_from_the_deepest_token(self):
+        room = {"USDC": usdc(1200), "USDG": usdc(300)}
+        self.assertEqual(choose_payout(("USDC", "USDG"), room, usdp(1500)), ("USDC", usdp(1200)))
+
+    def test_nothing_when_no_token_reaches_the_minimum(self):
+        self.assertIsNone(choose_payout(("USDC",), {"USDC": usdc(999)}, usdp(1500)))
+
+
+class FloatInventoryTests(unittest.TestCase):
+    def test_sell_books_cost_and_gas_of_the_tracked_usdp_and_untracked_usdp_at_cost(self):
+        inv = FloatInventory()
+        inv.record_buy(usdc(400), usdp(401), Decimal("0.10"))
+        inv.record_buy(usdc(600), usdp(601), Decimal("0.10"))
+        # 1,002 USDP bought by the bot plus 100 USDP that was already in the wallet
+        pnl = inv.record_sell(usdp(1102), usdc(1102), Decimal("0.05"), Decimal("0.40"))
+        self.assertEqual(pnl, Decimal("2") - Decimal("0.20") - Decimal("0.05") - Decimal("0.40"))
+        self.assertEqual((inv.usdp_raw, inv.cost_raw, inv.gas_usd, inv.realized_pnl_usd), (0, 0, Decimal(0), pnl))
+
+    def test_partial_sell_keeps_the_rest_at_average_cost(self):
+        inv = FloatInventory()
+        inv.record_buy(usdc(2000), usdp(2004), Decimal("0.20"))
+        inv.record_sell(usdp(1002), usdc(1002), Decimal(0), Decimal(0))
+        self.assertEqual((inv.usdp_raw, inv.cost_raw, inv.gas_usd), (usdp(1002), usdc(1000), Decimal("0.10")))
+
+    def test_state_file_round_trip(self):
+        inv = FloatInventory()
+        inv.record_buy(usdc(400), usdp(401.2), Decimal("0.123"), venue="curve-frax")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "float.json"
+            inv.save(path)
+            loaded = FloatInventory.load(path)
+        self.assertEqual(loaded, inv)
+        self.assertEqual(FloatInventory.load(Path("/nonexistent/float.json")), FloatInventory())
+
+
+class TokenOverrideTests(unittest.TestCase):
+    def test_balance_slots_match_the_ones_verified_on_mainnet(self):
+        # USDC balances live in mapping slot 9 and USDP balances in slot 1 (checked with eth_call overrides)
+        usdc_diff = token_overrides(USDC_ADDRESS, WALLET, USDP_3CRV_POOL, 5, 6)[USDC_ADDRESS]["stateDiff"]
+        usdp_diff = token_overrides(USDP_ADDRESS, WALLET, STABLE_POOL_ADDRESS, 5, 6)[USDP_ADDRESS]["stateDiff"]
+        self.assertEqual(usdc_diff["0x4282f4532a176fc3ed0ec96af1f91f5d860712abeb21c8c84ce4db8770206c6a"], "0x" + "00" * 31 + "05")
+        self.assertEqual(usdp_diff["0x1f36e07cf1e841f190dd296a85495c7e24c6341f16c39820bb65390fa75bb6fc"], "0x" + "00" * 31 + "05")
+        self.assertEqual(sorted(usdc_diff.values()), ["0x" + "00" * 31 + "05", "0x" + "00" * 31 + "06"])
+
+
 class CliTests(unittest.TestCase):
     def test_live_requires_confirmation_token(self):
         self.assertEqual(main(["--live", "--once"]), 2)
+
+    def test_float_live_requires_the_operator_key(self):
+        with patch.dict(os.environ, {"ETH_OPERATOR_PRIVATE_KEY": ""}):
+            self.assertEqual(main(["--live", "--confirm-live", "LIVE", "--float-usdc", "2000", "--once"]), 2)
+
+    def test_float_status_prints_the_inventory_file(self):
+        inv = FloatInventory()
+        inv.record_buy(usdc(400), usdp(401.2), Decimal("0.1"))
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(out):
+            inv.save(Path(tmp) / "float.json")
+            self.assertEqual(main(["--float-status", "--float-state", str(Path(tmp) / "float.json")]), 0)
+        self.assertIn("float inventory 401.20 USDP (cost 400.00 USDC", out.getvalue())
 
 
 if __name__ == "__main__":
