@@ -72,9 +72,14 @@ METAMATCHA_FORBIDDEN_ERRORS = {
 class CrosschainSniperTests(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        # The USDP back-runner reads the chain; its own tests below switch it back on with a fake bot.
         self._env_patch = patch.dict(
             os.environ,
-            {"ETH_ARB_QUOTE_PROVIDER": "matcha", "SOL_FLASH_ARB_DEX_PROVIDER": "metamatcha"},
+            {
+                "ETH_ARB_QUOTE_PROVIDER": "matcha",
+                "SOL_FLASH_ARB_DEX_PROVIDER": "metamatcha",
+                "ETH_USDP_BACKRUN_ENABLED": "false",
+            },
         )
         self._env_patch.start()
 
@@ -1168,7 +1173,7 @@ class CrosschainSniperTests(unittest.TestCase):
                 execution_floor=Decimal("4.000001"),
                 timeout_seconds=30.0,
             )
-            self.assertEqual(outcome.category, "below-floor")
+            self.assertEqual(outcome.category, "unprofitable")
             self.assertIn("is below execution floor 4.000001 USDC", outcome.detail)
 
     def test_run_ethereum_usdp_route_direct_fast_fails_stable_first_and_usdp_loan(self):
@@ -1395,6 +1400,133 @@ class EquivalentRouteSchedulingTests(unittest.TestCase):
         self.assertEqual(record["state"], "STANDBY")
         self.assertIn(self.PREFERRED.display, record["detail"])
         self.assertIn("PYUSD flash loan is unavailable", record["detail"])
+
+
+class UsdpBackrunRouteTests(unittest.TestCase):
+    """The USDC -> USDP -> USDC route runs the back-runner first, then the fixed-size aggregator check."""
+
+    ROUTE = Route("ethereum", "USDC/USDP", "dex-first")
+    FLOOR = Decimal("4.000001")
+
+    def setUp(self):
+        from src.engines.usdp_backrunner import Opportunity
+
+        self.Opportunity = Opportunity
+        self.bot = Mock()
+        self.bot.float_enabled = False
+        self.bot.scan.return_value = []
+        self.patches = [
+            patch.dict(os.environ, {"ETH_USDP_BACKRUN_ENABLED": "true", "ETH_USDP_AGGREGATOR_FALLBACK": "true"}),
+            patch("crosschain_sniper.usdp_backrunner", return_value=self.bot),
+            patch("crosschain_sniper.PLAN_DIR", Path(tempfile.mkdtemp())),
+        ]
+        for p in self.patches:
+            p.start()
+        self.aggregator = patch("crosschain_sniper.run_usdp_aggregator_check",
+                                return_value=Outcome(False, "aggregator checked", "unprofitable"))
+        self.aggregator_mock = self.aggregator.start()
+
+    def tearDown(self):
+        self.aggregator.stop()
+        for p in reversed(self.patches):
+            p.stop()
+
+    def flash(self):
+        return self.Opportunity("curve-frax", 123, 10_714_290_000, 10_814_340_000 * 10**12, Decimal("0.08"))
+
+    def run_check(self, live=False):
+        return run_ethereum_route_direct(self.ROUTE, live=live, execution_floor=self.FLOOR, timeout_seconds=30.0)
+
+    def test_dip_is_simulated_through_executor_without_aggregator_check(self):
+        from src.engines.usdp_arb_engine import ExecutionResult, SimulationResult
+
+        self.bot.scan.return_value = [self.flash()]
+        sim = SimulationResult(True, 600_000, 0, 4_000_001, 1, 1800000000, "0x" + "bb" * 65)
+        self.bot.execute.return_value = ExecutionResult(mode="dry-run", success=True, simulation=sim)
+        outcome = self.run_check()
+        self.assertEqual(outcome.category, "eligible")
+        self.assertTrue(outcome.detail.startswith("curve-frax: guaranteed net 99.970000 USDC"))
+        self.assertEqual(outcome.gross_profit, "100.050000")
+        self.assertEqual(self.bot.min_profit_usd, self.FLOOR)
+        self.bot.execute.assert_called_once()
+        self.assertFalse(self.bot.execute.call_args.kwargs["live"])
+        self.aggregator_mock.assert_not_called()
+
+    def test_confirmed_live_trade_is_executed_outcome(self):
+        from src.engines.usdp_arb_engine import ExecutionResult, SimulationResult
+
+        self.bot.scan.return_value = [self.flash()]
+        sim = SimulationResult(True, 600_000, 0, 4_000_001, 1, 1800000000, "0x" + "bb" * 65)
+        self.bot.execute.return_value = ExecutionResult(
+            mode="live", success=True, simulation=sim, tx_hash="0xabc", etherscan_url="https://etherscan.io/tx/0xabc",
+            broadcast_method="flashbots",
+        )
+        outcome = self.run_check(live=True)
+        self.assertTrue(outcome.executed)
+        self.assertEqual(outcome.category, "confirmed")
+        self.assertIn("curve-frax: confirmed", outcome.detail)
+        self.assertEqual(outcome.transaction, "https://etherscan.io/tx/0xabc")
+
+    def test_dip_gone_on_requote_is_below_floor(self):
+        self.bot.scan.return_value = [self.flash()]
+        self.bot.execute.return_value = None
+        outcome = self.run_check()
+        self.assertEqual(outcome.category, "unprofitable")
+        self.assertIn("no longer clears execution floor", outcome.detail)
+
+    def test_no_dip_falls_back_to_aggregator_check(self):
+        self.assertEqual(self.run_check().detail, "aggregator checked")
+        self.aggregator_mock.assert_called_once()
+
+    def test_no_dip_without_fallback_reports_below_floor(self):
+        with patch.dict(os.environ, {"ETH_USDP_AGGREGATOR_FALLBACK": "false"}):
+            outcome = self.run_check()
+        self.assertEqual(outcome.category, "unprofitable")
+        self.assertIn("no USDP dip below $1", outcome.detail)
+        self.aggregator_mock.assert_not_called()
+
+    def test_backrunner_error_still_runs_aggregator_check_and_is_reported(self):
+        self.bot.scan.side_effect = RuntimeError("RPC timeout")
+        outcome = self.run_check()
+        self.assertIn("aggregator checked", outcome.detail)
+        self.assertIn("back-runner check failed: RPC timeout", outcome.detail)
+
+    def test_float_buy_without_flash_dip_is_reported(self):
+        from src.engines.usdp_backrunner import FloatResult
+
+        small = self.Opportunity("curve-3crv", 123, 400_000_000, 401_200_000 * 10**12, Decimal("0.05"), kind="float")
+        self.bot.scan.return_value = [small]
+        self.bot.float_enabled = True
+        self.bot.execute_float_buy.return_value = FloatResult("buy", "dry-run", "curve-3crv", 401_200_000 * 10**12, 400_000_000)
+        self.bot.maybe_sell_float.return_value = None
+        outcome = self.run_check()
+        self.assertEqual(outcome.category, "eligible")
+        self.assertFalse(outcome.executed)
+        self.assertEqual(outcome.detail, "float buy (paper) 400.00 USDC -> 401.2000 USDP on curve-3crv")
+        self.aggregator_mock.assert_not_called()
+
+    def test_backrunner_is_built_from_env_once_per_mode(self):
+        import crosschain_sniper
+
+        self.patches[1].stop()
+        crosschain_sniper._USDP_BACKRUNNERS.clear()
+        try:
+            env = {"ETH_USDP_BACKRUN_MODE": "profit", "ETH_USDP_BACKRUN_FLOAT_USDC": "0", "ETH_USDP_BACKRUN_BUFFER_BPS": "2"}
+            with patch.dict(os.environ, env), \
+                 patch("src.engines.usdp_arb_engine.USDPTestEngine") as engine_cls, \
+                 patch("src.engines.usdp_backrunner.USDPBackrunner") as bot_cls:
+                first = crosschain_sniper.usdp_backrunner(live=False, timeout_seconds=30.0)
+                second = crosschain_sniper.usdp_backrunner(live=False, timeout_seconds=30.0)
+                crosschain_sniper.usdp_backrunner(live=True, timeout_seconds=30.0)
+            self.assertIs(first, second)
+            self.assertEqual(bot_cls.call_count, 2)  # one paper, one live
+            kwargs = bot_cls.call_args_list[0].kwargs
+            self.assertEqual((kwargs["mode"], kwargs["buffer_bps"], kwargs["paper"]), ("profit", 2, True))
+            self.assertTrue(str(kwargs["float_state_path"]).endswith("usdp-float-paper.json"))
+            self.assertTrue(str(bot_cls.call_args_list[1].kwargs["float_state_path"]).endswith("usdp-float-live.json"))
+        finally:
+            crosschain_sniper._USDP_BACKRUNNERS.clear()
+            self.patches[1].start()
 
 
 if __name__ == "__main__":

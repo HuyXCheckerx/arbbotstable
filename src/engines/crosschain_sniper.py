@@ -7,7 +7,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import json
@@ -1477,6 +1477,167 @@ def is_subprocess_mocked() -> bool:
     )
 
 
+def usdp_backrun_enabled() -> bool:
+    return os.getenv("ETH_USDP_BACKRUN_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
+
+
+def usdp_aggregator_fallback_enabled() -> bool:
+    return os.getenv("ETH_USDP_AGGREGATOR_FALLBACK", "true").strip().lower() not in ("false", "0", "no", "off")
+
+
+_USDP_BACKRUNNERS: dict[bool, object] = {}
+_USDP_BACKRUNNER_LOCK = threading.Lock()
+
+
+def usdp_backrunner(*, live: bool, timeout_seconds: float):
+    """The sniper's USDP back-runner, one per mode, kept across checks.
+
+    Keeping it preserves its RPC connection and gas cache and, in float mode, its inventory. Dry-run (paper) and live
+    trades use separate inventory files, the same ones usdp_backrun.py uses.
+    """
+    with _USDP_BACKRUNNER_LOCK:
+        bot = _USDP_BACKRUNNERS.get(live)
+        if bot is not None:
+            return bot
+        from src.engines.usdp_arb_engine import USDPTestEngine
+        from src.engines.usdp_backrunner import USDPBackrunner
+
+        engine = USDPTestEngine(timeout=min(timeout_seconds, 15.0))
+        float_usdc = decimal_setting("ETH_USDP_BACKRUN_FLOAT_USDC", "0")
+        wallet = None
+        if float_usdc > 0:
+            private_key = os.getenv("ETH_OPERATOR_PRIVATE_KEY", "").strip()
+            if private_key:
+                from eth_account import Account
+
+                wallet = Account.from_key(private_key).address
+            else:
+                wallet = engine.operator
+        bot = USDPBackrunner(
+            engine=engine,
+            mode=os.getenv("ETH_USDP_BACKRUN_MODE", "volume").strip().lower(),
+            buffer_bps=int(os.getenv("ETH_USDP_BACKRUN_BUFFER_BPS", "1")),
+            float_usdc=float_usdc,
+            float_min_profit_usd=decimal_setting("ETH_USDP_BACKRUN_FLOAT_MIN_PROFIT_USD", "0.10"),
+            float_wallet=wallet,
+            float_sell_assets=[
+                a.strip().upper()
+                for a in os.getenv("ETH_USDP_BACKRUN_FLOAT_SELL_ASSETS", "USDC").split(",")
+                if a.strip()
+            ],
+            float_state_path=LOG_DIR / ("usdp-float-live.json" if live else "usdp-float-paper.json"),
+            paper=not live,
+        )
+        _USDP_BACKRUNNERS[live] = bot
+        return bot
+
+
+def float_result_text(result) -> str:
+    """One log line for a float-mode buy or sell (usdp_backrunner.FloatResult)."""
+    usdp = Decimal(result.usdp_raw) / Decimal(10**18)
+    usdc = Decimal(result.usdc_raw) / Decimal(10**6)
+    paper = "" if result.mode == "live" else " (paper)"
+    if not result.success:
+        return f"float {result.action}{paper} failed: {result.error}"
+    if result.action == "buy":
+        return f"float buy{paper} {usdc:,.2f} USDC -> {usdp:,.4f} USDP on {result.target}"
+    return f"float sell{paper} {usdp:,.4f} USDP -> {usdc:,.4f} {result.target}, pnl {result.pnl_usd:+,.2f} USD"
+
+
+def run_usdp_backrun(
+    route: Route,
+    *,
+    live: bool,
+    execution_floor: Decimal,
+    timeout_seconds: float,
+    started: float,
+) -> Outcome | None:
+    """Back-run USDP dumps on the watched Curve and Uniswap V4 pools.
+
+    The largest dip that clears the execution floor goes through the flash-loan executor; with float mode on, a dip
+    too small for Stable.com's 1,000 USDP minimum is bought with wallet USDC and sold once the float holds enough.
+    Returns None when there is nothing to do, so the fixed-size aggregator check can run instead.
+    """
+    floor = amount_text(execution_floor)
+    bot = usdp_backrunner(live=live, timeout_seconds=timeout_seconds)
+    bot.min_profit_usd = execution_floor
+    opportunities = bot.scan("latest")
+    flash = next((o for o in opportunities if o.kind == "flash"), None)
+    small = next((o for o in opportunities if o.kind == "float"), None)
+
+    outcome = None
+    if flash is not None:
+        gross_profit = str(flash.gross_profit_usd.quantize(TOKEN_QUANTUM))
+        net_profit = str(flash.net_profit_usd.quantize(TOKEN_QUANTUM))
+        plan = {
+            "timestamp": time.time(),
+            "route": route.key,
+            "strategy": "back-run",
+            "venue": flash.venue,
+            "block": flash.block,
+            "loanAmount": str(flash.amount_in_usdc),
+            "dexOutputUsdp": str(flash.usdp_out),
+            "grossProfit": gross_profit,
+            "predictedNetProfit": net_profit,
+        }
+        exec_res = bot.execute(flash, live=live)
+        if exec_res is None:
+            outcome = Outcome(
+                False,
+                f"{flash.venue} dip no longer clears execution floor {floor} USDC on re-quote",
+                "unprofitable",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=time.monotonic() - started,
+            )
+        else:
+            plan["execution"] = {
+                "mode": exec_res.mode,
+                "success": exec_res.success,
+                "txHash": exec_res.tx_hash,
+                "etherscanUrl": exec_res.etherscan_url,
+                "error": exec_res.error,
+            }
+            outcome = usdp_execution_outcome(
+                route, exec_res, live=live, gross_profit=gross_profit, net_profit=net_profit,
+                started=started, venue=flash.venue,
+            )
+        try:
+            PLAN_DIR.mkdir(parents=True, exist_ok=True)
+            with open(PLAN_DIR / f"{route.key}.json", "w", encoding="utf-8") as f:
+                json.dump(plan, f, indent=2)
+        except OSError:
+            pass
+
+    float_results = []
+    if small is not None:
+        float_results.append(bot.execute_float_buy(small, live=live))
+    if bot.float_enabled:
+        float_results.append(bot.maybe_sell_float(live=live))
+    float_results = [r for r in float_results if r is not None]
+    if not float_results:
+        return outcome
+
+    float_text = "; ".join(float_result_text(r) for r in float_results)
+    if outcome is not None:
+        return replace(outcome, detail=f"{outcome.detail}; {float_text}")
+    sent = [h for r in float_results if r.success for h in r.tx_hashes]
+    failed = next((r for r in float_results if not r.success), None)
+    if failed is not None:
+        category = failure_category(failed.error or "")
+    else:
+        category = "confirmed" if live and sent else "eligible"
+    return Outcome(
+        live and bool(sent),
+        float_text,
+        category,
+        profit_token=route.loan,
+        elapsed_seconds=time.monotonic() - started,
+        transaction=f"https://etherscan.io/tx/{sent[-1]}" if sent else None,
+    )
+
+
 def run_ethereum_usdp_route_direct(
     route: Route,
     *,
@@ -1485,9 +1646,6 @@ def run_ethereum_usdp_route_direct(
     timeout_seconds: float,
 ) -> Outcome:
     started = time.monotonic()
-    floor = amount_text(execution_floor)
-    PLAN_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = PLAN_DIR / f"{route.key}.json"
 
     if route.swap_order != "dex-first":
         elapsed = time.monotonic() - started
@@ -1508,6 +1666,65 @@ def run_ethereum_usdp_route_direct(
             profit_token=route.loan,
             elapsed_seconds=elapsed,
         )
+
+    backrun_error = None
+    if usdp_backrun_enabled():
+        try:
+            outcome = run_usdp_backrun(
+                route,
+                live=live,
+                execution_floor=execution_floor,
+                timeout_seconds=timeout_seconds,
+                started=started,
+            )
+        except Exception as exc:
+            outcome, backrun_error = None, f"back-runner check failed: {exc}"
+        if outcome is not None:
+            return outcome
+        if not usdp_aggregator_fallback_enabled():
+            elapsed = time.monotonic() - started
+            if backrun_error:
+                category = failure_category(backrun_error)
+                return Outcome(
+                    False,
+                    readable_failure(route, backrun_error, category),
+                    category,
+                    profit_token=route.loan,
+                    elapsed_seconds=elapsed,
+                    retry_after_seconds=retry_after_seconds(backrun_error),
+                )
+            return Outcome(
+                False,
+                f"no USDP dip below $1 clears execution floor {amount_text(execution_floor)} USDC",
+                "unprofitable",
+                profit_token=route.loan,
+                elapsed_seconds=elapsed,
+            )
+
+    outcome = run_usdp_aggregator_check(
+        route,
+        live=live,
+        execution_floor=execution_floor,
+        timeout_seconds=timeout_seconds,
+        started=started,
+    )
+    if backrun_error and not outcome.executed:
+        outcome = replace(outcome, detail=f"{outcome.detail}; {backrun_error}")
+    return outcome
+
+
+def run_usdp_aggregator_check(
+    route: Route,
+    *,
+    live: bool,
+    execution_floor: Decimal,
+    timeout_seconds: float,
+    started: float,
+) -> Outcome:
+    """Quote one fixed-size USDC -> USDP trade through the aggregator chain and run it if it clears the floor."""
+    floor = amount_text(execution_floor)
+    PLAN_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = PLAN_DIR / f"{route.key}.json"
 
     try:
         from src.engines.usdp_arb_engine import USDPTestEngine
@@ -1563,7 +1780,7 @@ def run_ethereum_usdp_route_direct(
             return Outcome(
                 False,
                 detail,
-                "below-floor",
+                "unprofitable",
                 gross_profit=gross_profit,
                 net_profit=net_profit,
                 profit_token=route.loan,
@@ -1599,79 +1816,8 @@ def run_ethereum_usdp_route_direct(
         except OSError:
             pass
 
-        elapsed = time.monotonic() - started
-        tx_hash = exec_res.tx_hash
-        tx_link = exec_res.etherscan_url or (f"https://etherscan.io/tx/{tx_hash}" if tx_hash else None)
-
-        if exec_res.success and tx_link:
-            return Outcome(
-                True,
-                f"confirmed in {elapsed:.1f}s via {exec_res.broadcast_method or 'USDP engine'}: {tx_link}",
-                "confirmed",
-                gross_profit=gross_profit,
-                net_profit=net_profit,
-                profit_token=route.loan,
-                elapsed_seconds=elapsed,
-                transaction=tx_link,
-            )
-
-        if live and not exec_res.success:
-            return Outcome(
-                False,
-                f"failed in {elapsed:.1f}s via {exec_res.broadcast_method or 'USDP engine'}: {exec_res.error}",
-                "reverted" if "reverted" in str(exec_res.error).lower() else "unconfirmed",
-                gross_profit=gross_profit,
-                net_profit=net_profit,
-                profit_token=route.loan,
-                elapsed_seconds=elapsed,
-                transaction=tx_link,
-            )
-
-        if not live:
-            sim_ok = exec_res.simulation.success if exec_res.simulation else False
-            if sim_ok:
-                detail = (
-                    f"guaranteed net {net_profit} {route.loan}; "
-                    f"simulation passed in {elapsed:.1f}s; not sent"
-                )
-                return Outcome(
-                    False,
-                    detail,
-                    "eligible",
-                    gross_profit=gross_profit,
-                    net_profit=net_profit,
-                    profit_token=route.loan,
-                    elapsed_seconds=elapsed,
-                )
-            else:
-                sim_err = (
-                    exec_res.simulation.error_message
-                    if exec_res.simulation
-                    else (exec_res.error or "Simulation failed")
-                )
-                detail = f"simulation failed: {sim_err}"
-                category = failure_category(detail)
-                return Outcome(
-                    False,
-                    readable_failure(route, detail, category),
-                    category,
-                    gross_profit=gross_profit,
-                    net_profit=net_profit,
-                    profit_token=route.loan,
-                    elapsed_seconds=elapsed,
-                )
-
-        detail = exec_res.error or "Execution failed without details"
-        category = "reverted" if "revert" in detail.lower() else failure_category(detail)
-        return Outcome(
-            False,
-            readable_failure(route, detail, category),
-            category,
-            gross_profit=gross_profit,
-            net_profit=net_profit,
-            profit_token=route.loan,
-            elapsed_seconds=elapsed,
-            transaction=tx_link,
+        return usdp_execution_outcome(
+            route, exec_res, live=live, gross_profit=gross_profit, net_profit=net_profit, started=started,
         )
 
     except Exception as exc:
@@ -1689,6 +1835,55 @@ def run_ethereum_usdp_route_direct(
             elapsed_seconds=elapsed,
             retry_after_seconds=retry_after_seconds(detail),
         )
+
+
+def usdp_execution_outcome(
+    route: Route,
+    exec_res,
+    *,
+    live: bool,
+    gross_profit: str,
+    net_profit: str,
+    started: float,
+    venue: str | None = None,
+) -> Outcome:
+    """Map a USDP engine ExecutionResult to the sniper's Outcome; `venue` labels back-run trades."""
+    elapsed = time.monotonic() - started
+    via = exec_res.broadcast_method or "USDP engine"
+    label = f"{venue}: " if venue else ""
+    tx_hash = exec_res.tx_hash
+    tx_link = exec_res.etherscan_url or (f"https://etherscan.io/tx/{tx_hash}" if tx_hash else None)
+    metrics = dict(gross_profit=gross_profit, net_profit=net_profit, profit_token=route.loan, elapsed_seconds=elapsed)
+
+    if exec_res.success and tx_link:
+        return Outcome(True, f"{label}confirmed in {elapsed:.1f}s via {via}: {tx_link}", "confirmed",
+                       transaction=tx_link, **metrics)
+
+    if live and not exec_res.success:
+        return Outcome(
+            False,
+            f"{label}failed in {elapsed:.1f}s via {via}: {exec_res.error}",
+            "reverted" if "reverted" in str(exec_res.error).lower() else "unconfirmed",
+            transaction=tx_link,
+            **metrics,
+        )
+
+    if not live:
+        if exec_res.simulation and exec_res.simulation.success:
+            detail = f"{label}guaranteed net {net_profit} {route.loan}; simulation passed in {elapsed:.1f}s; not sent"
+            return Outcome(False, detail, "eligible", **metrics)
+        sim_err = (
+            exec_res.simulation.error_message
+            if exec_res.simulation
+            else (exec_res.error or "Simulation failed")
+        )
+        detail = f"{label}simulation failed: {sim_err}"
+        category = failure_category(detail)
+        return Outcome(False, readable_failure(route, detail, category), category, **metrics)
+
+    detail = exec_res.error or "Execution failed without details"
+    category = "reverted" if "revert" in detail.lower() else failure_category(detail)
+    return Outcome(False, readable_failure(route, f"{label}{detail}", category), category, transaction=tx_link, **metrics)
 
 
 def run_ethereum_route_direct(
