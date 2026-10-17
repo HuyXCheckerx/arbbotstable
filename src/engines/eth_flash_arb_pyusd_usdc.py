@@ -1565,6 +1565,7 @@ class MatchaClient:
                 slippage_bps,
                 sell_token_address,
                 buy_token_address,
+                aggregators=aggregators,
             )
         if self.quote_provider == "defillama":
             return self._defillama_quotes(

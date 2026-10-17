@@ -1302,12 +1302,12 @@ function readConfig(cli: CliOptions): Config {
       25,
       1,
     ),
-    minimumGrossProfitRaw: parseUiAmountToRaw(
+    minimumGrossProfitRaw: parseDecimalToRawFloor(
       process.env[`SOL_FLASH_ARB_MIN_GROSS_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC ||
         "0",
     ),
-    minimumNetProfitRaw: parseUiAmountToRaw(
+    minimumNetProfitRaw: parseDecimalToRawFloor(
       process.env[`SOL_FLASH_ARB_MIN_NET_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC ||
         "0",
