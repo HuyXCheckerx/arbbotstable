@@ -635,6 +635,7 @@ export const DEFAULT_SOL_SIZING_LADDER_RAW = [
   2_000_000_000n,   // 2k
   1_500_000_000n,   // 1.5k
   1_250_000_000n,   // 1.25k
+  1_005_000_000n,   // 1.005k (ensures >1k after DEX fees)
   1_000_000_000n,   // 1k (Stable.com minimum)
 ];
 
@@ -1318,7 +1319,7 @@ function readConfig(cli: CliOptions): Config {
     computeUnitSafetyBps: envInt("SOL_FLASH_ARB_COMPUTE_SAFETY_BPS", 1_500, 0),
     computeUnitPriceMicroLamports: envInt(
       "SOL_FLASH_ARB_CU_PRICE_MICROLAMPORTS",
-      100_000,
+      10_000,
       0,
     ),
     solUsdUrl:
