@@ -2349,7 +2349,7 @@ def prepare_transaction(
     effective_min_priority_gwei = (
         min_priority_fee_gwei
         if min_priority_fee_gwei is not None
-        else (Decimal(env_min_priority.strip()) if env_min_priority and env_min_priority.strip() else Decimal("1.5"))
+        else (Decimal(env_min_priority.strip()) if env_min_priority and env_min_priority.strip() else Decimal("0.02"))
     )
     min_priority_wei = int(
         (effective_min_priority_gwei * Decimal(10**9)).to_integral_value(rounding=ROUND_CEILING)
@@ -2523,7 +2523,7 @@ def parser() -> argparse.ArgumentParser:
         "--min-priority-fee-gwei",
         type=Decimal,
         default=setting("ETH_MIN_PRIORITY_FEE_GWEI") or setting("ETH_PRIORITY_FEE_GWEI"),
-        help="minimum priority fee in Gwei for builder inclusion (default: 1.5)",
+        help="minimum priority fee in Gwei for builder inclusion (default: 0.02)",
     )
     result.add_argument(
         "--matcha-base-url",
