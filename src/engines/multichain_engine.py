@@ -954,8 +954,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--slippage",
-        default="0.005",
-        help="Slippage percentage (0.005 = 0.5 bps, 0.01 = 1 bp, 0 = exact)",
+        default="0.01",
+        help="Slippage percentage (0.01 = 1 bp, 0.02 = 2 bps, 0 = exact)",
     )
     parser.add_argument(
         "--watch",
@@ -996,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    slippage_bps = max(0, int(Decimal(args.slippage) * 100))
+    slippage_bps = max(0, int(round(Decimal(args.slippage) * 100)))
     engine = MultichainEngine()
 
     chains_to_scan = (
