@@ -1322,7 +1322,7 @@ function readConfig(cli: CliOptions): Config {
     computeUnitSafetyBps: envInt("SOL_FLASH_ARB_COMPUTE_SAFETY_BPS", 1_500, 0),
     computeUnitPriceMicroLamports: envInt(
       "SOL_FLASH_ARB_CU_PRICE_MICROLAMPORTS",
-      10_000,
+      1_000,
       0,
     ),
     solUsdUrl:
