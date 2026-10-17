@@ -77,7 +77,7 @@ class BrowserQuoteTests(unittest.TestCase):
         from scripts.defillama_browser import BrowserQuotes
         from urllib.parse import urlencode
         browser = BrowserQuotes(tokens=TOKENS, sell='USDG', buy='PYUSD', amount='100',
-            slippage='0.1', protocols=['1inch'], state_path='/unused')
+            slippage='0.1', protocols=['1inch'], state_path='/unused', hide_ip=True)
         browser.page = Mock()
         request = Mock(url=API + '?' + urlencode({'protocol': '1inch', 'from': TOKENS['USDG'],
                                                 'to': TOKENS['PYUSD'], 'amount': '100000000'}))
@@ -94,6 +94,66 @@ class BrowserQuoteTests(unittest.TestCase):
         browser.failed(request)
         self.assertEqual(browser.snapshot(1)[0]['status'], 'error')
         self.assertIsNone(browser.identity(request.url.replace('100000000', '200000000')))
+
+    def test_displayed_routes_are_filtered_and_never_claim_exact_units(self):
+        from scripts.defillama_browser import displayed_quotes
+        text = '''You buy\nUSDT\nSelect a route to perform a swap
+Best route is selected based on net output after gas fees.
+100,129.4\n\nUSDT\n\nVERIFIED\nBEST
+≈ $99,989.6 after gas fees\n\n$0.07161006\n\nvia Matcha/0x v2
+100,119.75\n\nUSDT\n\nVERIFIED\n-0.01%
+≈ $99,979.9 after gas fees\n\n$0.07191121\n\nvia 1inch
+FAQ\n100,999\nUSDT\nvia unrelated'''
+        quotes = displayed_quotes(text, 'USDT')
+        self.assertEqual([q['protocol'] for q in quotes], ['Matcha/0x v2', '1inch'])
+        self.assertEqual(quotes[0]['amount_out'], '100129.4')
+        self.assertEqual(quotes[0]['gas_usd'], '0.07161006')
+        self.assertTrue(quotes[0]['verified_by_website'])
+        self.assertFalse(quotes[0]['executable'])
+        self.assertFalse(quotes[0]['quote_timestamp_available'])
+        self.assertNotIn('amount_out_raw', quotes[0])
+        self.assertEqual(len(displayed_quotes(text, 'USDT', ['1inch'])), 1)
+        self.assertEqual(displayed_quotes(text, 'PYUSD'), [])
+
+    def test_loading_card_cannot_borrow_the_next_cards_provider(self):
+        from scripts.defillama_browser import displayed_quotes
+        text = ('Select a route to perform a swap\n100,130\nUSDT\nLoading\n'
+                '100,119.75\nUSDT\nVERIFIED\nvia 1inch\nFAQ')
+        quotes = displayed_quotes(text, 'USDT')
+        self.assertEqual(len(quotes), 1)
+        self.assertEqual(quotes[0]['protocol'], '1inch')
+        self.assertEqual(quotes[0]['amount_out'], '100119.75')
+
+    def test_disappeared_dom_quote_is_not_reused(self):
+        from scripts.defillama_browser import BrowserQuotes
+        browser = BrowserQuotes(tokens=TOKENS, sell='USDC', buy='USDT', amount='100000',
+            slippage='0', protocols=[], state_path='/unused')
+        browser.page = Mock()
+        browser.page.locator.return_value.inner_text.side_effect = [
+            'Select a route to perform a swap\n100,129.4\nUSDT\nVERIFIED\nvia Matcha/0x v2\nFAQ',
+            'No routes available',
+        ]
+        self.assertEqual(browser.snapshot(1)[0]['status'], 'quoted')
+        second = browser.snapshot(1)[0]
+        self.assertEqual(second['status'], 'pending')
+        self.assertNotIn('amount_out', second)
+
+    def test_bounded_watch_supports_usdt_zero_slippage_and_all_routes(self):
+        from scripts.get_defillama_quotes import main
+        from unittest.mock import patch
+        import contextlib
+        import io
+        with patch('scripts.defillama_browser.BrowserQuotes') as factory:
+            session = factory.return_value.__enter__.return_value
+            session.snapshot.return_value = [{'protocol': 'Matcha/0x v2', 'status': 'quoted',
+                                              'amount_out': '100129.4'}]
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = main(['--sell', 'USDC', '--buy', 'USDT', '--amount', '100000',
+                               '--slippage', '0', '--watch', '--samples', '2', '--timeout', '1'])
+            self.assertEqual(result, 0)
+            self.assertEqual(session.snapshot.call_count, 2)
+            self.assertFalse(factory.call_args.kwargs['hide_ip'])
+            self.assertEqual(factory.call_args.kwargs['protocols'], [])
 
 
     def test_watch_uses_one_context_and_defaults_to_visible_browser(self):

@@ -3,14 +3,15 @@
 ## Standalone LlamaSwap quotes
 
 `scripts/get_defillama_quotes.py` opens the normal LlamaSwap website, selects an
-Ethereum stablecoin pair, enables “Hide IP” to use `swap-api.defillama.com`, and
-reads the website's quote responses. It does not use your API key. The website
+Ethereum stablecoin pair, disables “Hide IP” to avoid the challenged relay, and
+reads the displayed routes across aggregators. It does not use your API key. The website
 manages its own internal request configuration. No wallet is connected, so these
 are indicative website quotes, not executable quotes for your bot's taker.
 
 ```bash
 python scripts/get_defillama_quotes.py --sell USDG --buy PYUSD --amount 100
 python scripts/get_defillama_quotes.py --headful --watch --interval 30 --output logs/llama-quotes.json
+python scripts/get_defillama_quotes.py --sell USDC --buy USDT --amount 100000 --slippage 0 --headless --compact --watch --output logs/llama-usdt-quotes.json
 ```
 
 Watch mode keeps the same browser/context open while the website automatically
@@ -20,13 +21,20 @@ Cookies and local storage are saved in the Git-ignored
 on the next run. Treat this file as private. The browser controls connection reuse;
 a persistent session does not guarantee a permanently open TCP connection.
 
-Defaults display `1inch` and `Matcha/0x v2`; `--protocol` filters reported adapters,
-while the website may request other adapters too. `--timeout 45` controls the first
-collection window. Reports include timestamps so earlier quotes are identifiable.
-`--json` prints reports; no usable quote exits with status 1 (Ctrl+C: 130).
-The browser is visible by default: this mode returned real quotes across repeated
-requests in testing. `--headless` is available, but the headless test failed despite
-obtaining a clearance cookie. Cookies alone do not guarantee endpoint access.
+All displayed adapters are reported by default; `--protocol` filters them.
+`--timeout 15` controls the first collection window. `--samples 2` stops watch mode
+after two reports; the default watches until Ctrl+C. JSON output is replaced
+atomically and includes the quote with the highest displayed token output as
+`best_quote` (gas is reported separately and is not deducted for this ranking).
+Displayed amounts may be rounded, so they are marked `precision: displayed` and
+never exported as exact raw token units. `observed_at` is the time the card was
+read, not the provider's quote timestamp. These results are for monitoring, not
+for authorizing a trade or constructing a transaction. A disappeared route is
+reported as unavailable instead of carrying its last amount forward.
+`--hide-ip` optionally selects the relay, which may return Cloudflare challenges.
+`--channel chrome` launches an isolated installed-Chrome session if needed.
+`--json` prints reports; `--compact` prints single-line timestamped summaries ideal for VPS logs.
+`--headless` runs headlessly with anti-detection args and desktop viewport (or set `DEFILLAMA_HEADLESS=1` on VPS).
 The script never signs, approves, or submits transactions, or changes sniper settings.
 
 ## DefiLlama quote engine for Ethereum routes
