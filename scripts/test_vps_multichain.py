@@ -13,11 +13,24 @@ for key in ("bsc", "polygon"):
     config = CHAINS[key]
     print(f"Testing {config.name}...")
     try:
-        dq = engine.dex.get_best_quote(config, config.usdc, config.usdt, 50000 * 10**config.decimals, 2, "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C")
+        dq = engine.dex.get_paraswap_quote(config, config.usdc, config.usdt, 50000 * 10**config.decimals, 2, "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C")
         print("  DEX quote buyAmount:", dq.buy_amount if dq else None)
-        sq = engine.stable.quote(config, "USDT", "USDC", dq.buy_amount if dq else 50000 * 10**config.decimals, "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C")
-        print("  Stable quote amount_out:", sq.amount_out if sq else None)
-        op = engine.scan_chain_opportunity(config, 50000, "USDT", 2)
-        print("  Gross profit:", op["gross_profit"] if op else None)
     except Exception as e:
+        print("  DEX error:")
         traceback.print_exc()
+
+    # Direct test of api.paraswap.io on VPS
+    try:
+        import urllib.request, urllib.parse, json
+        params = {
+            "srcToken": config.usdc.lower(), "destToken": config.usdt.lower(),
+            "amount": str(50000 * 10**config.decimals), "srcDecimals": config.decimals,
+            "destDecimals": config.decimals, "side": "SELL", "network": config.chain_id,
+        }
+        url = "https://api.paraswap.io/prices?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": "arbbotstable/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+            print("  Direct ParaSwap destAmount:", data["priceRoute"]["destAmount"])
+    except Exception as e:
+        print("  Direct ParaSwap error:", e)
