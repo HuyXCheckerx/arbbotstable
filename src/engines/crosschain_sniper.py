@@ -2065,6 +2065,19 @@ def run_ethereum_route_direct(
                 elapsed_seconds=elapsed,
                 transaction=tx_link,
             )
+        if tx_status == "dropped":
+            reason = plan.get("receiptConfirmation") or "not-found-nonce-unused"
+            method = plan.get("broadcastMethod", "flashbots")
+            return Outcome(
+                False,
+                f"dropped in {elapsed:.1f}s via {method} ({reason}; nonce preserved): {tx_link or tx_hash}",
+                "dropped",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=elapsed,
+                transaction=tx_link or tx_hash,
+            )
         if not live:
             detail = (
                 f"guaranteed net {plan.get('predictedNetProfit')} {route.loan}; "
