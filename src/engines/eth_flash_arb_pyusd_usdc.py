@@ -1559,13 +1559,15 @@ class MatchaClient:
                 aggregators=["okx"],
             )
         if self.quote_provider == "direct":
+            env_direct = [a.strip().lower() for a in os.getenv("ETH_ARB_DIRECT_AGGREGATORS", "").split(",") if a.strip()]
+            active_aggs = env_direct if env_direct else aggregators
             return self._direct_quotes(
                 executor,
                 sell_amount,
                 slippage_bps,
                 sell_token_address,
                 buy_token_address,
-                aggregators=aggregators,
+                aggregators=active_aggs,
             )
         if self.quote_provider == "defillama":
             return self._defillama_quotes(
@@ -1958,6 +1960,20 @@ def submit_transaction_plan(
     output_path: str | None,
 ) -> None:
     """Persist local transaction identity before sending, including uncertain delivery."""
+    # Mandatory on-chain eth_call pre-simulation to guarantee transaction does not revert on builders:
+    try:
+        web3.eth.call({
+            "from": transaction["from"],
+            "to": transaction["to"],
+            "data": transaction["data"],
+            "value": transaction.get("value", 0),
+            "gas": transaction.get("gas", 2500000),
+        })
+    except Exception as sim_err:
+        raise ArbError(
+            f"On-chain pre-flight simulation reverted ({plan.get('matcha', {}).get('aggregator', 'DEX')}): {sim_err}"
+        ) from sim_err
+
     signed = web3.eth.account.sign_transaction(transaction, private_key)
     plan["transactionHash"] = "0x" + bytes(signed.hash).hex()
     plan["transactionStatus"] = "submitted"

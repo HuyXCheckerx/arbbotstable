@@ -2000,6 +2000,9 @@ def run_ethereum_route_direct(
     ]
     if quote_provider:
         args_list.extend(["--quote-provider", quote_provider])
+    direct_aggs = os.getenv("ETH_ARB_DIRECT_AGGREGATORS", "").strip()
+    if direct_aggs:
+        args_list.extend(["--aggregators", direct_aggs])
     if live:
         args_list.extend(["--send", "--confirm-mainnet", "EXECUTE_ATOMIC_ARB"])
 
