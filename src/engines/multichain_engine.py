@@ -437,6 +437,10 @@ class DirectDEXClient:
         if not (api_key and secret_key and passphrase and project_id):
             return None
 
+        # On BSC (chain 56), OKX router reverts with "adaptor call failed" on phantom forks; use OKX on Polygon (137)
+        if config.chain_id == 56:
+            return None
+
         path = "/api/v6/dex/aggregator/swap" if build_tx else "/api/v6/dex/aggregator/quote"
         params = {
             "chainIndex": str(config.chain_id),
@@ -1063,6 +1067,19 @@ class MultichainEngine:
             "gasPrice": w3.eth.gas_price,
             "chainId": config.chain_id,
         }
+
+        # Pre-flight eth_call simulation to protect against failed adaptor/router calls:
+        try:
+            w3.eth.call({
+                "from": operator,
+                "to": dex_tx["to"],
+                "data": dex_tx["data"],
+                "value": dex_tx["value"],
+                "gas": dex_tx["gas"],
+            })
+        except Exception as sim_err:
+            raise ArbError(f"DEX swap pre-simulation failed ({dq.aggregator}): {sim_err}") from sim_err
+
         signed_dex = w3.eth.account.sign_transaction(dex_tx, private_key)
         dex_hash = w3.eth.send_raw_transaction(signed_dex.raw_transaction)
         print(f"[Leg 1 DEX] Broadcasted: {config.explorer_tx_url}{dex_hash.hex()}", flush=True)
