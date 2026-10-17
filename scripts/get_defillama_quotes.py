@@ -110,7 +110,7 @@ def _get_stable_quote(stable_client, executor: str, asset_from: str, asset_to: s
         return None
 
 
-def _execute_live_trade(eth_engine, loan_token: str, intermediate_token: str, swap_order: str, amount_str: str, min_profit: str, live: bool, confirm: str):
+def _execute_live_trade(eth_engine, loan_token: str, intermediate_token: str, swap_order: str, amount_str: str, min_profit: str, live: bool, confirm: str, slippage_bps: int = 2):
     """Execute live or simulated arbitrage trade via eth_flash_arb_pyusd_usdc."""
     args_list = [
         "--loan-token", loan_token,
@@ -120,7 +120,7 @@ def _execute_live_trade(eth_engine, loan_token: str, intermediate_token: str, sw
         "--base-amount", amount_str,
         "--min-profit", min_profit,
         "--min-net-profit", "0",
-        "--slippage-bps", "0",
+        "--slippage-bps", str(slippage_bps),
         "--quote-provider", "direct",
     ]
     if live:
@@ -202,9 +202,10 @@ def main(argv=None):
                 try:
                     dex_quotes = direct_client.quotes(amount_raw, int(slippage * 100), sell_token_address=eth.LOAN_TOKENS[loan_sym], buy_token_address=eth.LOAN_TOKENS[counter_sym])
                     best_dex = dex_quotes[0]
+                    agg_name = "ParaSwap (Velora)" if best_dex.aggregator.lower() == "velora" else best_dex.aggregator
                     sq = stable_client.quote(EXECUTOR_ADDRESS, counter_sym, loan_sym, best_dex.buy_amount)
                     gross = (sq.amount_out - amount_raw) / 1e6
-                    op = {"pair": f"{loan_sym}/{counter_sym}", "loan": loan_sym, "counter": counter_sym, "gross": gross, "aggregator": best_dex.aggregator, "swap_order": "dex-first"}
+                    op = {"pair": f"{loan_sym}/{counter_sym}", "loan": loan_sym, "counter": counter_sym, "gross": gross, "aggregator": agg_name, "swap_order": "dex-first"}
                     pair_results.append(op)
                     if best_op is None or gross > best_op["gross"]:
                         best_op = op
@@ -214,6 +215,27 @@ def main(argv=None):
                 parts = [f"{p['pair']}: {p['gross']:+.2f} {p['loan']} ({p['aggregator']})" for p in pair_results]
                 best_txt = f"Best: {best_op['pair']} ({best_op['gross']:+.2f})" if best_op else "No quote"
                 print(f"[{now_str}] {' | '.join(parts)} | {best_txt}", flush=True)
+            else:
+                for p in pair_results:
+                    print(f"[{now_str}] {p['pair']}: {p['gross']:+.2f} {p['loan']} via {p['aggregator']}", flush=True)
+                if best_op:
+                    print(f"  Best Opportunity: {best_op['pair']} ({best_op['gross']:+.2f} {best_op['loan']})", flush=True)
+
+            # Live Execution Trigger in Direct Mode
+            if args.live and best_op and best_op["gross"] >= float(args.min_profit):
+                confirm_key = args.confirm_live or args.confirm_mainnet
+                print(f"\n[SNIPER FIRING] Executing {best_op['pair']} live on Ethereum mainnet via {best_op['aggregator']}...", flush=True)
+                try:
+                    plan = _execute_live_trade(
+                        eth, best_op["loan"], best_op["counter"], best_op["swap_order"],
+                        args.amount, args.min_profit, live=True, confirm=confirm_key
+                    )
+                    if plan:
+                        tx_hash = plan.get("transactionHash")
+                        print(f"[!] TRANSACTION CONFIRMED: https://etherscan.io/tx/0x{str(tx_hash).removeprefix('0x')}", flush=True)
+                except Exception as exec_err:
+                    print(f"[-] Execution error: {exec_err}", file=sys.stderr)
+
             if not args.watch or (args.samples and sample >= args.samples):
                 break
             time.sleep(args.interval)
@@ -296,7 +318,7 @@ def main(argv=None):
                                     "pair": f"{other}/USDT",
                                     "gross_profit": float(g_prof),
                                     "loan_token": other,
-                                    "aggregator": b_dex.aggregator,
+                                    "aggregator": "ParaSwap (Velora)" if b_dex.aggregator.lower() == "velora" else b_dex.aggregator,
                                 })
                         except Exception:
                             pass
