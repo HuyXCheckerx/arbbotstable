@@ -49,7 +49,7 @@ STOP_PATH = LOG_DIR / ".crosschain-sniper.stop"
 DASHBOARD_PATH = LOG_DIR / "sniper-dashboard.json"
 LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("4")
-SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("0.01")
+SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("0")
 USDP_MINIMUM_ALLOWED_THRESHOLD = Decimal("0")
 TOKEN_QUANTUM = Decimal("0.000001")
 MAX_PAUSE_SECONDS = 10.0
@@ -324,11 +324,17 @@ def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
             effective_threshold = base_threshold
         return strict_execution_floor(effective_threshold, route)
     if route.chain == "solana":
-        effective_threshold = (
-            Decimal("1")
-            if base_threshold in {Decimal("4"), Decimal("5")}
-            else base_threshold
+        raw_sol_thresh = (
+            os.getenv("SOL_ARB_MIN_PROFIT_USD")
+            or os.getenv("SOLANA_MIN_PROFIT_USD")
+            or os.getenv("SOL_FLASH_ARB_MIN_PROFIT_USD")
         )
+        if raw_sol_thresh is not None:
+            effective_threshold = Decimal(raw_sol_thresh.strip())
+        elif base_threshold in {Decimal("4"), Decimal("5")}:
+            effective_threshold = Decimal("0")
+        else:
+            effective_threshold = base_threshold
         return strict_execution_floor(effective_threshold, route)
     return strict_execution_floor(base_threshold, route)
 
@@ -535,6 +541,10 @@ def build_route_invocation(
                 "SOL_FLASH_ARB_DEX_PROVIDER": dex_provider,
             }
         )
+        sol_base_amount = os.getenv("SOL_ARB_BASE_AMOUNT") or os.getenv("SOL_ARB_AMOUNT")
+        if sol_base_amount:
+            environment[f"SOL_FLASH_ARB_AMOUNT_{route.loan}"] = sol_base_amount
+            environment["SOL_FLASH_ARB_AMOUNT_USDC"] = sol_base_amount
         existing_node_opts = environment.get("NODE_OPTIONS", "")
         if "--max-old-space-size" not in existing_node_opts:
             environment["NODE_OPTIONS"] = f"{existing_node_opts} --max-old-space-size=512".strip()

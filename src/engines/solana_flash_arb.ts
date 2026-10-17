@@ -616,6 +616,40 @@ export function effectiveScaledMinimumProfitRaw(
   return scaled > floorLimit ? scaled : floorLimit;
 }
 
+export const DEFAULT_SOL_SIZING_LADDER_RAW = [
+  100_000_000_000n, // 100k
+  75_000_000_000n,  // 75k
+  50_000_000_000n,  // 50k
+  35_000_000_000n,  // 35k
+  25_000_000_000n,  // 25k
+  15_000_000_000n,  // 15k
+  10_000_000_000n,  // 10k
+  9_000_000_000n,   // 9k
+  8_000_000_000n,   // 8k
+  7_000_000_000n,   // 7k
+  6_000_000_000n,   // 6k
+  5_000_000_000n,   // 5k
+  4_000_000_000n,   // 4k
+  3_000_000_000n,   // 3k
+  2_500_000_000n,   // 2.5k
+  2_000_000_000n,   // 2k
+  1_500_000_000n,   // 1.5k
+  1_250_000_000n,   // 1.25k
+  1_000_000_000n,   // 1k (Stable.com minimum)
+];
+
+export function getNextDownsizedLoanAmount(currentLoanRaw: bigint, minimumRaw: bigint): bigint | undefined {
+  for (const size of DEFAULT_SOL_SIZING_LADDER_RAW) {
+    if (size < currentLoanRaw && size >= minimumRaw) {
+      return size;
+    }
+  }
+  if (currentLoanRaw > minimumRaw) {
+    return minimumRaw;
+  }
+  return undefined;
+}
+
 export function finalComputeUnitLimit(
   unitsConsumed: number,
   safetyBps: number,
@@ -1262,18 +1296,18 @@ function readConfig(cli: CliOptions): Config {
     ),
     stableCapacitySizingAttempts: envInt(
       "SOL_FLASH_ARB_STABLE_CAPACITY_SIZING_ATTEMPTS",
-      5,
+      25,
       1,
     ),
     minimumGrossProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_GROSS_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_GROSS_PROFIT_USDC ||
-        "1",
+        "0",
     ),
     minimumNetProfitRaw: parseUiAmountToRaw(
       process.env[`SOL_FLASH_ARB_MIN_NET_PROFIT_${loanSymbol}`] ||
         process.env.SOL_FLASH_ARB_MIN_NET_PROFIT_USDC ||
-        "1",
+        "0",
     ),
     maxAccounts: routeConstraints.maxAccounts,
     onlyDirectRoutes: routeConstraints.onlyDirectRoutes,
@@ -2452,6 +2486,7 @@ async function getCapacitySizedCycle(
     loanAmountRaw = maxBankBorrowRaw;
   }
   let capacityAdjusted = false;
+  let bestCandidate: SizedCycle | undefined;
   const isTwoHop = config.dexProvider === "jupiter" && isTwoHopJupiterRoute(
     config.loanMint,
     config.intermediateMint,
@@ -2533,7 +2568,7 @@ async function getCapacitySizedCycle(
         grossProfitRaw,
       };
 
-      return {
+      const candidateSizedCycle: SizedCycle = {
         loanAmountRaw,
         firstQuote: jupiterQuote,
         secondJupiterQuote: secondQuote,
@@ -2543,6 +2578,31 @@ async function getCapacitySizedCycle(
         usableCapacityRaw,
         capacityAdjusted,
       };
+
+      if (!bestCandidate || candidateSizedCycle.cycle.grossProfitRaw > bestCandidate.cycle.grossProfitRaw) {
+        bestCandidate = candidateSizedCycle;
+      }
+
+      const effectiveMinGrossRaw = effectiveScaledMinimumProfitRaw(
+        config.minimumGrossProfitRaw,
+        loanAmountRaw,
+        config.maximumLoanAmountRaw,
+      );
+
+      if (cycle.grossProfitRaw >= effectiveMinGrossRaw || attempt >= config.stableCapacitySizingAttempts - 1) {
+        return candidateSizedCycle;
+      }
+
+      const nextSize = getNextDownsizedLoanAmount(loanAmountRaw, minimumRaw);
+      if (!nextSize) {
+        return bestCandidate ?? candidateSizedCycle;
+      }
+      console.log(
+        `Gross profit at ${formatRaw(loanAmountRaw)} ${config.loanSymbol} was ${formatRaw(cycle.grossProfitRaw)}; stepping down to ${formatRaw(nextSize)} ${config.loanSymbol}...`,
+      );
+      loanAmountRaw = nextSize;
+      capacityAdjusted = true;
+      continue;
     }
 
     let firstQuote: JupiterQuote;
@@ -2606,36 +2666,32 @@ async function getCapacitySizedCycle(
         loanAmountRaw,
         config.maximumLoanAmountRaw,
       );
-      if (cycle.grossProfitRaw >= effectiveMinGrossRaw || attempt >= config.stableCapacitySizingAttempts - 1) {
-        return {
-          loanAmountRaw,
-          firstQuote,
-          secondJupiterQuote,
-          stableQuote,
-          cycle,
-          capacityRaw,
-          usableCapacityRaw,
-          capacityAdjusted,
-        };
+      const candidateSizedCycle: SizedCycle = {
+        loanAmountRaw,
+        firstQuote,
+        secondJupiterQuote,
+        stableQuote,
+        cycle,
+        capacityRaw,
+        usableCapacityRaw,
+        capacityAdjusted,
+      };
+
+      if (!bestCandidate || candidateSizedCycle.cycle.grossProfitRaw > bestCandidate.cycle.grossProfitRaw) {
+        bestCandidate = candidateSizedCycle;
       }
-      const stepDownRaw = 5_000_000_000n; // 5,000 tokens
-      const downsizedLoan = loanAmountRaw > stepDownRaw + minimumRaw ? loanAmountRaw - stepDownRaw : (loanAmountRaw * 8n) / 10n;
-      if (downsizedLoan < minimumRaw) {
-        return {
-          loanAmountRaw,
-          firstQuote,
-          secondJupiterQuote,
-          stableQuote,
-          cycle,
-          capacityRaw,
-          usableCapacityRaw,
-          capacityAdjusted,
-        };
+
+      if (cycle.grossProfitRaw >= effectiveMinGrossRaw || attempt >= config.stableCapacitySizingAttempts - 1) {
+        return candidateSizedCycle;
+      }
+      const nextSize = getNextDownsizedLoanAmount(loanAmountRaw, minimumRaw);
+      if (!nextSize) {
+        return bestCandidate ?? candidateSizedCycle;
       }
       console.log(
-        `Gross profit at ${formatRaw(loanAmountRaw)} ${config.loanSymbol} was ${formatRaw(cycle.grossProfitRaw)}; stepping down to ${formatRaw(downsizedLoan)} ${config.loanSymbol}...`,
+        `Gross profit at ${formatRaw(loanAmountRaw)} ${config.loanSymbol} was ${formatRaw(cycle.grossProfitRaw)}; stepping down to ${formatRaw(nextSize)} ${config.loanSymbol}...`,
       );
-      loanAmountRaw = downsizedLoan;
+      loanAmountRaw = nextSize;
       capacityAdjusted = true;
       continue;
     }
@@ -2650,6 +2706,10 @@ async function getCapacitySizedCycle(
     );
     loanAmountRaw = adjustedLoanAmountRaw;
     capacityAdjusted = true;
+  }
+
+  if (bestCandidate) {
+    return bestCandidate;
   }
 
   throw new Error(

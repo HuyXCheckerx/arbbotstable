@@ -67,6 +67,8 @@ import {
   type SubAccountRentStatus,
   stableCapacity,
   tokenAccountAmountRaw,
+  getNextDownsizedLoanAmount,
+  DEFAULT_SOL_SIZING_LADDER_RAW,
   type JupiterQuote,
   type StableLeg,
 } from "../src/engines/solana_flash_arb.js";
@@ -1532,4 +1534,28 @@ test("buildReclaimRentInstructions transfers leftover tokens before closing ATA"
   assert.equal(ixs.length, 3);
   assert.equal(ixs[2].programId.toBase58(), TOKEN_PROGRAM_ID.toBase58());
   assert.equal(ixs[2].keys[1].pubkey.toBase58(), master.publicKey.toBase58());
+});
+
+test("getNextDownsizedLoanAmount steps down through the 1k-10k ladder", () => {
+  const minRaw = 1_000_000_000n; // 1,000 tokens
+  assert.equal(getNextDownsizedLoanAmount(100_000_000_000n, minRaw), 75_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(75_000_000_000n, minRaw), 50_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(50_000_000_000n, minRaw), 35_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(35_000_000_000n, minRaw), 25_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(25_000_000_000n, minRaw), 15_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(15_000_000_000n, minRaw), 10_000_000_000n);
+  // Granular scaling in the 1,000 - 10,000 range
+  assert.equal(getNextDownsizedLoanAmount(10_000_000_000n, minRaw), 9_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(9_000_000_000n, minRaw), 8_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(8_000_000_000n, minRaw), 7_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(7_000_000_000n, minRaw), 6_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(6_000_000_000n, minRaw), 5_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(5_000_000_000n, minRaw), 4_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(4_000_000_000n, minRaw), 3_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(3_000_000_000n, minRaw), 2_500_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(2_500_000_000n, minRaw), 2_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(2_000_000_000n, minRaw), 1_500_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(1_500_000_000n, minRaw), 1_250_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(1_250_000_000n, minRaw), 1_000_000_000n);
+  assert.equal(getNextDownsizedLoanAmount(1_000_000_000n, minRaw), undefined);
 });
