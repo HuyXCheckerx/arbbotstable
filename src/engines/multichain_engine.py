@@ -16,10 +16,13 @@ Features:
 from __future__ import annotations
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -416,6 +419,171 @@ class DirectDEXClient:
         except Exception:
             return None
 
+    def get_okx_quote(
+        self,
+        config: ChainConfig,
+        sell_token: str,
+        buy_token: str,
+        sell_amount_raw: int,
+        slippage_bps: int,
+        taker: str,
+        build_tx: bool = False,
+    ) -> DEXQuote | None:
+        """Fetch quote or executable swap calldata from OKX DEX Aggregator."""
+        api_key = os.getenv("OKX_API_KEY", "").strip()
+        secret_key = os.getenv("OKX_SECRET_KEY", "").strip()
+        passphrase = os.getenv("OKX_PASSPHRASE", "").strip()
+        project_id = os.getenv("OKX_PROJECT_ID", "").strip()
+        if not (api_key and secret_key and passphrase and project_id):
+            return None
+
+        path = "/api/v6/dex/aggregator/swap" if build_tx else "/api/v6/dex/aggregator/quote"
+        params = {
+            "chainIndex": str(config.chain_id),
+            "fromTokenAddress": sell_token,
+            "toTokenAddress": buy_token,
+            "amount": str(sell_amount_raw),
+        }
+        if build_tx:
+            params["slippagePercent"] = f"{max(0.01, float(slippage_bps) / 100):.2f}"
+            params["userWalletAddress"] = taker
+
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        qs = urllib.parse.urlencode(params)
+        msg = timestamp + "GET" + path + "?" + qs
+        sig = base64.b64encode(hmac.new(secret_key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).digest()).decode()
+        headers = {
+            "OK-ACCESS-KEY": api_key,
+            "OK-ACCESS-SIGN": sig,
+            "OK-ACCESS-TIMESTAMP": timestamp,
+            "OK-ACCESS-PASSPHRASE": passphrase,
+            "OK-ACCESS-PROJECT": project_id,
+            "Content-Type": "application/json",
+            "User-Agent": "arbbotstable/1.0",
+        }
+        try:
+            resp = self.session.get(f"https://www.okx.com{path}?{qs}", headers=headers, timeout=self.timeout)
+            if resp.status_code != 200:
+                return None
+            r = resp.json()
+            if r.get("code") != "0" or not r.get("data"):
+                return None
+            data = r["data"][0]
+            router_res = data.get("routerResult", {})
+            tx = data.get("tx", {})
+            out_amount = int(tx.get("minReceiveAmount") or router_res.get("toTokenAmount") or data.get("toTokenAmount", 0))
+            gas_est = int(tx.get("gas") or router_res.get("estimateGasFee", 250000))
+            spender = "0x3B86917369B83a6892f553609F3c2F439C184e31" if config.chain_id == 137 else "0x2c34A2Fb1d0b4f55de51E1d0bDEfaDDce6b7cDD6"
+            target = tx.get("to") or ("0x3c4829196bfadff4394726b45159aeaac6fcd41c" if config.chain_id == 137 else "0x5994814f2c4040b863a0125a45de152a8c2a4dec")
+            calldata = tx.get("data") or "0x"
+            value = int(tx.get("value", 0))
+            return DEXQuote(
+                aggregator="OKX DEX",
+                target=target,
+                allowance_target=spender,
+                data=calldata,
+                value=value,
+                sell_amount=sell_amount_raw,
+                buy_amount=out_amount,
+                gas=gas_est,
+            )
+        except Exception:
+            return None
+
+    def get_0x_quote(
+        self,
+        config: ChainConfig,
+        sell_token: str,
+        buy_token: str,
+        sell_amount_raw: int,
+        slippage_bps: int,
+        taker: str,
+        build_tx: bool = False,
+    ) -> DEXQuote | None:
+        """Fetch quote via 0x API v2 (Matcha)."""
+        key = os.getenv("ZERO_EX_API_KEY", "").strip() or os.getenv("ETH_ARB_ZERO_EX_API_KEY", "").strip()
+        if not key:
+            return None
+        endpoint = "allowance-holder/quote" if build_tx else "permit2/price"
+        params = {
+            "chainId": str(config.chain_id),
+            "sellToken": sell_token,
+            "buyToken": buy_token,
+            "sellAmount": str(sell_amount_raw),
+        }
+        if build_tx:
+            params["taker"] = taker
+            params["slippageBps"] = str(slippage_bps)
+        headers = {"0x-api-key": key, "0x-version": "v2", "User-Agent": "arbbotstable/1.0"}
+        try:
+            resp = self.session.get(f"https://api.0x.org/swap/{endpoint}", params=params, headers=headers, timeout=self.timeout)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            buy_amount = int(data.get("buyAmount", 0))
+            tx = data.get("transaction", {})
+            target = tx.get("to") or "0xDEF171Fe48CF0115B1d80b88dc8eAB59176FEe57"
+            allowance_target = ((data.get("issues") or {}).get("allowance") or {}).get("spender") or data.get("allowanceTarget") or target
+            return DEXQuote(
+                aggregator="Matcha/0x v2",
+                target=target,
+                allowance_target=allowance_target,
+                data=tx.get("data") or "0x",
+                value=int(tx.get("value", 0)),
+                sell_amount=sell_amount_raw,
+                buy_amount=buy_amount,
+                gas=int(tx.get("gas", 250000)),
+            )
+        except Exception:
+            return None
+
+    def get_1inch_quote(
+        self,
+        config: ChainConfig,
+        sell_token: str,
+        buy_token: str,
+        sell_amount_raw: int,
+        slippage_bps: int,
+        taker: str,
+        build_tx: bool = False,
+    ) -> DEXQuote | None:
+        """Fetch quote via 1inch API."""
+        key = os.getenv("ONEINCH_API_KEY", "").strip()
+        if not key:
+            return None
+        endpoint = "swap" if build_tx else "quote"
+        params = {
+            "src": sell_token,
+            "dst": buy_token,
+            "amount": str(sell_amount_raw),
+        }
+        if build_tx:
+            params["from"] = taker
+            params["receiver"] = taker
+            params["slippage"] = f"{float(slippage_bps) / 100:.2f}"
+            params["disableEstimate"] = "true"
+        headers = {"Authorization": f"Bearer {key}", "User-Agent": "arbbotstable/1.0"}
+        try:
+            resp = self.session.get(f"https://api.1inch.dev/swap/v6.0/{config.chain_id}/{endpoint}", params=params, headers=headers, timeout=self.timeout)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            buy_amount = int(data.get("dstAmount", 0))
+            tx = data.get("tx", {})
+            target = tx.get("to") or "0x111111125421cA6dc452d289314280a0f8842A65"
+            return DEXQuote(
+                aggregator="1inch",
+                target=target,
+                allowance_target=target,
+                data=tx.get("data") or "0x",
+                value=int(tx.get("value", 0)),
+                sell_amount=sell_amount_raw,
+                buy_amount=buy_amount,
+                gas=int(tx.get("gas", 250000)),
+            )
+        except Exception:
+            return None
+
     def get_best_quote(
         self,
         config: ChainConfig,
@@ -426,11 +594,23 @@ class DirectDEXClient:
         taker: str,
         build_tx: bool = False,
     ) -> DEXQuote | None:
-        """Returns the best executable quote across enabled DEX aggregators."""
+        """Returns the best executable quote across enabled DEX aggregators (OKX, ParaSwap, 0x, 1inch)."""
+        funcs = [
+            lambda: self.get_okx_quote(config, sell_token, buy_token, sell_amount_raw, slippage_bps, taker, build_tx=build_tx),
+            lambda: self.get_paraswap_quote(config, sell_token, buy_token, sell_amount_raw, slippage_bps, taker, build_tx=build_tx),
+            lambda: self.get_0x_quote(config, sell_token, buy_token, sell_amount_raw, slippage_bps, taker, build_tx=build_tx),
+            lambda: self.get_1inch_quote(config, sell_token, buy_token, sell_amount_raw, slippage_bps, taker, build_tx=build_tx),
+        ]
         quotes: list[DEXQuote] = []
-        pq = self.get_paraswap_quote(config, sell_token, buy_token, sell_amount_raw, slippage_bps, taker, build_tx=build_tx)
-        if pq:
-            quotes.append(pq)
+        with ThreadPoolExecutor(max_workers=len(funcs)) as pool:
+            futures = [pool.submit(f) for f in funcs]
+            for fut in as_completed(futures):
+                try:
+                    q = fut.result()
+                    if q:
+                        quotes.append(q)
+                except Exception:
+                    pass
         if not quotes:
             return None
         return max(quotes, key=lambda q: q.buy_amount)
@@ -795,9 +975,12 @@ class MultichainEngine:
         usdc_contract = w3.eth.contract(address=w3.to_checksum_address(config.usdc), abi=ERC20_ABI)
         bal = usdc_contract.functions.balanceOf(operator).call()
         if bal < loan_raw:
-            raise ArbError(
-                f"Insufficient {config.name} USDC balance: {from_raw(bal, config.decimals)} < {from_raw(loan_raw, config.decimals)}"
-            )
+            if bal >= int(loan_raw * 0.99):
+                loan_raw = bal
+            else:
+                raise ArbError(
+                    f"Insufficient {config.name} USDC balance: {from_raw(bal, config.decimals)} < {from_raw(loan_raw, config.decimals)}"
+                )
 
         counter_token = config.usdt if opportunity["counter_symbol"] == "USDT" else (config.pyusd or "")
         dq = self.dex.get_best_quote(
