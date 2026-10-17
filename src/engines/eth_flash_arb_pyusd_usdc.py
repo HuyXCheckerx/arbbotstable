@@ -85,6 +85,7 @@ LOAN_TOKENS = {
     "USDC": USDC,
     "PYUSD": PYUSD,
     "USDG": USDG,
+    "USDT": USDT,
 }
 QUOTE_PROVIDER_LABELS = {
     "direct": "Direct",
@@ -737,8 +738,11 @@ def first_key(value: Any, names: Iterable[str]) -> Any:
 
 
 def unwrap_data(payload: Any) -> Any:
-    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-        return payload["data"]
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), dict):
+            return payload["data"]
+        if isinstance(payload.get("asset"), dict):
+            return payload["asset"]
     return payload
 
 
@@ -853,16 +857,30 @@ def _stable_raw_amount(
 
 
 def parse_stable_quote(payload: Any, amount_in: int) -> StableQuote:
-    amount_out_value = first_key(payload, ("amountTo", "amountOut", "outputAmount"))
+    data = unwrap_data(payload)
+    amount_out_value = first_key(data, ("amountTo", "amountOut", "outputAmount"))
+    if amount_out_value is None and isinstance(payload, dict):
+        amount_out_value = first_key(payload, ("amountTo", "amountOut", "outputAmount"))
     if amount_out_value is None:
         raise ArbError("Stable.com status response has no output amount")
-    token_fee_value = first_key(payload, ("tokenFee", "protocolFee"))
+    token_fee_value = first_key(data, ("tokenFee", "protocolFee"))
+    if token_fee_value is None and isinstance(payload, dict):
+        token_fee_value = first_key(payload, ("tokenFee", "protocolFee"))
     capacity_value = first_key(
-        payload,
+        data,
         ("available", "capacity", "liquidity", "balance"),
     )
-    minimum_value = first_key(payload, ("min", "minimum"))
-    maximum_value = first_key(payload, ("max", "maximum"))
+    if capacity_value is None and isinstance(payload, dict):
+        capacity_value = first_key(
+            payload,
+            ("available", "capacity", "liquidity", "balance"),
+        )
+    minimum_value = first_key(data, ("min", "minimum"))
+    if minimum_value is None and isinstance(payload, dict):
+        minimum_value = first_key(payload, ("min", "minimum"))
+    maximum_value = first_key(data, ("max", "maximum"))
+    if maximum_value is None and isinstance(payload, dict):
+        maximum_value = first_key(payload, ("max", "maximum"))
 
     def optional_decimal(value: Any) -> Decimal | None:
         try:
@@ -2387,7 +2405,7 @@ def parser() -> argparse.ArgumentParser:
         "--loan-token",
         choices=tuple(LOAN_TOKENS.keys()),
         default=setting("ETH_ARB_LOAN_TOKEN", "PYUSD"),
-        help="flash loan token to borrow and profit in (USDC, PYUSD, or USDG)",
+        help="flash loan token to borrow and profit in (USDC, PYUSD, USDG, or USDT)",
     )
     result.add_argument(
         "--intermediate-token",
@@ -2577,7 +2595,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     
     if args.intermediate_token:
         intermediate_symbol = args.intermediate_token
-    elif loan_symbol in {"PYUSD", "USDG"}:
+    elif loan_symbol in {"PYUSD", "USDG", "USDT"}:
         intermediate_symbol = "USDC"
     else:
         intermediate_symbol = "PYUSD"

@@ -1356,8 +1356,8 @@ class EquivalentRouteSchedulingTests(unittest.TestCase):
             list(DEFAULT_SWAP_ORDERS),
         )
         groups = arbitrage_groups(routes)
-        self.assertEqual(len(routes), 48)
-        self.assertEqual(len(groups), 24)
+        self.assertEqual(len(routes), 56)
+        self.assertEqual(len(groups), 28)
         self.assertTrue(all(len(group) == 2 for group in groups))
 
     def test_active_routes_prefer_the_first_fundable_route(self):

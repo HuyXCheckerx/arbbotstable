@@ -59,12 +59,18 @@ DEFAULT_ROUTE_PAIRS = tuple(
     f"{loan}/{counter}"
     for loan in ROUTE_TOKENS
     for counter in ROUTE_TOKENS
-    if loan != counter and not ("USDC" in (loan, counter) and "USDT" in (loan, counter))
+    if loan != counter
 ) + ("USDC/USDP", "USDP/USDC")
 DEFAULT_ETH_PAIRS = (
     tuple(p.strip() for p in os.getenv("ETH_ARB_PAIRS").split(",") if p.strip())
     if os.getenv("ETH_ARB_PAIRS")
-    else ("USDC/USDP", "USDP/USDC", "PYUSD/USDG", "USDG/PYUSD")
+    else (
+        "USDC/USDP", "USDP/USDC",
+        "PYUSD/USDG", "USDG/PYUSD",
+        "USDC/USDT", "USDT/USDC",
+        "PYUSD/USDT", "USDT/PYUSD",
+        "USDG/USDT", "USDT/USDG",
+    )
 )
 DEFAULT_SOL_PAIRS = (
     "USDC/PYUSD", "PYUSD/USDC",
@@ -381,6 +387,12 @@ def route_preference_priority(r: Route) -> int:
     if r.chain == "ethereum":
         if "USDP" in r.pair:
             return 0 if r.loan == "USDC" else 1
+        # For USDC/USDT: prefer USDC loan (Morpho zero fee) over USDT
+        if "USDC" in r.pair and "USDT" in r.pair:
+            return 0 if r.loan == "USDC" else 1
+        # For PYUSD/USDT and USDG/USDT: prefer PYUSD or USDG loans (0% Stable fee & Morpho 0-fee)
+        if "USDT" in r.pair:
+            return 0 if r.loan in ("PYUSD", "USDG") else 1
         # On Ethereum, prefer Morpho-funded loans (PYUSD) over Uniswap v4 (USDG)
         return 0 if r.loan == "PYUSD" else 1
     if r.chain == "solana":
