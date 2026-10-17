@@ -235,9 +235,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     prefix = config.env_prefix
     confirmation = f"DEPLOY_{prefix}_EXECUTOR"
-    rpc_url = os.getenv(f"{prefix}_RPC_URL", "").strip()
-    private_key = os.getenv(f"{prefix}_OPERATOR_PRIVATE_KEY", "").strip()
-    configured_operator = os.getenv(f"{prefix}_OPERATOR_ADDRESS", "").strip()
+    default_rpcs = {
+        "POLYGON": "https://polygon-bor-rpc.publicnode.com",
+        "BSC": "https://bsc-rpc.publicnode.com",
+    }
+    rpc_url = os.getenv(f"{prefix}_RPC_URL", "").strip() or default_rpcs.get(prefix, "")
+    private_key = (
+        os.getenv(f"{prefix}_OPERATOR_PRIVATE_KEY", "").strip()
+        or os.getenv("ETH_OPERATOR_PRIVATE_KEY", "").strip()
+    )
+    configured_operator = (
+        os.getenv(f"{prefix}_OPERATOR_ADDRESS", "").strip()
+        or os.getenv("ETH_OPERATOR_ADDRESS", "").strip()
+    )
     if not rpc_url:
         raise DeploymentError(f"{prefix}_RPC_URL is missing from .env")
     if not private_key and not configured_operator:
