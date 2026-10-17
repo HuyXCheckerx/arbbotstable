@@ -232,8 +232,9 @@ class USDPTestEngine:
         self.timeout = timeout
         
         env_rpc = os.getenv("ETH_RPC_URL")
-        self.rpc_urls = [r for r in ([rpc_url] if rpc_url else []) + ([env_rpc] if env_rpc else []) + DEFAULT_RPC_URLS if r]
-        self.rpc_url = self.rpc_urls[0] if self.rpc_urls else "https://rpc.mevblocker.io"
+        fallbacks = [f.strip() for f in os.getenv("ETH_RPC_FALLBACKS", "").split(",") if f.strip()]
+        self.rpc_urls = [r for r in ([rpc_url] if rpc_url else []) + ([env_rpc] if env_rpc else []) + fallbacks + DEFAULT_RPC_URLS if r]
+        self.rpc_url = self.rpc_urls[0] if self.rpc_urls else "https://1rpc.io/eth"
         self.okx_key = os.getenv("OKX_API_KEY", "").strip()
         self.okx_secret = os.getenv("OKX_SECRET_KEY", "").strip()
         self.okx_passphrase = os.getenv("OKX_PASSPHRASE", "").strip()
@@ -974,21 +975,44 @@ class USDPTestEngine:
         )
 
         call_params = {"from": operator_cs, "value": native_val}
+        err_str = ""
+        sim_success = False
+        for curr_url in self.rpc_urls:
+            try:
+                if curr_url != self.rpc_url:
+                    alt_w3 = Web3(Web3.HTTPProvider(curr_url, request_kwargs={"timeout": self.timeout}))
+                    alt_contract = alt_w3.eth.contract(address=executor_cs, abi=EXECUTOR_ABI)
+                    curr_fn = alt_contract.functions.executeArbitrageWithTokens(
+                        int(evaluation.dex_quote.sell_amount_raw),
+                        alt_w3.to_checksum_address(USDC_ADDRESS),
+                        alt_w3.to_checksum_address(USDP_ADDRESS),
+                        matcha_tuple,
+                        stable_tuple,
+                        min_profit_raw,
+                    )
+                else:
+                    curr_fn = fn
+                curr_fn.call(call_params)
+                estimated_gas = curr_fn.estimate_gas(call_params)
+                return SimulationResult(
+                    success=True,
+                    estimated_gas=int(estimated_gas),
+                    native_value_wei=native_val,
+                    min_profit_raw=min_profit_raw,
+                    order_nonce=int(order_data["nonce"]),
+                    order_deadline=int(order_data["deadline"]),
+                    maintainer_signature=str(order_data["maintainerSignature"]),
+                    stable_amount_in_raw=stable_amount_in_raw,
+                )
+            except Exception as exc:
+                err_str = str(exc)
+                if any(k in err_str for k in ("429", "Too Many Requests", "timeout", "Connection reset", "Client Error")):
+                    continue
+                break
         try:
-            fn.call(call_params)
-            estimated_gas = fn.estimate_gas(call_params)
-            return SimulationResult(
-                success=True,
-                estimated_gas=int(estimated_gas),
-                native_value_wei=native_val,
-                min_profit_raw=min_profit_raw,
-                order_nonce=int(order_data["nonce"]),
-                order_deadline=int(order_data["deadline"]),
-                maintainer_signature=str(order_data["maintainerSignature"]),
-                stable_amount_in_raw=stable_amount_in_raw,
-            )
-        except Exception as exc:
-            err_str = str(exc)
+            pass
+        except Exception:
+            pass
             matched_sel = None
             for sel in ERROR_SELECTORS:
                 if sel in err_str:

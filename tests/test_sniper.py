@@ -1201,7 +1201,7 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--swap-order") + 1], "dex-first")
         self.assertEqual(cmd[cmd.index("--amount") + 1], "10000")
         self.assertEqual(cmd[cmd.index("--min-profit-usd") + 1], "4.000001")
-        self.assertEqual(cmd[cmd.index("--leg1-buffer-bps") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--leg1-buffer-bps") + 1], "1")
         self.assertIn("--live", cmd)
         self.assertIn("LIVE", cmd)
 

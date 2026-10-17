@@ -435,7 +435,7 @@ def build_route_invocation(
     if route.chain == "ethereum":
         if "USDP" in (route.loan, route.intermediate):
             base_amount = os.getenv("ETH_USDP_BASE_AMOUNT", "10000")
-            leg1_buffer_bps = os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "0")
+            leg1_buffer_bps = os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "1")
             command = [
                 sys.executable,
                 str(PROJECT_ROOT / "usdp_arb.py"),
@@ -1543,7 +1543,7 @@ def usdp_backrunner(*, live: bool, timeout_seconds: float):
         bot = USDPBackrunner(
             engine=engine,
             mode=os.getenv("ETH_USDP_BACKRUN_MODE", "volume").strip().lower(),
-            buffer_bps=int(os.getenv("ETH_USDP_BACKRUN_BUFFER_BPS", "0")),
+            buffer_bps=int(os.getenv("ETH_USDP_BACKRUN_BUFFER_BPS", "1")),
             float_usdc=float_usdc,
             float_min_profit_usd=decimal_setting("ETH_USDP_BACKRUN_FLOAT_MIN_PROFIT_USD", "0.10"),
             float_wallet=wallet,
@@ -1763,7 +1763,7 @@ def run_usdp_aggregator_check(
             from engines.usdp_arb_engine import USDPTestEngine
 
     base_amount = Decimal(os.getenv("ETH_USDP_BASE_AMOUNT", "10000"))
-    leg1_buffer_bps = int(os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "0"))
+    leg1_buffer_bps = int(os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "1"))
     quote_provider = (
         os.getenv("ETH_USDP_AGGREGATOR")
         or os.getenv("ETH_ARB_QUOTE_PROVIDER")
