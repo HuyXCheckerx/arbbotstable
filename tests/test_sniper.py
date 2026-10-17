@@ -1593,7 +1593,45 @@ class UsdpAggregatorBufferTests(unittest.TestCase):
                 timeout_seconds=10.0,
                 started=100.0,
             )
-            mock_engine.create_stable_order.assert_called_once_with(Decimal("10005.262249"))
+            mock_engine.create_stable_order.assert_called_with(Decimal("10005.262249"))
+
+        # 3. With 0 bps buffer: 100% of USDP output (10006.262875) is redeemed
+        with patch.dict(os.environ, {"ETH_USDP_LEG1_BUFFER_BPS": "0", "ETH_USDP_BASE_AMOUNT": "10000"}), \
+             patch("src.engines.usdp_arb_engine.USDPTestEngine", return_value=mock_engine):
+            outcome = crosschain_sniper.run_usdp_aggregator_check(
+                route=route,
+                live=False,
+                execution_floor=Decimal("0.500001"),
+                timeout_seconds=10.0,
+                started=100.0,
+            )
+            mock_engine.create_stable_order.assert_called_with(Decimal("10006.262875"))
+
+    def test_usdp_route_floor_removes_four_dollar_minimum(self):
+        import crosschain_sniper
+
+        usdp_route = crosschain_sniper.Route("ethereum", "USDC/USDP", "dex-first")
+        other_eth_route = crosschain_sniper.Route("ethereum", "PYUSD/USDG", "dex-first")
+
+        # By default, when base_threshold is 4, USDP route uses 0.50 floor while generic Ethereum route uses 4
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ETH_USDP_MIN_PROFIT_USD", None)
+            os.environ.pop("ETH_USDP_THRESHOLD_USD", None)
+            os.environ.pop("ETH_USDP_BACKRUN_MIN_PROFIT_USD", None)
+            floor_usdp = crosschain_sniper.route_execution_floor(usdp_route, Decimal("4"))
+            floor_other = crosschain_sniper.route_execution_floor(other_eth_route, Decimal("4"))
+            self.assertEqual(floor_usdp, Decimal("0.500001"))
+            self.assertEqual(floor_other, Decimal("4.000001"))
+
+        # With ETH_USDP_MIN_PROFIT_USD=0, USDP route floor is 0.000001
+        with patch.dict(os.environ, {"ETH_USDP_MIN_PROFIT_USD": "0"}):
+            floor_zero = crosschain_sniper.route_execution_floor(usdp_route, Decimal("4"))
+            self.assertEqual(floor_zero, Decimal("0.000001"))
+
+        # With ETH_USDP_MIN_PROFIT_USD=0.10, USDP route floor is 0.100001
+        with patch.dict(os.environ, {"ETH_USDP_MIN_PROFIT_USD": "0.10"}):
+            floor_custom = crosschain_sniper.route_execution_floor(usdp_route, Decimal("4"))
+            self.assertEqual(floor_custom, Decimal("0.100001"))
 
 
 if __name__ == "__main__":

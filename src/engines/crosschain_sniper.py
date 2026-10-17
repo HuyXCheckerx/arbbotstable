@@ -50,6 +50,7 @@ DASHBOARD_PATH = LOG_DIR / "sniper-dashboard.json"
 LIVE_CONFIRMATION = "EXECUTE_PROFIT_SNIPER"
 MINIMUM_ALLOWED_THRESHOLD = Decimal("4")
 SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("0.01")
+USDP_MINIMUM_ALLOWED_THRESHOLD = Decimal("0")
 TOKEN_QUANTUM = Decimal("0.000001")
 MAX_PAUSE_SECONDS = 10.0
 ROUTE_TOKENS = ("USDC", "USDG", "PYUSD")
@@ -291,6 +292,8 @@ def decimal_setting(name: str, fallback: str) -> Decimal:
 def route_minimum_allowed_threshold(route: Route | None = None) -> Decimal:
     if route and route.chain == "solana":
         return SOLANA_MINIMUM_ALLOWED_THRESHOLD
+    if route and ("USDP" in (route.loan, route.intermediate) or "USDP" in route.pair):
+        return USDP_MINIMUM_ALLOWED_THRESHOLD
     return MINIMUM_ALLOWED_THRESHOLD
 
 
@@ -306,6 +309,20 @@ def strict_execution_floor(threshold: Decimal, route: Route | None = None) -> De
 
 
 def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
+    if route and ("USDP" in (route.loan, route.intermediate) or "USDP" in route.pair):
+        raw_usdp_thresh = (
+            os.getenv("ETH_USDP_MIN_PROFIT_USD")
+            or os.getenv("ETH_USDP_THRESHOLD_USD")
+        )
+        if raw_usdp_thresh is not None:
+            effective_threshold = Decimal(raw_usdp_thresh.strip())
+        elif os.getenv("ETH_USDP_BACKRUN_MIN_PROFIT_USD"):
+            effective_threshold = Decimal(os.getenv("ETH_USDP_BACKRUN_MIN_PROFIT_USD").strip())
+        elif base_threshold in {Decimal("4"), Decimal("5")}:
+            effective_threshold = Decimal("0.50")
+        else:
+            effective_threshold = base_threshold
+        return strict_execution_floor(effective_threshold, route)
     if route.chain == "solana":
         effective_threshold = (
             Decimal("1")
@@ -412,7 +429,7 @@ def build_route_invocation(
     if route.chain == "ethereum":
         if "USDP" in (route.loan, route.intermediate):
             base_amount = os.getenv("ETH_USDP_BASE_AMOUNT", "10000")
-            leg1_buffer_bps = os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "1")
+            leg1_buffer_bps = os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "0")
             command = [
                 sys.executable,
                 str(PROJECT_ROOT / "usdp_arb.py"),
@@ -1516,7 +1533,7 @@ def usdp_backrunner(*, live: bool, timeout_seconds: float):
         bot = USDPBackrunner(
             engine=engine,
             mode=os.getenv("ETH_USDP_BACKRUN_MODE", "volume").strip().lower(),
-            buffer_bps=int(os.getenv("ETH_USDP_BACKRUN_BUFFER_BPS", "1")),
+            buffer_bps=int(os.getenv("ETH_USDP_BACKRUN_BUFFER_BPS", "0")),
             float_usdc=float_usdc,
             float_min_profit_usd=decimal_setting("ETH_USDP_BACKRUN_FLOAT_MIN_PROFIT_USD", "0.10"),
             float_wallet=wallet,
@@ -1736,7 +1753,7 @@ def run_usdp_aggregator_check(
             from engines.usdp_arb_engine import USDPTestEngine
 
     base_amount = Decimal(os.getenv("ETH_USDP_BASE_AMOUNT", "10000"))
-    leg1_buffer_bps = int(os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "1"))
+    leg1_buffer_bps = int(os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "0"))
     quote_provider = (
         os.getenv("ETH_USDP_AGGREGATOR")
         or os.getenv("ETH_ARB_QUOTE_PROVIDER")
