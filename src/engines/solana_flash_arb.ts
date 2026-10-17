@@ -636,7 +636,6 @@ export const DEFAULT_SOL_SIZING_LADDER_RAW = [
   2_000_000_000n,   // 2k
   1_500_000_000n,   // 1.5k
   1_250_000_000n,   // 1.25k
-  1_005_000_000n,   // 1.005k (ensures >1k after DEX fees)
   1_000_000_000n,   // 1k (Stable.com minimum)
 ];
 
@@ -2656,6 +2655,16 @@ async function getCapacitySizedCycle(
 
     if (stableQuote.inputRaw <= usableCapacityRaw) {
       if (stableQuote.inputRaw < minimumRaw) {
+        if (usableCapacityRaw >= minimumRaw && attempt < config.stableCapacitySizingAttempts - 1) {
+          const deficit = minimumRaw - stableQuote.inputRaw;
+          const bump = (deficit * loanAmountRaw + stableQuote.inputRaw - 1n) / stableQuote.inputRaw + 100_000n;
+          loanAmountRaw += bump;
+          capacityAdjusted = true;
+          console.log(
+            `DEX output ${formatRaw(stableQuote.inputRaw)} ${config.intermediateSymbol} is just below the ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum; bumping loan by ${formatRaw(bump)} to ${formatRaw(loanAmountRaw)} ${config.loanSymbol}...`,
+          );
+          continue;
+        }
         throw new Error(
           `Sized Stable.com order ${formatRaw(stableQuote.inputRaw)} ${config.intermediateSymbol} is below its ${formatRaw(minimumRaw)} ${config.intermediateSymbol} minimum`,
         );

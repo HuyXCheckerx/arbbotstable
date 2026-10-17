@@ -1930,10 +1930,7 @@ def record_transaction_receipt(
             if type(exc).__name__ == "TimeExhausted"
             else "rpc-error"
         )
-        if (
-            not str(plan.get("broadcastMethod", "")).startswith("flashbots")
-            and transaction_is_absent_and_nonce_unused(plan, web3, transaction_hash)
-        ):
+        if transaction_is_absent_and_nonce_unused(plan, web3, transaction_hash):
             plan["transactionStatus"] = "dropped"
             plan["receiptConfirmation"] = "not-found-nonce-unused"
         write_plan(output_path, plan)
@@ -2246,6 +2243,7 @@ def prepare_transaction(
     max_fee_gwei_override: Decimal | None,
     swap_order: str = "dex-first",
     max_base_fee_gwei: Decimal | None = None,
+    min_priority_fee_gwei: Decimal | None = None,
 ) -> tuple[Any, dict[str, Any], int, int]:
     web3, _ = get_working_web3(rpc_url, rpc_timeout)
 
@@ -2346,7 +2344,17 @@ def prepare_transaction(
                 f"--max-base-fee-gwei limit {max_base_fee_gwei:.3f} Gwei"
             )
 
-    priority_fee = web3.eth.max_priority_fee
+    raw_priority_fee = web3.eth.max_priority_fee
+    env_min_priority = os.getenv("ETH_MIN_PRIORITY_FEE_GWEI") or os.getenv("ETH_PRIORITY_FEE_GWEI")
+    effective_min_priority_gwei = (
+        min_priority_fee_gwei
+        if min_priority_fee_gwei is not None
+        else (Decimal(env_min_priority.strip()) if env_min_priority and env_min_priority.strip() else Decimal("1.5"))
+    )
+    min_priority_wei = int(
+        (effective_min_priority_gwei * Decimal(10**9)).to_integral_value(rounding=ROUND_CEILING)
+    )
+    priority_fee = max(raw_priority_fee, min_priority_wei)
     computed_max_fee = (base_fee * 2) + priority_fee
     if max_fee_gwei_override is not None:
         override_wei = int(
@@ -2510,6 +2518,12 @@ def parser() -> argparse.ArgumentParser:
         type=Decimal,
         default=setting("ETH_MAX_BASE_FEE_GWEI") or setting("ETH_ARB_MAX_BASE_FEE_GWEI"),
         help="maximum base fee in Gwei allowed for execution",
+    )
+    result.add_argument(
+        "--min-priority-fee-gwei",
+        type=Decimal,
+        default=setting("ETH_MIN_PRIORITY_FEE_GWEI") or setting("ETH_PRIORITY_FEE_GWEI"),
+        help="minimum priority fee in Gwei for builder inclusion (default: 1.5)",
     )
     result.add_argument(
         "--matcha-base-url",
@@ -2994,6 +3008,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.max_fee_gwei,
         args.swap_order,
         args.max_base_fee_gwei,
+        args.min_priority_fee_gwei,
     )
     gas_limit = int(transaction["gas"])
     max_gas_cost = gas_cost_usdc_raw(

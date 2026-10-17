@@ -10,6 +10,7 @@ import {
   STABLE_PROGRAM_ID,
   USDC_MINT,
   USDG_MINT,
+  USDT_MINT,
   bufferedFeeRaw,
   buildJupiterQuoteParameters,
   buildStableSwapInstruction,
@@ -114,7 +115,8 @@ test("uses the canonical Token-2022 USDG mint", () => {
 test("resolves PYUSD and USDG as flash-loan mints", () => {
   assert.ok(resolveLoanMint("PYUSD").equals(PYUSD_MINT));
   assert.ok(resolveLoanMint("USDG").equals(USDG_MINT));
-  assert.throws(() => resolveLoanMint("USDT"), /must be USDC, PYUSD, or USDG/);
+  assert.ok(resolveLoanMint("USDT").equals(USDT_MINT));
+  assert.throws(() => resolveLoanMint("DAI"), /must be USDC, PYUSD, USDG, or USDT/);
 });
 
 test("identifies direct Jupiter routing for atomic flash loans", () => {
