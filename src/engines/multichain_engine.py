@@ -560,8 +560,15 @@ class MultichainEngine:
             if not dq:
                 return None
 
+            # Sized input for Stable.com accounting for realistic DEX slippage buffer
+            stable_amount_in = (
+                dq.buy_amount * (10_000 - slippage_bps) // 10_000
+                if slippage_bps > 0
+                else dq.buy_amount
+            )
+
             # Leg 2: Stable.com pool
-            sq = self.stable.quote(config, counter_sym, "USDC", dq.buy_amount, taker)
+            sq = self.stable.quote(config, counter_sym, "USDC", stable_amount_in, taker)
             if not sq:
                 return None
 
@@ -601,6 +608,7 @@ class MultichainEngine:
         opportunity: dict[str, Any],
         min_profit_human: str = "0",
         confirm_key: str = "",
+        slippage_bps: int = 2,
     ) -> dict[str, Any]:
         """Executes the flash loan trade live on-chain via MultichainMatchaStableArb."""
         executor_addr = self.get_executor_address(config)
@@ -624,7 +632,7 @@ class MultichainEngine:
             config.usdc,
             counter_token,
             opportunity["loan_amount_raw"],
-            slippage_bps=2,
+            slippage_bps=slippage_bps,
             taker=executor_addr,
             build_tx=True,
         )
@@ -634,8 +642,12 @@ class MultichainEngine:
         loan_raw = opportunity["loan_amount_raw"]
         min_profit_raw = to_raw(min_profit_human, config.decimals, allow_zero=True)
 
-        # Apply 2 bps safety buffer so on-chain DEX execution output covers Stable.com amountIn
-        stable_amount_in = dq.buy_amount * (10_000 - 2) // 10_000
+        # Apply slippage safety buffer so on-chain DEX execution output covers Stable.com amountIn
+        stable_amount_in = (
+            dq.buy_amount * (10_000 - slippage_bps) // 10_000
+            if slippage_bps > 0
+            else dq.buy_amount
+        )
         sq = self.stable.quote(config, opportunity["counter_symbol"], "USDC", stable_amount_in, executor_addr)
         if not sq:
             raise ArbError("Failed to obtain Stable.com quote for sized order")
@@ -819,6 +831,7 @@ def main(argv: list[str] | None = None) -> int:
                     best_op,
                     min_profit_human=args.min_profit,
                     confirm_key=args.confirm_live,
+                    slippage_bps=slippage_bps,
                 )
                 print(f"[!] TRANSACTION CONFIRMED: {receipt['explorer']}", flush=True)
             except Exception as err:
