@@ -32,6 +32,7 @@ import uuid
 
 try:
     from dotenv import load_dotenv
+    import requests
     from web3 import Web3
     from web3.middleware import ExtraDataToPOAMiddleware
 except ImportError as exc:
@@ -277,23 +278,22 @@ def from_raw(raw: int, decimals: int) -> str:
 class DirectDEXClient:
     """Queries public direct DEX aggregators on BSC and Polygon."""
 
-    def __init__(self, timeout: float = 10.0):
+    def __init__(self, timeout: float = 10.0, session: Any | None = None):
         self.timeout = timeout
-        self.headers = {"User-Agent": "arbbotstable/1.0", "Accept": "application/json"}
+        if session is None:
+            session = requests.Session()
+            session.headers.update({"User-Agent": "arbbotstable/1.0", "Accept": "application/json"})
+        self.session = session
 
     def _http_get(self, url: str) -> dict[str, Any]:
-        req = urllib.request.Request(url, headers=self.headers)
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        resp = self.session.get(url, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
 
     def _http_post(self, url: str, data: dict[str, Any]) -> dict[str, Any]:
-        encoded = json.dumps(data).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=encoded,
-            headers={**self.headers, "Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        resp = self.session.post(url, json=data, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
 
     def get_paraswap_quote(
         self,
@@ -389,17 +389,18 @@ class DirectDEXClient:
 class StableDefiClient:
     """Interacts with Stable.com single-chain swap API."""
 
-    def __init__(self, timeout: float = 12.0):
+    def __init__(self, timeout: float = 12.0, session: Any | None = None):
         self.timeout = timeout
-        self.headers = {"User-Agent": "arbbotstable/1.0", "Content-Type": "application/json"}
+        if session is None:
+            session = requests.Session()
+            session.headers.update({"User-Agent": "arbbotstable/1.0", "Content-Type": "application/json"})
+        self.session = session
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{STABLE_BASE_URL}{path}"
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode("utf-8"), headers=self.headers
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        resp = self.session.post(url, json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
 
     def quote(
         self,
