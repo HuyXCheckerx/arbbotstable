@@ -104,15 +104,15 @@ CHAINS: dict[str, ChainConfig] = {
         usdc="0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
         usdt="0x55d398326f99059fF775485246999027B3197955",
         pyusd=None,
-        provider_kind=1,
-        flash_lender="0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
-        flash_liquidity_holder="0x00901a076785e0906d1028c7d6372d247bec7d61",
-        flash_provider_name="Aave V3",
+        provider_kind=2,
+        flash_lender="",
+        flash_liquidity_holder="",
+        flash_provider_name="Own Funds (0 fee)",
         native_symbol="BNB",
         native_price_symbol="BNBUSDC",
         explorer_tx_url="https://bscscan.com/tx/",
         confirmation="EXECUTE_BSC_ARB",
-        default_rpc="https://bsc-rpc.publicnode.com",
+        default_rpc="https://bsc-dataseed.binance.org",
     ),
 }
 
@@ -178,12 +178,58 @@ ERC20_ABI = [
         "type": "function",
     },
     {
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
         "inputs": [],
         "name": "decimals",
         "outputs": [{"name": "", "type": "uint8"}],
         "stateMutability": "view",
         "type": "function",
     },
+]
+
+STABLE_POOL_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"name": "amountIn", "type": "uint256"},
+                    {"name": "tokenIn", "type": "address"},
+                    {"name": "tokenOut", "type": "address"},
+                    {"name": "chainId", "type": "uint64"},
+                    {"name": "recipient", "type": "address"},
+                    {"name": "deadline", "type": "uint64"},
+                    {"name": "nonce", "type": "uint256"},
+                ],
+                "name": "params",
+                "type": "tuple",
+            },
+            {"name": "maintainerSignature", "type": "bytes"},
+            {"name": "executionFeeNative", "type": "uint256"},
+        ],
+        "name": "singleChainSwap",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    }
 ]
 
 AAVE_POOL_ABI = [
@@ -322,8 +368,12 @@ class DirectDEXClient:
             if not route:
                 return None
             dest_amount = int(route["destAmount"])
-            effective_slippage = max(10, int(slippage_bps))
-            min_dest = dest_amount * (10_000 - effective_slippage) // 10_000
+            effective_slippage = max(0, int(slippage_bps))
+            min_dest = (
+                dest_amount * (10_000 - effective_slippage) // 10_000
+                if effective_slippage > 0
+                else dest_amount
+            )
             allowance = route.get("tokenTransferProxy") or "0xDEF171Fe48CF0115B1d80b88dc8eAB59176FEe57"
             gas_est = int(route.get("gasCost", 180_000))
 
@@ -360,7 +410,7 @@ class DirectDEXClient:
                 data=calldata,
                 value=value,
                 sell_amount=sell_amount_raw,
-                buy_amount=dest_amount,
+                buy_amount=min_dest if build_tx else dest_amount,
                 gas=gas_est,
             )
         except Exception:
@@ -572,9 +622,9 @@ class MultichainEngine:
             if not sq:
                 return None
 
-            # Flash loan fee calculation
-            fee_bps = 0 if config.provider_kind == 0 else 5  # Morpho = 0, Aave V3 = 5 bps
-            flash_fee = (loan_raw * fee_bps + 9_999) // 10_000
+            # Flash loan fee calculation (0 for Morpho and Own Funds, 5 bps for Aave V3)
+            fee_bps = 5 if config.provider_kind == 1 else 0
+            flash_fee = (loan_raw * fee_bps + 9_999) // 10_000 if fee_bps > 0 else 0
 
             gross_profit_raw = sq.amount_out - loan_raw - flash_fee
             gross_profit = Decimal(gross_profit_raw) / (Decimal(10) ** config.decimals)
@@ -608,25 +658,36 @@ class MultichainEngine:
         opportunity: dict[str, Any],
         min_profit_human: str = "0",
         confirm_key: str = "",
-        slippage_bps: int = 2,
+        slippage_bps: int = 1,
     ) -> dict[str, Any]:
-        """Executes the flash loan trade live on-chain via MultichainMatchaStableArb."""
+        """Executes the trade live on-chain via executor contract or direct wallet."""
         executor_addr = self.get_executor_address(config)
         operator_addr, private_key = self.get_operator(config)
-        if not executor_addr or not is_address(executor_addr):
-            raise ArbError(
-                f"No deployed executor for {config.name}. Set {config.env_prefix}_EXECUTOR_ADDRESS in .env"
-            )
         if not operator_addr or not private_key:
             raise ArbError(f"No operator private key for {config.name}")
         if confirm_key not in ("EXECUTE_PROFIT_SNIPER", "EXECUTE_MULTICHAIN_ARB", "LIVE", config.confirmation):
             raise ArbError(f"Invalid live execution confirmation key: {confirm_key}")
+
+        # If chain is configured for Own Funds (e.g. BSC with 10k USDC):
+        if config.provider_kind == 2:
+            return self.execute_live_direct_wallet(
+                config=config,
+                opportunity=opportunity,
+                min_profit_human=min_profit_human,
+                slippage_bps=slippage_bps,
+            )
+
+        if not executor_addr or not is_address(executor_addr):
+            raise ArbError(
+                f"No deployed executor for {config.name}. Set {config.env_prefix}_EXECUTOR_ADDRESS in .env"
+            )
 
         w3 = self.get_web3(config)
         executor = w3.to_checksum_address(executor_addr)
         operator = w3.to_checksum_address(operator_addr)
 
         counter_token = config.usdt if opportunity["counter_symbol"] == "USDT" else (config.pyusd or "")
+        # Build DEX transaction with exact slippage parameter
         dq = self.dex.get_best_quote(
             config,
             config.usdc,
@@ -642,18 +703,20 @@ class MultichainEngine:
         loan_raw = opportunity["loan_amount_raw"]
         min_profit_raw = to_raw(min_profit_human, config.decimals, allow_zero=True)
 
-        # Apply slippage safety buffer so on-chain DEX execution output covers Stable.com amountIn
-        stable_amount_in = (
-            dq.buy_amount * (10_000 - slippage_bps) // 10_000
-            if slippage_bps > 0
-            else dq.buy_amount
-        )
+        # In build_tx mode, dq.buy_amount is min_dest guaranteed by the aggregator
+        stable_amount_in = dq.buy_amount
         sq = self.stable.quote(config, opportunity["counter_symbol"], "USDC", stable_amount_in, executor_addr)
         if not sq:
             raise ArbError("Failed to obtain Stable.com quote for sized order")
-        gross_profit_raw = sq.amount_out - loan_raw
+
+        fee_bps = 5 if config.provider_kind == 1 else 0
+        flash_fee = (loan_raw * fee_bps + 9_999) // 10_000 if fee_bps > 0 else 0
+        gross_profit_raw = sq.amount_out - loan_raw - flash_fee
         if gross_profit_raw < min_profit_raw:
-            raise ArbError(f"Route after slippage buffer ({from_raw(gross_profit_raw, config.decimals)} USDC) is below minimum profit ({from_raw(min_profit_raw, config.decimals)} USDC)")
+            raise ArbError(
+                f"Route after fees and slippage ({from_raw(gross_profit_raw, config.decimals)} USDC) "
+                f"is below minimum profit ({from_raw(min_profit_raw, config.decimals)} USDC)"
+            )
 
         # 1. Obtain cryptographic single-chain order from Stable.com
         stable_order = self.stable.create_order(
@@ -666,12 +729,10 @@ class MultichainEngine:
         )
 
         contract = w3.eth.contract(address=executor, abi=EXECUTOR_ABI)
-
-        # Build transaction params
         matcha_tuple = dq.contract_tuple()
         stable_tuple = stable_order.contract_tuple()
 
-        # Simulate on-chain via eth_call
+        # 2. Simulate on-chain via eth_call
         try:
             contract.functions.executeArbitrage(
                 loan_raw, matcha_tuple, stable_tuple, min_profit_raw
@@ -679,9 +740,15 @@ class MultichainEngine:
         except Exception as sim_err:
             raise ArbError(f"On-chain eth_call simulation failed: {sim_err}") from sim_err
 
-        # Prepare and sign transaction
-        base_fee = w3.eth.get_block("latest").get("baseFeePerGas", w3.to_wei(1, "gwei"))
-        priority_fee = w3.to_wei(1, "gwei")
+        # 3. Dynamic gas fees
+        latest_block = w3.eth.get_block("latest")
+        if config.key == "polygon":
+            priority_fee = max(w3.to_wei(30, "gwei"), getattr(w3.eth, "max_priority_fee", w3.to_wei(30, "gwei")))
+            base_fee = latest_block.get("baseFeePerGas", w3.to_wei(30, "gwei"))
+        else:
+            priority_fee = w3.to_wei(1, "gwei")
+            base_fee = latest_block.get("baseFeePerGas", w3.to_wei(1, "gwei"))
+
         max_fee = base_fee * 2 + priority_fee
         nonce = w3.eth.get_transaction_count(operator, "pending")
 
@@ -707,6 +774,158 @@ class MultichainEngine:
             "status": "broadcasted",
         }
 
+    def execute_live_direct_wallet(
+        self,
+        config: ChainConfig,
+        opportunity: dict[str, Any],
+        min_profit_human: str = "0",
+        slippage_bps: int = 1,
+    ) -> dict[str, Any]:
+        """Executes the trade directly from the operator wallet using own funds (e.g. 10k USDC on BSC)."""
+        operator_addr, private_key = self.get_operator(config)
+        if not operator_addr or not private_key:
+            raise ArbError(f"No operator private key for {config.name}")
+        w3 = self.get_web3(config)
+        operator = w3.to_checksum_address(operator_addr)
+
+        loan_raw = opportunity["loan_amount_raw"]
+        min_profit_raw = to_raw(min_profit_human, config.decimals, allow_zero=True)
+
+        # Check operator's USDC balance
+        usdc_contract = w3.eth.contract(address=w3.to_checksum_address(config.usdc), abi=ERC20_ABI)
+        bal = usdc_contract.functions.balanceOf(operator).call()
+        if bal < loan_raw:
+            raise ArbError(
+                f"Insufficient {config.name} USDC balance: {from_raw(bal, config.decimals)} < {from_raw(loan_raw, config.decimals)}"
+            )
+
+        counter_token = config.usdt if opportunity["counter_symbol"] == "USDT" else (config.pyusd or "")
+        dq = self.dex.get_best_quote(
+            config,
+            config.usdc,
+            counter_token,
+            loan_raw,
+            slippage_bps=slippage_bps,
+            taker=operator_addr,
+            build_tx=True,
+        )
+        if not dq or dq.data in ("0x", ""):
+            raise ArbError("Failed to build executable DEX calldata for live trade")
+
+        stable_amount_in = dq.buy_amount
+        sq = self.stable.quote(config, opportunity["counter_symbol"], "USDC", stable_amount_in, operator_addr)
+        if not sq:
+            raise ArbError("Failed to obtain Stable.com quote for sized order")
+        if sq.amount_out < loan_raw + min_profit_raw:
+            raise ArbError(
+                f"Route after fees ({from_raw(sq.amount_out - loan_raw, config.decimals)} USDC) "
+                f"is below minimum profit ({from_raw(min_profit_raw, config.decimals)} USDC)"
+            )
+
+        # 1. Ensure USDC allowance to DEX router (ParaSwap Augustus)
+        allowance_target = w3.to_checksum_address(dq.allowance_target)
+        current_allowance = usdc_contract.functions.allowance(operator, allowance_target).call()
+        if current_allowance < loan_raw:
+            print(f"Approving {config.name} USDC -> {allowance_target}...", flush=True)
+            approve_tx = usdc_contract.functions.approve(
+                allowance_target, 2**256 - 1
+            ).build_transaction({
+                "from": operator,
+                "nonce": w3.eth.get_transaction_count(operator, "pending"),
+                "gas": 80_000,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": config.chain_id,
+            })
+            signed_app = w3.eth.account.sign_transaction(approve_tx, private_key)
+            app_hash = w3.eth.send_raw_transaction(signed_app.raw_transaction)
+            w3.eth.wait_for_transaction_receipt(app_hash, timeout=30)
+
+        # 2. Ensure USDT allowance to Stable.com pool
+        usdt_contract = w3.eth.contract(address=w3.to_checksum_address(counter_token), abi=ERC20_ABI)
+        stable_pool_addr = w3.to_checksum_address(STABLE_POOL)
+        current_usdt_allowance = usdt_contract.functions.allowance(operator, stable_pool_addr).call()
+        if current_usdt_allowance < stable_amount_in:
+            print(f"Approving {config.name} USDT -> Stable.com pool...", flush=True)
+            approve_usdt = usdt_contract.functions.approve(
+                stable_pool_addr, 2**256 - 1
+            ).build_transaction({
+                "from": operator,
+                "nonce": w3.eth.get_transaction_count(operator, "pending"),
+                "gas": 80_000,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": config.chain_id,
+            })
+            signed_app_usdt = w3.eth.account.sign_transaction(approve_usdt, private_key)
+            app_hash_usdt = w3.eth.send_raw_transaction(signed_app_usdt.raw_transaction)
+            w3.eth.wait_for_transaction_receipt(app_hash_usdt, timeout=30)
+
+        # 3. Obtain Stable.com cryptographic signed order
+        stable_order = self.stable.create_order(
+            config,
+            opportunity["counter_symbol"],
+            "USDC",
+            stable_amount_in,
+            sq.amount_out,
+            operator_addr,
+        )
+
+        # 4. Execute Leg 1: DEX Swap
+        dex_tx = {
+            "from": operator,
+            "to": w3.to_checksum_address(dq.target),
+            "data": dq.data,
+            "value": dq.value,
+            "nonce": w3.eth.get_transaction_count(operator, "pending"),
+            "gas": dq.gas or 250_000,
+            "gasPrice": w3.eth.gas_price,
+            "chainId": config.chain_id,
+        }
+        signed_dex = w3.eth.account.sign_transaction(dex_tx, private_key)
+        dex_hash = w3.eth.send_raw_transaction(signed_dex.raw_transaction)
+        print(f"[Leg 1 DEX] Broadcasted: {config.explorer_tx_url}{dex_hash.hex()}", flush=True)
+        dex_receipt = w3.eth.wait_for_transaction_receipt(dex_hash, timeout=60)
+        if dex_receipt.get("status") != 1:
+            raise ArbError(f"DEX swap reverted: {dex_hash.hex()}")
+
+        # 5. Execute Leg 2: Stable.com singleChainSwap
+        stable_pool_contract = w3.eth.contract(address=stable_pool_addr, abi=STABLE_POOL_ABI)
+        stable_params = (
+            stable_order.amount_in,
+            w3.to_checksum_address(counter_token),
+            w3.to_checksum_address(config.usdc),
+            int(config.chain_id),
+            operator,
+            stable_order.deadline,
+            stable_order.nonce,
+        )
+        stable_tx = stable_pool_contract.functions.singleChainSwap(
+            stable_params,
+            bytes.fromhex(stable_order.maintainer_signature.removeprefix("0x")),
+            stable_order.execution_fee_native,
+        ).build_transaction({
+            "from": operator,
+            "nonce": w3.eth.get_transaction_count(operator, "pending"),
+            "gas": 300_000,
+            "gasPrice": w3.eth.gas_price,
+            "value": stable_order.execution_fee_native,
+            "chainId": config.chain_id,
+        })
+        signed_stable = w3.eth.account.sign_transaction(stable_tx, private_key)
+        stable_hash = w3.eth.send_raw_transaction(signed_stable.raw_transaction)
+        print(f"[Leg 2 Stable] Broadcasted: {config.explorer_tx_url}{stable_hash.hex()}", flush=True)
+        stable_receipt = w3.eth.wait_for_transaction_receipt(stable_hash, timeout=60)
+        if stable_receipt.get("status") != 1:
+            raise ArbError(f"Stable.com swap reverted: {stable_hash.hex()}")
+
+        return {
+            "chain": config.name,
+            "dexTx": dex_hash.hex(),
+            "stableTx": stable_hash.hex(),
+            "transactionHash": stable_hash.hex(),
+            "explorer": f"{config.explorer_tx_url}{stable_hash.hex()}",
+            "status": "confirmed",
+        }
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -721,12 +940,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--amount",
         default="50000",
-        help="Loan amount in USDC (e.g. 50000 or 100000)",
+        help="Global loan amount in USDC (overrides per-chain defaults if not 50000)",
+    )
+    parser.add_argument(
+        "--bsc-amount",
+        default="10000",
+        help="Amount in USDC for BSC using own funds (default: 10000)",
+    )
+    parser.add_argument(
+        "--poly-amount",
+        default="50000",
+        help="Loan amount in USDC for Polygon using Morpho (default: 50000)",
     )
     parser.add_argument(
         "--slippage",
-        default="0.02",
-        help="Slippage percentage (0.02 = 2 bps, 0.1 = 10 bps)",
+        default="0.005",
+        help="Slippage percentage (0.005 = 0.5 bps, 0.01 = 1 bp, 0 = exact)",
     )
     parser.add_argument(
         "--watch",
@@ -758,7 +987,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--live",
         action="store_true",
-        help="Broadcast live flash-loan transaction when profitable",
+        help="Broadcast live transaction when profitable",
     )
     parser.add_argument(
         "--confirm-live",
@@ -767,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    slippage_bps = max(1, int(Decimal(args.slippage) * 100))
+    slippage_bps = max(0, int(Decimal(args.slippage) * 100))
     engine = MultichainEngine()
 
     chains_to_scan = (
@@ -777,8 +1006,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     sample = 0
+    amounts_summary = []
+    for c in chains_to_scan:
+        amt = args.bsc_amount if c.key == "bsc" and args.amount == "50000" else (args.poly_amount if c.key == "polygon" and args.amount == "50000" else args.amount)
+        amounts_summary.append(f"{c.name}: {amt} USDC ({c.flash_provider_name})")
+
     print(
-        f"[STARTING] Multichain Flash Arb Engine active for {', '.join(c.name for c in chains_to_scan)} | Amount: {args.amount} USDC",
+        f"[STARTING] Multichain Engine active | {', '.join(amounts_summary)} | Slippage: {args.slippage}% ({slippage_bps} bps)",
         flush=True,
     )
 
@@ -792,8 +1026,12 @@ def main(argv: list[str] | None = None) -> int:
             pairs = ["USDT"]
             if config.pyusd:
                 pairs.append("PYUSD")
+            chain_amt = (
+                args.bsc_amount if config.key == "bsc" and args.amount == "50000"
+                else (args.poly_amount if config.key == "polygon" and args.amount == "50000" else args.amount)
+            )
             for counter in pairs:
-                op = engine.scan_chain_opportunity(config, args.amount, counter_sym=counter, slippage_bps=slippage_bps)
+                op = engine.scan_chain_opportunity(config, chain_amt, counter_sym=counter, slippage_bps=slippage_bps)
                 if op:
                     results.append(op)
                     if best_op is None or op["gross_profit"] > best_op["gross_profit"]:
