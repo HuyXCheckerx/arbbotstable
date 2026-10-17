@@ -882,29 +882,35 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertIsNone(args.pairs)
         self.assertEqual(args.swap_orders, ["dex-first", "stable-first"])
         routes = selected_routes(args.chains, args.pairs, args.swap_orders)
-        self.assertEqual(len(routes), 20)
+        self.assertEqual(len(routes), 28)
 
         eth_routes = [r for r in routes if r.chain == "ethereum"]
         sol_routes = [r for r in routes if r.chain == "solana"]
 
         self.assertEqual(len(eth_routes), 8)
-        self.assertEqual(len(sol_routes), 12)
+        self.assertEqual(len(sol_routes), 20)
 
         # Ethereum: USDP pairs and PYUSD/USDG
         self.assertEqual({r.pair for r in eth_routes}, {"USDC/USDP", "USDP/USDC", "PYUSD/USDG", "USDG/PYUSD"})
         # USDC routes on Ethereum are specifically paired with USDP
         self.assertEqual({r.pair for r in eth_routes if "USDC" in r.pair}, {"USDC/USDP", "USDP/USDC"})
 
-        # Solana: all pairs between USDC, PYUSD, and USDG
+        # Solana: all pairs between USDC, PYUSD, and USDG, plus PYUSD/USDT and USDG/USDT (excluding USDC/USDT)
         self.assertEqual(
             {r.pair for r in sol_routes},
-            {"USDC/PYUSD", "PYUSD/USDC", "USDC/USDG", "USDG/USDC", "PYUSD/USDG", "USDG/PYUSD"},
+            {
+                "USDC/PYUSD", "PYUSD/USDC",
+                "USDC/USDG", "USDG/USDC",
+                "PYUSD/USDG", "USDG/PYUSD",
+                "PYUSD/USDT", "USDT/PYUSD",
+                "USDG/USDT", "USDT/USDG",
+            },
         )
 
     def test_arbitrage_groups_prioritizes_primary_loan_for_eth_and_solana(self):
         routes = selected_routes(["ethereum", "solana"])
         groups = arbitrage_groups(routes)
-        self.assertEqual(len(groups), 10)  # 4 on eth, 6 on sol
+        self.assertEqual(len(groups), 14)  # 4 on eth, 10 on sol
 
         # Each group has exactly 2 routes (1 preferred, 1 fallback)
         self.assertTrue(all(len(g) == 2 for g in groups))
@@ -923,12 +929,16 @@ class CrosschainSniperTests(unittest.TestCase):
 
         # On Solana:
         # For pairs with USDC, USDC is always preferred (index 0)
+        # For pairs with USDT, PYUSD or USDG (0% Kamino fee) is preferred (index 0) over USDT (index 1)
         # For PYUSD/USDG, PYUSD is preferred (index 0) over USDG (index 1)
         for g in groups:
             if g[0].chain == "solana":
                 if "USDC" in g[0].pair:
                     self.assertEqual(g[0].loan, "USDC")
                     self.assertIn(g[1].loan, {"PYUSD", "USDG"})
+                elif "USDT" in g[0].pair:
+                    self.assertIn(g[0].loan, {"PYUSD", "USDG"})
+                    self.assertEqual(g[1].loan, "USDT")
                 else:
                     self.assertEqual(g[0].loan, "PYUSD")
                     self.assertEqual(g[1].loan, "USDG")
@@ -937,9 +947,9 @@ class CrosschainSniperTests(unittest.TestCase):
         routes = selected_routes(["ethereum", "solana"])
         groups = arbitrage_groups(routes)
 
-        # Normal scan: 8 routes active (2 on ETH loaning PYUSD; on SOL: 4 loaning USDC, 2 loaning PYUSD)
+        # Normal scan: 14 routes active (4 on ETH; 10 on SOL: 4 loaning USDC, 4 loaning PYUSD, 2 loaning USDG)
         active = active_routes(groups, {}, now=100.0)
-        self.assertEqual(len(active), 10)
+        self.assertEqual(len(active), 14)
         eth_active = [r for r in active if r.chain == "ethereum"]
         sol_active = [r for r in active if r.chain == "solana"]
         self.assertEqual(len(eth_active), 4)
@@ -949,19 +959,22 @@ class CrosschainSniperTests(unittest.TestCase):
         self.assertTrue(all(r.loan == "USDC" for r in eth_usdc_active))
         self.assertEqual(len(eth_pyusd_active), 2)
         self.assertTrue(all(r.loan == "PYUSD" for r in eth_pyusd_active))
-        self.assertEqual(len(sol_active), 6)
+        self.assertEqual(len(sol_active), 10)
         sol_usdc_active = [r for r in sol_active if "USDC" in r.pair]
-        sol_pyusd_active = [r for r in sol_active if "USDC" not in r.pair]
+        sol_pyusd_active = [r for r in sol_active if r.loan == "PYUSD"]
+        sol_usdg_active = [r for r in sol_active if r.loan == "USDG"]
         self.assertEqual(len(sol_usdc_active), 4)
         self.assertTrue(all(r.loan == "USDC" for r in sol_usdc_active))
-        self.assertEqual(len(sol_pyusd_active), 2)
+        self.assertEqual(len(sol_pyusd_active), 4)
         self.assertTrue(all(r.loan == "PYUSD" for r in sol_pyusd_active))
+        self.assertEqual(len(sol_usdg_active), 2)
+        self.assertTrue(all(r.loan == "USDG" for r in sol_usdg_active))
 
         # When a preferred route's flash loan capacity / liquidity is blocked:
         blocked_route = eth_pyusd_active[0]
         blocked = {blocked_route.key: 200.0}
         fallback_active = active_routes(groups, blocked, now=100.0)
-        self.assertEqual(len(fallback_active), 10)
+        self.assertEqual(len(fallback_active), 14)
         # The blocked PYUSD route is replaced by its USDG twin
         self.assertNotIn(blocked_route, fallback_active)
         self.assertTrue(any(r.chain == "ethereum" and r.loan == "USDG" for r in fallback_active))
@@ -1336,15 +1349,15 @@ class EquivalentRouteSchedulingTests(unittest.TestCase):
             Route("ethereum", "PYUSD/USDG", "stable-first").arbitrage_key,
         )
 
-    def test_default_routes_form_sixteen_pairs_of_equivalent_routes(self):
+    def test_default_routes_form_twenty_four_pairs_of_equivalent_routes(self):
         routes = selected_routes(
             ["ethereum", "solana"],
             list(DEFAULT_ROUTE_PAIRS),
             list(DEFAULT_SWAP_ORDERS),
         )
         groups = arbitrage_groups(routes)
-        self.assertEqual(len(routes), 32)
-        self.assertEqual(len(groups), 16)
+        self.assertEqual(len(routes), 48)
+        self.assertEqual(len(groups), 24)
         self.assertTrue(all(len(group) == 2 for group in groups))
 
     def test_active_routes_prefer_the_first_fundable_route(self):

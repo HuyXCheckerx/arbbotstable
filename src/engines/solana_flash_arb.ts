@@ -445,8 +445,9 @@ export function resolveLoanMint(symbol: string): PublicKey {
   if (symbol === "USDC") return USDC_MINT;
   if (symbol === "PYUSD") return PYUSD_MINT;
   if (symbol === "USDG") return USDG_MINT;
+  if (symbol === "USDT") return USDT_MINT;
   throw new Error(
-    `SOL_FLASH_ARB_LOAN_TOKEN must be USDC, PYUSD, or USDG; received ${symbol}`,
+    `SOL_FLASH_ARB_LOAN_TOKEN must be USDC, PYUSD, USDG, or USDT; received ${symbol}`,
   );
 }
 
@@ -717,6 +718,7 @@ export async function ensureSubAccountAtas(
     { mint: USDC_MINT, program: intermediateTokenProgram(USDC_MINT), name: "USDC" },
     { mint: PYUSD_MINT, program: intermediateTokenProgram(PYUSD_MINT), name: "PYUSD" },
     { mint: USDG_MINT, program: intermediateTokenProgram(USDG_MINT), name: "USDG" },
+    { mint: USDT_MINT, program: intermediateTokenProgram(USDT_MINT), name: "USDT" },
   ];
   const atas = mints.map((m) => getAssociatedTokenAddressSync(m.mint, subKeypair.publicKey, false, m.program));
 
@@ -820,6 +822,7 @@ export async function getSubAccountRentStatus(
     { mint: USDC_MINT, program: intermediateTokenProgram(USDC_MINT), name: "USDC" },
     { mint: PYUSD_MINT, program: intermediateTokenProgram(PYUSD_MINT), name: "PYUSD" },
     { mint: USDG_MINT, program: intermediateTokenProgram(USDG_MINT), name: "USDG" },
+    { mint: USDT_MINT, program: intermediateTokenProgram(USDT_MINT), name: "USDT" },
   ];
 
   const atas = mints.map(({ mint, program }) =>

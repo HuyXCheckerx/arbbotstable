@@ -53,13 +53,13 @@ SOLANA_MINIMUM_ALLOWED_THRESHOLD = Decimal("0")
 USDP_MINIMUM_ALLOWED_THRESHOLD = Decimal("0")
 TOKEN_QUANTUM = Decimal("0.000001")
 MAX_PAUSE_SECONDS = 10.0
-ROUTE_TOKENS = ("USDC", "USDG", "PYUSD")
+ROUTE_TOKENS = ("USDC", "USDG", "PYUSD", "USDT")
 DEFAULT_SWAP_ORDERS = ("dex-first", "stable-first")
 DEFAULT_ROUTE_PAIRS = tuple(
     f"{loan}/{counter}"
     for loan in ROUTE_TOKENS
     for counter in ROUTE_TOKENS
-    if loan != counter
+    if loan != counter and not ("USDC" in (loan, counter) and "USDT" in (loan, counter))
 ) + ("USDC/USDP", "USDP/USDC")
 DEFAULT_ETH_PAIRS = (
     tuple(p.strip() for p in os.getenv("ETH_ARB_PAIRS").split(",") if p.strip())
@@ -70,6 +70,8 @@ DEFAULT_SOL_PAIRS = (
     "USDC/PYUSD", "PYUSD/USDC",
     "USDC/USDG", "USDG/USDC",
     "PYUSD/USDG", "USDG/PYUSD",
+    "PYUSD/USDT", "USDT/PYUSD",
+    "USDG/USDT", "USDT/USDG",
 )
 CHAIN_DEFAULT_PAIRS: dict[str, tuple[str, ...]] = {
     "ethereum": DEFAULT_ETH_PAIRS,
@@ -385,6 +387,9 @@ def route_preference_priority(r: Route) -> int:
         # On Solana, prefer primary USDC flash loans when USDC is in the pair
         if "USDC" in r.pair:
             return 0 if r.loan == "USDC" else 1
+        # For USDT pairs, prefer PYUSD/USDG loans (0% Kamino fee) over USDT (0.1 bps fee)
+        if "USDT" in r.pair:
+            return 0 if r.loan in ("PYUSD", "USDG") else 1
         # For PYUSD/USDG on Solana, prefer deep PYUSD reserves (Kamino/Marginfi) over USDG
         return 0 if r.loan == "PYUSD" else 1
     return 0
