@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-load_dotenv(ROOT / ".env", override=False)
+load_dotenv(ROOT / ".env", override=True)
 
 STABLE_POOL = "0xCfC1bc6013eD89D484c626dd9ee5EB7bc1a1d9Da"
 STABLE_BASE_URL = "https://api-defi.stable.com"
@@ -214,8 +214,8 @@ class DEXQuote:
 
     def contract_tuple(self) -> tuple[str, str, int, int, bytes]:
         return (
-            self.target,
-            self.allowance_target,
+            Web3.to_checksum_address(self.target),
+            Web3.to_checksum_address(self.allowance_target),
             self.sell_amount,
             self.value,
             bytes.fromhex(self.data[2:]),
@@ -259,13 +259,13 @@ def is_hex(val: Any) -> bool:
     return isinstance(val, str) and val.startswith("0x") and len(val) >= 10
 
 
-def to_raw(amount: str | Decimal | int, decimals: int, rounding: str = ROUND_DOWN) -> int:
+def to_raw(amount: str | Decimal | int, decimals: int, rounding: str = ROUND_DOWN, allow_zero: bool = False) -> int:
     try:
         d = Decimal(str(amount))
     except (InvalidOperation, TypeError) as exc:
         raise ArbError(f"Invalid amount: {amount}") from exc
     raw = d * (Decimal(10) ** decimals)
-    if raw <= 0:
+    if raw < 0 or (raw == 0 and not allow_zero):
         raise ArbError("Amount must be positive")
     return int(raw.to_integral_value(rounding=rounding))
 
@@ -472,7 +472,7 @@ class StableDefiClient:
             "device": str(uuid.uuid4()),
         }
         res = self._post("/swap/create/singleChain", body)
-        order = res.get("order") if isinstance(res.get("order"), dict) else res
+        order = res.get("data") if isinstance(res.get("data"), dict) else (res.get("order") if isinstance(res.get("order"), dict) else res)
         sig = order.get("maintainerSignature")
         if not sig or not isinstance(sig, str):
             raise ArbError(f"Stable.com did not return a valid maintainerSignature: {res}")
@@ -526,10 +526,12 @@ class MultichainEngine:
             addr = Web3().eth.account.from_key(priv).address
         return addr, priv
 
-    def get_executor_address(self, config: ChainConfig) -> str:
+    def get_executor_address(self, config: ChainConfig, counter_sym: str = "USDT") -> str:
         """Returns deployed MultichainMatchaStableArb executor address."""
         return (
             os.getenv(f"{config.env_prefix}_EXECUTOR_ADDRESS", "").strip()
+            or os.getenv(f"{config.env_prefix}_{counter_sym}_USDC_EXECUTOR_ADDRESS", "").strip()
+            or os.getenv(f"{config.env_prefix}_USDC_{counter_sym}_EXECUTOR_ADDRESS", "").strip()
             or os.getenv(f"{config.env_prefix}_ARB_EXECUTOR_ADDRESS", "").strip()
         )
 
@@ -629,16 +631,24 @@ class MultichainEngine:
         if not dq or dq.data in ("0x", ""):
             raise ArbError("Failed to build executable DEX calldata for live trade")
 
-        sq: StableQuote = opportunity["stable_quote"]
         loan_raw = opportunity["loan_amount_raw"]
-        min_profit_raw = to_raw(min_profit_human, config.decimals)
+        min_profit_raw = to_raw(min_profit_human, config.decimals, allow_zero=True)
+
+        # Apply 2 bps safety buffer so on-chain DEX execution output covers Stable.com amountIn
+        stable_amount_in = dq.buy_amount * (10_000 - 2) // 10_000
+        sq = self.stable.quote(config, opportunity["counter_symbol"], "USDC", stable_amount_in, executor_addr)
+        if not sq:
+            raise ArbError("Failed to obtain Stable.com quote for sized order")
+        gross_profit_raw = sq.amount_out - loan_raw
+        if gross_profit_raw < min_profit_raw:
+            raise ArbError(f"Route after slippage buffer ({from_raw(gross_profit_raw, config.decimals)} USDC) is below minimum profit ({from_raw(min_profit_raw, config.decimals)} USDC)")
 
         # 1. Obtain cryptographic single-chain order from Stable.com
         stable_order = self.stable.create_order(
             config,
             opportunity["counter_symbol"],
             "USDC",
-            dq.buy_amount,
+            stable_amount_in,
             sq.amount_out,
             executor,
         )
