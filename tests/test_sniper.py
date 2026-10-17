@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
@@ -1527,6 +1527,73 @@ class UsdpBackrunRouteTests(unittest.TestCase):
         finally:
             crosschain_sniper._USDP_BACKRUNNERS.clear()
             self.patches[1].start()
+
+
+class UsdpAggregatorBufferTests(unittest.TestCase):
+    def test_buffer_deduction_prevents_insufficient_profit(self):
+        import crosschain_sniper
+        from src.engines.usdp_arb_engine import ArbEvaluation, DexQuote, StableQuote
+
+        eval_res = ArbEvaluation(
+            loan_amount_usdc=Decimal("10000"),
+            dex_quote=DexQuote(
+                aggregator="matcha",
+                target="0xTarget",
+                allowance_target="0xAllowance",
+                sell_amount_raw="10000000000",
+                buy_amount_raw=str(int(Decimal("10006.262875") * Decimal(10**18))),
+                buy_amount_human=Decimal("10006.262875"),
+                data="0x1234",
+                value="0",
+                gas_estimate=150000,
+            ),
+            stable_quote=StableQuote(
+                amount_in_human=Decimal("10006.262875"),
+                amount_out_human=Decimal("10006.262875"),
+                pool_balance_human=Decimal("500000"),
+                min_order_human=Decimal("1000"),
+                token_fee_human=Decimal("0"),
+                native_fee_usd=Decimal("0.40"),
+                raw_response={},
+            ),
+            gross_profit_usdc=Decimal("6.262875"),
+            gas_estimate_usd=Decimal("0.32"),
+            net_profit_usd=Decimal("5.9406"),
+            is_profitable=True,
+        )
+
+        mock_engine = MagicMock()
+        mock_engine.evaluate_arbitrage.return_value = eval_res
+        mock_engine.create_stable_order.return_value = {"nonce": 12345}
+
+        route = crosschain_sniper.Route("ethereum", "USDC/USDP", "dex-first")
+
+        # 1. With 5 bps buffer: 10006.262875 * (1 - 0.0005) = 10001.259744 USDC -> realizable profit 1.26 < 4.00
+        with patch.dict(os.environ, {"ETH_USDP_LEG1_BUFFER_BPS": "5", "ETH_USDP_BASE_AMOUNT": "10000"}), \
+             patch("src.engines.usdp_arb_engine.USDPTestEngine", return_value=mock_engine):
+            outcome = crosschain_sniper.run_usdp_aggregator_check(
+                route=route,
+                live=False,
+                execution_floor=Decimal("4.000001"),
+                timeout_seconds=10.0,
+                started=100.0,
+            )
+            self.assertFalse(outcome.executed)
+            self.assertEqual(outcome.category, "unprofitable")
+            self.assertIn("realizable net 1.259744 USDC after 5 bps buffer is below execution floor", outcome.detail)
+            mock_engine.create_stable_order.assert_not_called()
+
+        # 2. With 1 bps buffer: 10006.262875 * (1 - 0.0001) = 10005.262249 USDC -> realizable profit 5.26 >= 4.00
+        with patch.dict(os.environ, {"ETH_USDP_LEG1_BUFFER_BPS": "1", "ETH_USDP_BASE_AMOUNT": "10000"}), \
+             patch("src.engines.usdp_arb_engine.USDPTestEngine", return_value=mock_engine):
+            outcome = crosschain_sniper.run_usdp_aggregator_check(
+                route=route,
+                live=False,
+                execution_floor=Decimal("4.000001"),
+                timeout_seconds=10.0,
+                started=100.0,
+            )
+            mock_engine.create_stable_order.assert_called_once_with(Decimal("10005.262249"))
 
 
 if __name__ == "__main__":

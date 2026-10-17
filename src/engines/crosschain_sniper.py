@@ -412,7 +412,7 @@ def build_route_invocation(
     if route.chain == "ethereum":
         if "USDP" in (route.loan, route.intermediate):
             base_amount = os.getenv("ETH_USDP_BASE_AMOUNT", "10000")
-            leg1_buffer_bps = os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "5")
+            leg1_buffer_bps = os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "1")
             command = [
                 sys.executable,
                 str(PROJECT_ROOT / "usdp_arb.py"),
@@ -1736,7 +1736,7 @@ def run_usdp_aggregator_check(
             from engines.usdp_arb_engine import USDPTestEngine
 
     base_amount = Decimal(os.getenv("ETH_USDP_BASE_AMOUNT", "10000"))
-    leg1_buffer_bps = int(os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "5"))
+    leg1_buffer_bps = int(os.getenv("ETH_USDP_LEG1_BUFFER_BPS", "1"))
     quote_provider = (
         os.getenv("ETH_USDP_AGGREGATOR")
         or os.getenv("ETH_ARB_QUOTE_PROVIDER")
@@ -1789,6 +1789,32 @@ def run_usdp_aggregator_check(
 
         buffer_factor = Decimal(1) - (Decimal(leg1_buffer_bps) / Decimal(10000))
         safe_order_amount = (eval_res.dex_quote.buy_amount_human * buffer_factor).quantize(Decimal("0.000001"))
+
+        # Verify realizable USDC profit after deducting leg 1 buffer.
+        # Stable.com redeems safe_order_amount 1:1 for USDC; any unredeemed USDP remains as contract dust.
+        # On-chain, the contract strictly requires ending USDC >= startingLoanToken + minProfit.
+        realizable_profit_usdc = safe_order_amount - base_amount
+        if realizable_profit_usdc < execution_floor:
+            try:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(plan, f, indent=2)
+            except OSError:
+                pass
+            elapsed = time.monotonic() - started
+            detail = (
+                f"realizable net {realizable_profit_usdc:.6f} USDC after {leg1_buffer_bps} bps buffer "
+                f"is below execution floor {floor} USDC (quoted gross: {gross_profit} USDC)"
+            )
+            return Outcome(
+                False,
+                detail,
+                "unprofitable",
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                profit_token=route.loan,
+                elapsed_seconds=elapsed,
+            )
+
         order_data = engine.create_stable_order(safe_order_amount)
         plan["orderNonce"] = order_data.get("nonce")
 

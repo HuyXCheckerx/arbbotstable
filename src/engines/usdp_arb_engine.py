@@ -838,7 +838,7 @@ class USDPTestEngine:
         evaluation: ArbEvaluation,
         order_data: dict[str, Any] | None = None,
         min_profit_usdc: Decimal = Decimal("1.0"),
-        leg1_buffer_bps: int = 5,
+        leg1_buffer_bps: int = 1,
     ) -> SimulationResult:
         """Run pre-flight on-chain simulation (eth_call) against Ethereum mainnet."""
         w3 = self.get_working_web3()
@@ -1059,7 +1059,7 @@ class USDPTestEngine:
         max_fee_gwei: Decimal | None = None,
         priority_fee_gwei: Decimal = Decimal("0.05"),
         receipt_timeout: int = 60,
-        leg1_buffer_bps: int = 5,
+        leg1_buffer_bps: int = 1,
         dry_run: bool = False,
     ) -> ExecutionResult:
         """Execute or dry-run the USDP arbitrage transaction on Ethereum mainnet."""
@@ -1494,8 +1494,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--leg1-buffer-bps",
         type=int,
-        default=5,
-        help="Slippage buffer in basis points for Leg 2 Stable.com redemption (default: 5 = 0.05%%, protects against sub-cent AMM pool variance)",
+        default=1,
+        help="Slippage buffer in basis points for Leg 2 Stable.com redemption (default: 1 = 0.01%, protects against sub-cent AMM pool variance)",
     )
     parser.add_argument(
         "--executor",
