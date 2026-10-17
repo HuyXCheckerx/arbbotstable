@@ -178,32 +178,36 @@ class CrosschainSniperTests(unittest.TestCase):
             strict_execution_floor(Decimal("3.999999"))
 
     def test_solana_routes_use_unconstrained_floor(self):
-        self.assertEqual(
-            route_execution_floor(Route("solana", "USDG/PYUSD"), Decimal("4")),
-            Decimal("0.000001"),
-        )
-        self.assertEqual(
-            route_execution_floor(Route("solana", "PYUSD/USDG"), Decimal("5")),
-            Decimal("0.000001"),
-        )
-        self.assertEqual(
-            route_execution_floor(Route("solana", "PYUSD/USDC"), Decimal("5")),
-            Decimal("0.000001"),
-        )
-        self.assertEqual(
-            route_execution_floor(Route("solana", "USDC/PYUSD"), Decimal("5")),
-            Decimal("0.000001"),
-        )
-        self.assertEqual(
-            route_execution_floor(Route("ethereum", "USDG/PYUSD"), Decimal("5")),
-            Decimal("5.000001"),
-        )
-        self.assertEqual(
-            route_execution_floor(Route("ethereum", "PYUSD/USDC"), Decimal("5")),
-            Decimal("5.000001"),
-        )
-        with self.assertRaisesRegex(SniperError, "at least 0"):
-            route_execution_floor(Route("solana", "PYUSD/USDC"), Decimal("-0.01"))
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SOL_ARB_MIN_PROFIT_USD", None)
+            os.environ.pop("SOLANA_MIN_PROFIT_USD", None)
+            os.environ.pop("SOL_FLASH_ARB_MIN_PROFIT_USD", None)
+            self.assertEqual(
+                route_execution_floor(Route("solana", "USDG/PYUSD"), Decimal("4")),
+                Decimal("0.000001"),
+            )
+            self.assertEqual(
+                route_execution_floor(Route("solana", "PYUSD/USDG"), Decimal("5")),
+                Decimal("0.000001"),
+            )
+            self.assertEqual(
+                route_execution_floor(Route("solana", "PYUSD/USDC"), Decimal("5")),
+                Decimal("0.000001"),
+            )
+            self.assertEqual(
+                route_execution_floor(Route("solana", "USDC/PYUSD"), Decimal("5")),
+                Decimal("0.000001"),
+            )
+            self.assertEqual(
+                route_execution_floor(Route("ethereum", "USDG/PYUSD"), Decimal("5")),
+                Decimal("5.000001"),
+            )
+            self.assertEqual(
+                route_execution_floor(Route("ethereum", "PYUSD/USDC"), Decimal("5")),
+                Decimal("5.000001"),
+            )
+            with self.assertRaisesRegex(SniperError, "at least 0"):
+                route_execution_floor(Route("solana", "PYUSD/USDC"), Decimal("-0.01"))
 
     def test_ethereum_route_has_both_onchain_and_net_profit_guards(self):
         invocation = build_route_invocation(
