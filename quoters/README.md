@@ -1,8 +1,8 @@
 # Local quoters
 
 Two quote engines that price stablecoin swaps without aggregator APIs. Each one mirrors on-chain state from RPC and
-runs the real, deployed DEX programs locally on it, so its outputs match the chain to the unit. Neither is wired into
-the sniper or `swapstable` yet: nothing in this repository calls them, and they never sign or send.
+runs the real, deployed DEX programs locally on it, so its outputs match the chain to the unit. The sniper uses them as
+the `local` DEX provider (see [Sniper](#sniper)). They never sign or send.
 
 | | `solana/` | `evm/` |
 |---|---|---|
@@ -20,3 +20,31 @@ Measured on 2026-10-17/18 (details in each README):
 
 Neither sees RFQ or private market-maker liquidity. Each needs a good RPC; Solana also needs Helius (or another
 RPC that serves `getProgramAccounts`) for pool discovery.
+
+## Sniper
+
+Start the servers first, then set the providers in `.env`:
+
+```
+SOL_FLASH_ARB_DEX_PROVIDER=local          # solana_flash_arb.ts quotes and builds its DEX leg from the Solana server
+SOL_LOCAL_QUOTE_URL=http://127.0.0.1:8787
+# SOL_LOCAL_QUOTE_TOKEN=                  # the server's QUOTE_SERVER_TOKEN, when it listens beyond loopback
+ETH_ARB_QUOTE_PROVIDER=local              # eth_flash_arb_pyusd_usdc.py prices its DEX leg on the EVM server
+ETH_LOCAL_QUOTE_URL=http://127.0.0.1:8795
+ETH_ARB_LOCAL_EXECUTION_PROVIDER=okx      # okx, direct, matcha, auto or defillama
+```
+
+- **Solana** takes both the price and the instructions from the local server, so its DEX leg needs no aggregator.
+  Serve every pair and its USDC legs (`QUOTE_PAIRS=PYUSD/USDG,USDG/USDC,PYUSD/USDC QUOTE_VIA=USDC`): the sniper
+  allows two-hop routes for the local provider, and a direct PYUSD/USDG market alone often cannot fill the size. A
+  route that moved below its quote between `/quote` and `/swap-instructions` is refused and re-quoted.
+- **Ethereum** has no executor for direct pool swaps yet, so the local server only prices the leg. The route is
+  checked against the profit floor on the local price. Only a route that clears it fetches calldata from
+  `ETH_ARB_LOCAL_EXECUTION_PROVIDER`. The floor is then checked again on that executable quote, and the route is
+  dropped if the executable price no longer clears it. The log prints both prices and the local route's pools.
+- A server whose mirror is behind the chain answers 503. The sniper pauses that chain's local routes
+  (`transient-local`, dependency `local:<chain>`) and resumes when the server is current. A size the modelled pools
+  cannot fill (422) is reported as "no routes found".
+- Observed in an 11-hour dry run (2026-10-18/19): the EVM server on PublicNode often fell behind the 30 s sync limit,
+  so Ethereum routes paused. Give it a dedicated RPC, not the one the engines use. After the host slept, the
+  Solana server's websockets stayed open but silent; it now opens new ones when it rebuilds a stalled market.

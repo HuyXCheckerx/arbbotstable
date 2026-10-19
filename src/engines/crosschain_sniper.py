@@ -145,6 +145,8 @@ class Route:
                 return "Jupiter"
             if provider == "dflow":
                 return "DFlow"
+            if provider == "local":
+                return "Local"
             return "MetaMatcha"
         if "USDP" in self.pair:
             provider = (
@@ -154,7 +156,7 @@ class Route:
             ).strip().lower()
             return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "enso": "Enso", "auto": "Auto"}.get(provider, "MetaMatcha")
         provider = os.environ.get("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
-        return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "auto": "Auto"}.get(provider, "MetaMatcha")
+        return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "auto": "Auto", "local": "Local"}.get(provider, "MetaMatcha")
 
     @property
     def display(self) -> str:
@@ -572,6 +574,10 @@ def build_route_invocation(
             # Explicit Jupiter fallback may need a USDC-managed hop.
             environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
             environment["SOL_FLASH_ARB_JUPITER_MAX_ACCOUNTS"] = "24"
+        elif route.dex_name == "Local":
+            # The local server routes through its QUOTE_VIA tokens (e.g. USDC) when direct pools cannot fill;
+            # the engine's wire-size check still rejects a transaction that grows too large.
+            environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "false"
         else:
             environment["SOL_FLASH_ARB_ONLY_DIRECT_ROUTES"] = "true"
         if live:
@@ -761,6 +767,9 @@ def failure_category(detail: str) -> str:
             )
         )
     )
+    if transient and "local quote" in lowered:
+        # The local quoter refuses quotes while its mirrored state lags the chain (HTTP 503).
+        return "transient-local"
     if transient and "stable.com" in lowered:
         return "transient-stable"
     if transient and "okx" in lowered:
@@ -953,6 +962,10 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
             f"MetaMatcha rejected this request{suffix}; "
             f"check provider access or {alternative}"
         )
+    if category == "transient-local":
+        status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
+        suffix = f" (HTTP {status.group(1)})" if status else ""
+        return f"{route.chain.title()} local quoter is temporarily unavailable{suffix}; its mirrored state is not current"
     if category == "transient-rpc":
         if "out of memory" in lowered or "0xc0000409" in lowered:
             return "engine process temporarily ran out of memory; recovering"
@@ -1041,6 +1054,7 @@ def outcome_label(outcome: Outcome) -> str:
         "transient-okx",
         "transient-direct",
         "transient-defillama",
+        "transient-local",
         "transient-rpc",
         "access-blocked-matcha",
         "access-blocked-defillama",
@@ -1278,6 +1292,7 @@ class SniperDashboardFeed:
         "transient-jupiter",
         "transient-matcha",
         "transient-defillama",
+        "transient-local",
         "transient-rpc",
         "access-blocked-matcha",
         "access-blocked-defillama",
@@ -2622,6 +2637,7 @@ def _handle_route_outcome(
             "transient-okx": f"okx:{route.chain}",
             "transient-direct": f"direct:{route.chain}",
             "transient-defillama": f"defillama:{route.chain}",
+            "transient-local": f"local:{route.chain}",
             "transient-rpc": f"rpc:{route.chain}",
         }[outcome.category]
         is_conn_reset = "connection reset" in outcome.detail.lower()

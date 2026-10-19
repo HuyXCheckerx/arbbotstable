@@ -23,6 +23,8 @@ import {
   finalComputeUnitLimit,
   formatRaw,
   getDFlowQuote,
+  getLocalQuote,
+  getLocalSwapInstructions,
   getMetaMatchaQuote,
   intermediateTokenProgram,
   isBlockheightExpiry,
@@ -1202,7 +1204,7 @@ test("parseCli supports --dex-provider dflow, metamatcha, and jupiter", () => {
 
   assert.throws(
     () => parseCli(["--dex-provider", "unknown"]),
-    /--dex-provider must be metamatcha, dflow, or jupiter/,
+    /--dex-provider must be metamatcha, dflow, jupiter, or local/,
   );
 });
 
@@ -1560,4 +1562,103 @@ test("getNextDownsizedLoanAmount steps down through the 1k-10k ladder", () => {
   assert.equal(getNextDownsizedLoanAmount(1_500_000_000n, minRaw), 1_250_000_000n);
   assert.equal(getNextDownsizedLoanAmount(1_250_000_000n, minRaw), 1_000_000_000n);
   assert.equal(getNextDownsizedLoanAmount(1_000_000_000n, minRaw), undefined);
+});
+
+function localServerFetch(responses: Record<string, unknown>, calls: { url: string; headers: Record<string, string> }[]) {
+  return async (url: string, init?: RequestInit) => {
+    calls.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+    const path = new URL(url).pathname;
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify(responses[path]),
+    };
+  };
+}
+
+test("local provider quotes the local server at 0 bp and labels the quote Local", async () => {
+  const config: any = {
+    localQuoteApiBase: "http://127.0.0.1:8787",
+    localQuoteToken: "token-for-a-remote-server",
+    onlyDirectRoutes: true,
+    httpAttempts: 1,
+    httpTimeoutMs: 5000,
+  };
+  const calls: { url: string; headers: Record<string, string> }[] = [];
+  const origFetch = globalThis.fetch;
+  (globalThis as any).fetch = localServerFetch({
+    "/quote": {
+      inAmount: "10000000000",
+      outAmount: "10000287112",
+      otherAmountThreshold: "10000287112",
+      routePlan: [{ venue: "manifest", label: "Manifest EXMcKF", percent: 100 }],
+    },
+  }, calls);
+  try {
+    const quote = await getLocalQuote(config, USDG_MINT, USDC_MINT, 10000000000n);
+    assert.equal(quote.provider, "Local");
+    assert.equal(quote.outAmount, "10000287112");
+    assert.equal(quote.inputMint, USDG_MINT.toBase58());
+    const url = new URL(calls[0].url);
+    assert.equal(url.origin + url.pathname, "http://127.0.0.1:8787/quote");
+    assert.equal(url.searchParams.get("slippageBps"), "0");
+    assert.equal(url.searchParams.get("onlyDirectRoutes"), "true");
+    assert.equal(calls[0].headers.authorization, "Bearer token-for-a-remote-server");
+    await assert.rejects(getLocalQuote(config, USDG_MINT, USDC_MINT, 10000000001n), /changed the requested input amount/);
+    (globalThis as any).fetch = async () => ({
+      ok: false,
+      status: 422,
+      headers: new Headers(),
+      text: async () => JSON.stringify({ error: "no route can fill the entire input" }),
+    });
+    await assert.rejects(getLocalQuote(config, PYUSD_MINT, USDG_MINT, 100000000000n), /^Error: No routes found by the local quoter/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("local swap instructions are built for the wallet and refuse a route that moved below its quote", async () => {
+  const config: any = { localQuoteApiBase: "http://127.0.0.1:8787", onlyDirectRoutes: false, httpAttempts: 1, httpTimeoutMs: 5000 };
+  const wallet = new PublicKey("11111111111111111111111111111112");
+  const instruction = (programId: string) => ({ programId, accounts: [{ pubkey: wallet.toBase58(), isSigner: true, isWritable: true }], data: "AQ==" });
+  const quote: any = {
+    provider: "Local",
+    inputMint: PYUSD_MINT.toBase58(),
+    outputMint: USDG_MINT.toBase58(),
+    inAmount: "1000000000",
+    outAmount: "999988376",
+    otherAmountThreshold: "999988376",
+    routePlan: [{}],
+  };
+  const build = (minOutAmount: string) => ({
+    computeBudgetInstructions: [instruction("ComputeBudget111111111111111111111111111111")],
+    setupInstructions: [instruction("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")],
+    swapInstructions: [instruction("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms")],
+    addressLookupTableAddresses: [],
+    outAmount: minOutAmount,
+    minOutAmount,
+    bundleSafe: true,
+  });
+  const calls: { url: string; headers: Record<string, string> }[] = [];
+  const origFetch = globalThis.fetch;
+  try {
+    (globalThis as any).fetch = localServerFetch({ "/swap-instructions": build("999988376") }, calls);
+    const built = await getLocalSwapInstructions(config, quote, wallet);
+    assert.deepEqual(built.instructionJson.map((ix) => ix.programId),
+      ["ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", "MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms"]);
+    assert.equal(built.ignoredComputeBudgetInstructionCount, 1);
+    const url = new URL(calls[0].url);
+    assert.equal(url.searchParams.get("taker"), wallet.toBase58());
+    assert.equal(url.searchParams.get("amount"), "1000000000");
+    assert.equal(url.searchParams.get("simulate"), "none");
+    assert.equal(url.searchParams.get("txVersion"), "v0");
+    assert.equal(url.searchParams.has("onlyDirectRoutes"), false);
+
+    (globalThis as any).fetch = localServerFetch({ "/swap-instructions": build("999988375") }, calls);
+    await assert.rejects(getLocalSwapInstructions(config, quote, wallet), /moved below its quote/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+  assert.equal(dexProviderName("local"), "Local");
 });

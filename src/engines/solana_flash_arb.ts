@@ -226,7 +226,7 @@ export interface JupiterQuote {
   routePlan: unknown[];
   contextSlot?: number;
   timeTaken?: number;
-  provider?: "MetaMatcha" | "DFlow" | "Jupiter";
+  provider?: "MetaMatcha" | "DFlow" | "Jupiter" | "Local";
   aggregator?: string;
   serializedTransaction?: string;
   candidates?: JupiterQuote[];
@@ -333,8 +333,12 @@ interface Config {
   keypair: Keypair;
   subKeypair?: Keypair;
   subTakerIndex: number;
-  dexProvider: "metamatcha" | "dflow" | "jupiter";
+  dexProvider: "metamatcha" | "dflow" | "jupiter" | "local";
   dflowApiBase: string;
+  /** Local quote server (quoters/solana, `npm run quote-server`): SOL_LOCAL_QUOTE_URL. */
+  localQuoteApiBase: string;
+  /** Bearer token when the local quote server listens beyond loopback: SOL_LOCAL_QUOTE_TOKEN. */
+  localQuoteToken?: string;
   matchaApiBase: string;
   matchaAggregators: string[];
   matchaPython: string;
@@ -379,7 +383,7 @@ export interface CliOptions {
   maxSubTakerIndex?: number;
   includeActive?: boolean;
   provider?: "marginfi" | "kamino" | "solend" | "auto";
-  dexProvider?: "metamatcha" | "dflow" | "jupiter";
+  dexProvider?: "metamatcha" | "dflow" | "jupiter" | "local";
   swapOrder?: "dex-first" | "stable-first";
   lookupTable?: string;
   confirmation?: string;
@@ -1188,7 +1192,7 @@ function readConfig(cli: CliOptions): Config {
     configuredChoice(
       "SOL_FLASH_ARB_DEX_PROVIDER",
       "metamatcha",
-      ["metamatcha", "dflow", "jupiter"] as const,
+      ["metamatcha", "dflow", "jupiter", "local"] as const,
     );
   const capacitySymbol = stableInputSymbol(
     swapOrder,
@@ -1236,6 +1240,10 @@ function readConfig(cli: CliOptions): Config {
     dflowApiBase: (
       process.env.SOL_FLASH_ARB_DFLOW_BASE_URL || "https://dev-quote-api.dflow.net"
     ).replace(/\/$/, ""),
+    localQuoteApiBase: (
+      process.env.SOL_LOCAL_QUOTE_URL || "http://127.0.0.1:8787"
+    ).replace(/\/$/, ""),
+    localQuoteToken: process.env.SOL_LOCAL_QUOTE_TOKEN || undefined,
     matchaApiBase: (
       process.env.SOL_FLASH_ARB_MATCHA_BASE_URL || "https://meta.matcha.xyz"
     ).replace(/\/$/, ""),
@@ -1368,8 +1376,8 @@ export function parseCli(argv: string[]): CliOptions {
     }
     else if (arg === "--dex-provider") {
       const p = argv[++index]?.toLowerCase();
-      if (p !== "metamatcha" && p !== "dflow" && p !== "jupiter") {
-        throw new Error("--dex-provider must be metamatcha, dflow, or jupiter");
+      if (p !== "metamatcha" && p !== "dflow" && p !== "jupiter" && p !== "local") {
+        throw new Error("--dex-provider must be metamatcha, dflow, jupiter, or local");
       }
       options.dexProvider = p;
     }
@@ -1399,6 +1407,7 @@ function printHelp(): void {
   npm run solana:quote
   npm run solana:flash
   npm run solana:flash -- --dex-provider jupiter
+  npm run solana:flash -- --dex-provider local      # local quote server at SOL_LOCAL_QUOTE_URL
   npm run solana:flash -- --send --confirm-mainnet EXECUTE_SOLANA_FLASH_ARB
   npm run solana:flash -- --create-marginfi-account --send --confirm-mainnet CREATE_MARGINFI_ACCOUNT
   npm run solana:flash -- --reclaim-rent [--max-index 25] [--include-active]
@@ -2210,10 +2219,11 @@ export function buildJupiterQuoteParameters(
 }
 
 export function dexProviderName(
-  provider: "metamatcha" | "dflow" | "jupiter",
-): "MetaMatcha" | "DFlow" | "Jupiter" {
+  provider: "metamatcha" | "dflow" | "jupiter" | "local",
+): "MetaMatcha" | "DFlow" | "Jupiter" | "Local" {
   if (provider === "metamatcha") return "MetaMatcha";
   if (provider === "dflow") return "DFlow";
+  if (provider === "local") return "Local";
   return "Jupiter";
 }
 
@@ -2412,6 +2422,108 @@ export async function getDFlowQuote(
   return quote;
 }
 
+function localQuoteHeaders(config: Config): Record<string, string> {
+  return {
+    accept: "application/json",
+    ...(config.localQuoteToken ? { authorization: `Bearer ${config.localQuoteToken}` } : {}),
+  };
+}
+
+/**
+ * Local quote server (quoters/solana): runs the deployed DEX programs against mirrored account state, so no
+ * aggregator API is called. Requested at 0 bp like the other providers; the profit floors carry the margin.
+ */
+export async function getLocalQuote(
+  config: Config,
+  inputMint: PublicKey,
+  outputMint: PublicKey,
+  amountRaw: bigint,
+): Promise<JupiterQuote> {
+  const params = new URLSearchParams({
+    inputMint: inputMint.toBase58(),
+    outputMint: outputMint.toBase58(),
+    amount: amountRaw.toString(),
+    slippageBps: "0",
+  });
+  if (config.onlyDirectRoutes) params.set("onlyDirectRoutes", "true");
+  let quote: JupiterQuote;
+  try {
+    quote = await fetchJson<JupiterQuote>(
+      `${config.localQuoteApiBase}/quote?${params}`,
+      { headers: localQuoteHeaders(config) },
+      config,
+      "Local quote",
+    );
+  } catch (error) {
+    // 422: the modelled pools cannot fill this size. That is a missing route, not a provider failure.
+    if (/HTTP 422/.test(errorMessage(error))) {
+      throw new Error(`No routes found by the local quoter for ${amountRaw} (${errorMessage(error)})`);
+    }
+    throw error;
+  }
+  if (!quote.routePlan?.length) throw new Error("Local quoter returned no swap route");
+  if (BigInt(quote.inAmount) !== amountRaw) {
+    throw new Error(`Local quoter changed the requested input amount to ${quote.inAmount}`);
+  }
+  quote.provider = "Local";
+  quote.inputMint ||= inputMint.toBase58();
+  quote.outputMint ||= outputMint.toBase58();
+  if (!quote.otherAmountThreshold) quote.otherAmountThreshold = String(quote.outAmount);
+  return quote;
+}
+
+interface LocalSwapInstructions {
+  computeBudgetInstructions?: JupiterInstructionJson[];
+  setupInstructions?: JupiterInstructionJson[];
+  swapInstructions?: JupiterInstructionJson[];
+  addressLookupTableAddresses?: string[];
+  outAmount?: string;
+  minOutAmount?: string;
+  bundleSafe?: boolean;
+  error?: string;
+}
+
+/** The local server's per-leg instructions for `wallet`, rebuilt at the current state and held to the quote. */
+export async function getLocalSwapInstructions(
+  config: Config,
+  quote: JupiterQuote,
+  wallet: PublicKey,
+): Promise<{ instructionJson: JupiterInstructionJson[]; lookupTableAddresses: string[]; ignoredComputeBudgetInstructionCount: number }> {
+  const params = new URLSearchParams({
+    inputMint: quote.inputMint,
+    outputMint: quote.outputMint,
+    amount: quote.inAmount,
+    slippageBps: "0",
+    taker: wallet.toBase58(),
+    simulate: "none",
+    txVersion: "v0",
+  });
+  if (config.onlyDirectRoutes) params.set("onlyDirectRoutes", "true");
+  const result = await fetchJson<LocalSwapInstructions>(
+    `${config.localQuoteApiBase}/swap-instructions?${params}`,
+    { headers: localQuoteHeaders(config) },
+    config,
+    "Local swap-instructions",
+  );
+  if (result.error) throw new Error(`Local swap-instructions error: ${result.error}`);
+  if (!result.swapInstructions?.length) throw new Error("Local swap-instructions omitted swapInstructions");
+  // The route is rebuilt at the current state. Its guaranteed output must still cover what the cycle was priced at.
+  const guaranteed = BigInt(result.minOutAmount ?? result.outAmount ?? "0");
+  if (guaranteed < BigInt(quote.otherAmountThreshold)) {
+    throw new Error(
+      `Local route moved below its quote: guaranteed ${guaranteed} < quoted ${quote.otherAmountThreshold}; re-quote`,
+    );
+  }
+  if (result.bundleSafe === false) {
+    console.warn("Local route locks a validator vote account; Jito will refuse it as a bundle.");
+  }
+  return {
+    instructionJson: [...(result.setupInstructions ?? []), ...result.swapInstructions],
+    lookupTableAddresses: result.addressLookupTableAddresses ?? [],
+    ignoredComputeBudgetInstructionCount: result.computeBudgetInstructions?.length ?? 0,
+  };
+}
+
 async function getDexQuote(
   config: Config,
   inputMint: PublicKey,
@@ -2428,6 +2540,9 @@ async function getDexQuote(
   const fallbackToJupiter = false; // Jupiter is banned
   const jupiterQuote = () =>
     getJupiterQuote(config, inputMint, outputMint, amountRaw, requestNumber, overrideMaxAccounts);
+  if (config.dexProvider === "local") {
+    return getLocalQuote(config, inputMint, outputMint, amountRaw);
+  }
   if (config.dexProvider === "metamatcha") {
     const maxRotations = 3;
     for (let rotation = 0; rotation <= maxRotations; rotation++) {
@@ -2851,6 +2966,18 @@ async function getSwapLeg(
       instructions,
       lookupTables,
       ignoredComputeBudgetInstructionCount: computeBudgetInstructions.length,
+    };
+  }
+
+  if (config.dexProvider === "local" || quote.provider === "Local") {
+    const local = await getLocalSwapInstructions(config, quote, wallet);
+    return {
+      instructions: local.instructionJson.map(decodeJupiterInstruction),
+      lookupTables: await fetchLookupTables(
+        connection,
+        local.lookupTableAddresses.map((address) => new PublicKey(address)),
+      ),
+      ignoredComputeBudgetInstructionCount: local.ignoredComputeBudgetInstructionCount,
     };
   }
 
