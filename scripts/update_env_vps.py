@@ -1,6 +1,15 @@
+import os
+
 import winrm
 
-s = winrm.Session('http://103.77.208.166:5985/wsman', auth=('administrator', 'etvQ#5xU?dZN5JU'), transport='ntlm')
+# The VPS login comes from the environment (VPS_WINRM_HOST, VPS_WINRM_USER, VPS_WINRM_PASSWORD):
+# this repository is public.
+
+s = winrm.Session(
+    os.environ["VPS_WINRM_HOST"],
+    auth=(os.environ["VPS_WINRM_USER"], os.environ["VPS_WINRM_PASSWORD"]),
+    transport="ntlm",
+)
 
 ps_script = r'''
 $code = @'
