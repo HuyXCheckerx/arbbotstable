@@ -335,7 +335,7 @@ interface Config {
   subTakerIndex: number;
   dexProvider: "metamatcha" | "dflow" | "jupiter" | "local";
   dflowApiBase: string;
-  /** Local quote server (quoters/solana, `npm run quote-server`): SOL_LOCAL_QUOTE_URL. */
+  /** Local quote server (quoters/solana, `npm run quote-server`): SOL_LOCAL_QUOTE_URL (or SOL_LOCAL_QUOTER_URL). */
   localQuoteApiBase: string;
   /** Bearer token when the local quote server listens beyond loopback: SOL_LOCAL_QUOTE_TOKEN. */
   localQuoteToken?: string;
@@ -1241,7 +1241,7 @@ function readConfig(cli: CliOptions): Config {
       process.env.SOL_FLASH_ARB_DFLOW_BASE_URL || "https://dev-quote-api.dflow.net"
     ).replace(/\/$/, ""),
     localQuoteApiBase: (
-      process.env.SOL_LOCAL_QUOTE_URL || "http://127.0.0.1:8787"
+      process.env.SOL_LOCAL_QUOTE_URL || process.env.SOL_LOCAL_QUOTER_URL || "http://127.0.0.1:8787"
     ).replace(/\/$/, ""),
     localQuoteToken: process.env.SOL_LOCAL_QUOTE_TOKEN || undefined,
     matchaApiBase: (
@@ -1379,7 +1379,7 @@ export function parseCli(argv: string[]): CliOptions {
       if (p !== "metamatcha" && p !== "dflow" && p !== "jupiter" && p !== "local") {
         throw new Error("--dex-provider must be metamatcha, dflow, jupiter, or local");
       }
-      options.dexProvider = p;
+      options.dexProvider = p as "metamatcha" | "dflow" | "jupiter" | "local";
     }
     else if (arg === "--swap-order") {
       const order = argv[++index]?.toLowerCase();
@@ -2541,7 +2541,17 @@ async function getDexQuote(
   const jupiterQuote = () =>
     getJupiterQuote(config, inputMint, outputMint, amountRaw, requestNumber, overrideMaxAccounts);
   if (config.dexProvider === "local") {
-    return getLocalQuote(config, inputMint, outputMint, amountRaw);
+    try {
+      return await getLocalQuote(config, inputMint, outputMint, amountRaw);
+    } catch (error) {
+      if (fallbackToDflow) {
+        console.warn(
+          `Local quote unavailable (${errorMessage(error)}); falling back to DFlow DEX...`,
+        );
+        return await getDFlowQuote(config, inputMint, outputMint, amountRaw);
+      }
+      throw error;
+    }
   }
   if (config.dexProvider === "metamatcha") {
     const maxRotations = 3;
@@ -2969,7 +2979,8 @@ async function getSwapLeg(
     };
   }
 
-  if (config.dexProvider === "local" || quote.provider === "Local") {
+  // By the quote's provider: with SOL_FLASH_ARB_FALLBACK_DFLOW, a local configuration can hold a DFlow quote.
+  if (quote.provider === "Local") {
     const local = await getLocalSwapInstructions(config, quote, wallet);
     return {
       instructions: local.instructionJson.map(decodeJupiterInstruction),

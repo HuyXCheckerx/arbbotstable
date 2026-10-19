@@ -39,6 +39,8 @@ sol! {
     interface IInfCL { function poolIdToPoolKey(bytes32 id) external view returns (address currency0, address currency1, address hooks, address poolManager, uint24 fee, bytes32 parameters); }
     interface ICurve { function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external; }
     interface ICurveU { function exchange(uint256 i, uint256 j, uint256 dx, uint256 min_dy) external; }
+    interface ICurveMeta { function exchange_underlying(int128 i, int128 j, uint256 dx, uint256 min_dy) external; }
+    interface ICurveMetaU { function exchange_underlying(uint256 i, uint256 j, uint256 dx, uint256 min_dy) external; }
     interface IFluid { function swapIn(bool swap0to1, uint256 amountIn, uint256 amountOutMin, address to) external payable returns (uint256); }
     interface IDodo { function sellBase(address to) external returns (uint256); function sellQuote(address to) external returns (uint256); function _BASE_TOKEN_() external view returns (address); }
     interface IBalVault { function swap(SingleSwap singleSwap, FundManagement funds, uint256 limit, uint256 deadline) external returns (uint256); }
@@ -50,7 +52,7 @@ pub enum Kind {
     V3 { pool: Address, token0: Address },
     V4 { manager: Address, currency0: Address, currency1: Address, fee: u32, tick_spacing: i32, hooks: Address },
     Infinity { vault: Address, manager: Address, currency0: Address, currency1: Address, hooks: Address, fee: u32, parameters: B256 },
-    Curve { pool: Address, coins: Vec<Address>, uint_indices: bool },
+    Curve { pool: Address, coins: Vec<Address>, uint_indices: bool, #[serde(default)] is_meta: bool },
     Fluid { dex: Address, token0: Address },
     Dodo { pool: Address, base: Address },
     Balancer { vault: Address, pool_id: B256 },
@@ -132,10 +134,16 @@ impl Pool {
                 limitBps: limit_bps,
             }
             .abi_encode(),
-            Kind::Curve { pool, coins, uint_indices } => {
+            Kind::Curve { pool, coins, uint_indices, is_meta } => {
                 let i = coins.iter().position(|c| *c == tin).ok_or_else(|| anyhow!("token not in pool"))?;
                 let j = coins.iter().position(|c| *c == tout).ok_or_else(|| anyhow!("token not in pool"))?;
-                let inner = if *uint_indices {
+                let inner = if *is_meta {
+                    if *uint_indices {
+                        ICurveMetaU::exchange_underlyingCall { i: U256::from(i), j: U256::from(j), dx: amount, min_dy: U256::ZERO }.abi_encode()
+                    } else {
+                        ICurveMeta::exchange_underlyingCall { i: i as i128, j: j as i128, dx: amount, min_dy: U256::ZERO }.abi_encode()
+                    }
+                } else if *uint_indices {
                     ICurveU::exchangeCall { i: U256::from(i), j: U256::from(j), dx: amount, min_dy: U256::ZERO }.abi_encode()
                 } else {
                     ICurve::exchangeCall { i: i as i128, j: j as i128, dx: amount, min_dy: U256::ZERO }.abi_encode()
@@ -571,7 +579,22 @@ pub fn discover(chain: &Chain, rpc: &Rpc) -> Result<Discovery> {
                         .filter_map(|c| c.as_str().and_then(|s| Address::from_str(s).ok()))
                         .collect();
                     let tvl = p["usdTotal"].as_f64().unwrap_or(0.0);
-                    let in_graph: Vec<Address> = coins.iter().copied().filter(|c| graph.contains(c)).collect();
+                    let is_meta = p["isMetaPool"].as_bool().unwrap_or(false)
+                        || p["is_meta"].as_bool().unwrap_or(false)
+                        || p.get("underlyingCoinsAddresses").and_then(|u| u.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+                    let mut all_coins = coins.clone();
+                    if is_meta {
+                        if let Some(underlying) = p["underlyingCoinsAddresses"].as_array() {
+                            let under_addrs: Vec<Address> = underlying
+                                .iter()
+                                .filter_map(|c| c.as_str().and_then(|s| Address::from_str(s).ok()))
+                                .collect();
+                            if under_addrs.len() >= 2 {
+                                all_coins = under_addrs;
+                            }
+                        }
+                    }
+                    let in_graph: Vec<Address> = all_coins.iter().copied().filter(|c| graph.contains(c)).collect();
                     if in_graph.len() < 2 || tvl < 20_000.0 {
                         continue;
                     }
@@ -582,7 +605,7 @@ pub fn discover(chain: &Chain, rpc: &Rpc) -> Result<Discovery> {
                         venue: "Curve".into(),
                         id: format!("{addr:?}"),
                         label: format!("Curve {}", p["name"].as_str().unwrap_or("").replace("Curve.fi ", "")),
-                        kind: Kind::Curve { pool: addr, coins: coins.clone(), uint_indices: crypto },
+                        kind: Kind::Curve { pool: addr, coins: all_coins, uint_indices: crypto, is_meta },
                         tvl_usd: Some(tvl),
                         tokens: in_graph,
                     });

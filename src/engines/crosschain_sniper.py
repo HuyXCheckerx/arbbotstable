@@ -84,6 +84,15 @@ CHAIN_DEFAULT_PAIRS: dict[str, tuple[str, ...]] = {
     "solana": DEFAULT_SOL_PAIRS,
 }
 
+SOLANA_TOKEN_MINTS: dict[str, str] = {
+    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    "PYUSD": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    "USDG": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH",
+}
+
+EVM_QUOTER_SUPPORTED_TOKENS = {"USDC", "USDT", "PYUSD", "USDG", "USDS", "crvUSD"}
+
 
 def get_chain_default_pairs(chain: str) -> tuple[str, ...]:
     if chain == "ethereum":
@@ -141,12 +150,12 @@ class Route:
     def dex_name(self) -> str:
         if self.chain == "solana":
             provider = os.environ.get("SOL_FLASH_ARB_DEX_PROVIDER", "metamatcha").strip().lower()
+            if provider == "local":
+                return "Local"
             if provider == "jupiter":
                 return "Jupiter"
             if provider == "dflow":
                 return "DFlow"
-            if provider == "local":
-                return "Local"
             return "MetaMatcha"
         if "USDP" in self.pair:
             provider = (
@@ -154,9 +163,9 @@ class Route:
                 or os.environ.get("ETH_ARB_QUOTE_PROVIDER")
                 or "matcha"
             ).strip().lower()
-            return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "enso": "Enso", "auto": "Auto"}.get(provider, "MetaMatcha")
+            return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "enso": "Enso", "local": "Local", "auto": "Auto"}.get(provider, "MetaMatcha")
         provider = os.environ.get("ETH_ARB_QUOTE_PROVIDER", "matcha").strip().lower()
-        return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "auto": "Auto", "local": "Local"}.get(provider, "MetaMatcha")
+        return {"direct": "Direct", "defillama": "DefiLlama", "okx": "OKX", "local": "Local", "auto": "Auto"}.get(provider, "MetaMatcha")
 
     @property
     def display(self) -> str:
@@ -1044,6 +1053,8 @@ def outcome_label(outcome: Outcome) -> str:
         return "READY"
     if outcome.category == "unprofitable":
         return "NO TRADE"
+    if outcome.category == "filtered":
+        return "FILTERED"
     if outcome.category in {
         "no-route",
         "capacity",
@@ -2556,6 +2567,114 @@ def single_instance() -> Iterator[None]:
             lock.close()
 
 
+def check_local_quoter_filter(
+    route: Route,
+    floor: Decimal,
+    timeout: float = 0.5,
+) -> Outcome | None:
+    """Pre-flight check against local in-memory quoter services (<25ms).
+
+    If the local quoter is active and reports that the DEX spread is strictly below
+    the execution floor, return a filtered Outcome immediately to prevent
+    wasting subprocess spawns, external API rate limits, or gas fee requests.
+    If the local quoter is offline, syncing (503), or returns an error, gracefully
+    return None so normal execution continues.
+    """
+    if os.getenv("ENABLE_LOCAL_QUOTER_FILTER", "true").strip().lower() not in ("true", "1", "yes"):
+        return None
+
+    started = time.monotonic()
+
+    if route.chain == "solana":
+        quoter_base = (os.getenv("SOL_LOCAL_QUOTE_URL") or os.getenv("SOL_LOCAL_QUOTER_URL") or "http://127.0.0.1:8787").rstrip("/")
+        dex_in_symbol = route.intermediate if route.swap_order == "stable-first" else route.loan
+        dex_out_symbol = route.loan if route.swap_order == "stable-first" else route.intermediate
+
+        in_mint = SOLANA_TOKEN_MINTS.get(dex_in_symbol)
+        out_mint = SOLANA_TOKEN_MINTS.get(dex_out_symbol)
+        if not in_mint or not out_mint:
+            return None
+
+        base_amount_str = os.getenv("SOL_ARB_BASE_AMOUNT") or os.getenv("SOL_ARB_AMOUNT") or "10000"
+        try:
+            base_amount = Decimal(base_amount_str)
+        except (InvalidOperation, TypeError):
+            base_amount = Decimal("10000")
+        amount_raw = int(base_amount * Decimal("1000000"))
+
+        query_url = f"{quoter_base}/quote?inputMint={in_mint}&outputMint={out_mint}&amount={amount_raw}&onlyDirectRoutes=true"
+        try:
+            req = urllib.request.Request(query_url, headers={"User-Agent": "crosschain-sniper-filter"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return None
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+        out_amount_raw = Decimal(str(data.get("outAmount", "0")))
+        dex_out = out_amount_raw / Decimal("1000000")
+        dex_in = Decimal(amount_raw) / Decimal("1000000")
+        est_profit = dex_out - dex_in
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+
+        if est_profit < floor:
+            return Outcome(
+                executed=False,
+                detail=f"filtered by local Solana quoter: out {dex_out:.4f} - in {dex_in:.4f} = {est_profit:+.4f} < floor {floor:.2f} ({elapsed_ms:.1f}ms)",
+                category="filtered",
+                gross_profit=f"{est_profit:.4f}",
+                net_profit=f"{est_profit:.4f}",
+                profit_token=route.loan,
+                elapsed_seconds=elapsed_ms / 1000.0,
+            )
+        return None
+
+    if route.chain == "ethereum":
+        quoter_base = (os.getenv("ETH_LOCAL_QUOTE_URL") or os.getenv("EVM_LOCAL_QUOTER_URL") or "http://127.0.0.1:8795").rstrip("/")
+        dex_in_symbol = route.intermediate if route.swap_order == "stable-first" else route.loan
+        dex_out_symbol = route.loan if route.swap_order == "stable-first" else route.intermediate
+
+        if dex_in_symbol not in EVM_QUOTER_SUPPORTED_TOKENS or dex_out_symbol not in EVM_QUOTER_SUPPORTED_TOKENS:
+            return None
+
+        base_amount_str = os.getenv("ETH_ARB_BASE_AMOUNT", "100000")
+        try:
+            base_amount = Decimal(base_amount_str)
+        except (InvalidOperation, TypeError):
+            base_amount = Decimal("100000")
+
+        query_url = f"{quoter_base}/quote?input={dex_in_symbol}&output={dex_out_symbol}&amount={base_amount}"
+        try:
+            req = urllib.request.Request(query_url, headers={"User-Agent": "crosschain-sniper-filter"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return None
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+        net_out_val = data.get("net_out") or data.get("amount_out") or "0"
+        net_out = Decimal(str(net_out_val))
+        in_amount = Decimal(str(data.get("amount_in", base_amount)))
+        est_profit = net_out - in_amount
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+
+        if est_profit < floor:
+            return Outcome(
+                executed=False,
+                detail=f"filtered by local EVM quoter: net out {net_out:.4f} - in {in_amount:.4f} = {est_profit:+.4f} < floor {floor:.2f} ({elapsed_ms:.1f}ms)",
+                category="filtered",
+                gross_profit=f"{est_profit:.4f}",
+                net_profit=f"{est_profit:.4f}",
+                profit_token=route.loan,
+                elapsed_seconds=elapsed_ms / 1000.0,
+            )
+        return None
+
+    return None
+
+
 def _execute_single_check(
     route: Route,
     floor: Decimal,
@@ -2566,6 +2685,10 @@ def _execute_single_check(
     logger: logging.Logger,
     chain: str,
 ) -> tuple[Route, Decimal, Outcome]:
+    filter_outcome = check_local_quoter_filter(route, floor)
+    if filter_outcome is not None:
+        return route, floor, filter_outcome
+
     logger.info("CHECK   | %-8s | %s", chain.title(), route.display)
     if dashboard:
         dashboard.begin_check(route, floor)
@@ -2995,6 +3118,15 @@ def proxy_lifecycle_guardian(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--amount",
+        type=Decimal,
+        default=None,
+        help=(
+            "trade amount override across chains (e.g. 10000, 50000; "
+            "overrides ETH_ARB_BASE_AMOUNT, ETH_USDP_BASE_AMOUNT, and SOL_ARB_BASE_AMOUNT)"
+        ),
+    )
+    parser.add_argument(
         "--threshold-usd",
         type=Decimal,
         default=decimal_setting("SNIPER_PROFIT_THRESHOLD_USD", "4"),
@@ -3133,6 +3265,13 @@ def main(argv: list[str] | None = None) -> int:
     if load_dotenv is not None:
         load_dotenv(PROJECT_ROOT / ".env", override=True)
     args = parse_args(argv)
+    if args.amount is not None:
+        amount_str = str(args.amount)
+        os.environ["ETH_ARB_BASE_AMOUNT"] = amount_str
+        os.environ["ETH_USDP_BASE_AMOUNT"] = amount_str
+        os.environ["SOL_ARB_BASE_AMOUNT"] = amount_str
+        os.environ["SOL_ARB_AMOUNT"] = amount_str
+        logger.info("AMOUNT  | Trade amount override set to %s across all chains", amount_str)
     if args.request_stop:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         pid = running_sniper_pid()

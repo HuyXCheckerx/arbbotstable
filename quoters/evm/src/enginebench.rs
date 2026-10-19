@@ -76,6 +76,7 @@ pub fn replay(chain: &'static crate::chains::Chain, path: &str, iters: usize) ->
         prevrandao: B256::from_str(b["prevrandao"].as_str().unwrap())?,
         beneficiary: Address::from_str(b["coinbase"].as_str().unwrap())?,
         gas_price: b["gasPrice"].as_str().unwrap().parse()?,
+        ..Default::default()
     };
     st.header = head.clone();
     let env = chain.env();

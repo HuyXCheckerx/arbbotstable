@@ -1,7 +1,7 @@
 //! Setup (discovery, mirror, helper) and one exact-input quote.
 
 use crate::chains::{Chain, Token};
-use crate::engine::Engine;
+use crate::engine::{Engine, ReadFailed};
 use crate::mirror::Mirror;
 use crate::optimizer::Params;
 use crate::router::{route, Graph};
@@ -178,7 +178,18 @@ pub fn quote(engine: &Engine, tin: Token, tout: Token, amount: u128, params: &Pa
         .collect();
     let token_lists: Vec<Vec<Address>> = pools.iter().map(|p| p.tokens.clone()).collect();
     let graph = Graph { pools: &token_lists, input: tin.address, output: tout.address, via: &via, max_hops: if via.is_empty() { 1 } else { p.max_hops } };
-    let sim = |i: usize, a: Address, b: Address, amt: u128| engine.simulate(&pools[i], a, b, amt).ok();
+    // A pool whose state could not be read is not a pool that cannot swap: the quote fails
+    // instead of routing around it.
+    let read_failed: parking_lot::Mutex<Option<anyhow::Error>> = parking_lot::Mutex::new(None);
+    let sim = |i: usize, a: Address, b: Address, amt: u128| match engine.simulate(&pools[i], a, b, amt) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            if e.downcast_ref::<ReadFailed>().is_some() {
+                read_failed.lock().get_or_insert(e);
+            }
+            None
+        }
+    };
     let ts = Instant::now();
     // Concentrated-liquidity swaps stop 1% (sqrt price) from market. If the pools cannot absorb
     // the amount within that, retry with 10% (no marginal-rate cutoff), and with `full_fill`
@@ -199,6 +210,9 @@ pub fn quote(engine: &Engine, tin: Token, tout: Token, amount: u128, params: &Pa
         }
     }
     engine.limit_bps.store(base, std::sync::atomic::Ordering::Relaxed);
+    if let Some(e) = read_failed.into_inner() {
+        return Err(e);
+    }
     let Some(plan) = plan else {
         bail!(
             "no route absorbs {} {} within a ~20% price move (--full-fill quotes it anyway)",

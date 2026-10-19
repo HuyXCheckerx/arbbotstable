@@ -216,7 +216,11 @@ pub fn route(g: &Graph, amount: u128, p: &Params, sim: &(dyn Fn(usize, Address, 
     let ctx = Ctx { sim, cache: Mutex::new(HashMap::default()), count: Default::default(), gas_cost: p.gas_cost, max_sims: p.max_sims };
     let mut info = SearchInfo::default();
     let (input, output) = (g.input, g.output);
-    let n = p.steps.max(1);
+    let n = if amount >= 50_000 * 10u128.pow(6) {
+        (p.steps * 2).min(40)
+    } else {
+        p.steps.max(1)
+    };
     let unit = (amount / n as u128).max(1);
     let probe = (amount / 10_000).max(p.min_probe).min(amount / 10).max(1);
     let at = |k: usize| -> u128 { (amount * k as u128) / n as u128 };

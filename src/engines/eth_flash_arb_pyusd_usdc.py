@@ -93,6 +93,7 @@ QUOTE_PROVIDER_LABELS = {
     "okx": "OKX",
     "defillama": "DefiLlama",
     "matcha": "MetaMatcha",
+    "local": "Local",
     "auto": "Auto",
 }
 # Local EVM quoter (quoters/evm, `evm-quoter serve --chain eth`): simulates the deployed pools against mirrored
@@ -1310,6 +1311,14 @@ def fetch_live_gas_price(rpc_url: str | None = None) -> int | None:
     return None
 
 
+def local_execution_provider() -> str:
+    """The aggregator that supplies calldata for a local quote (and quotes while the local quoter cannot)."""
+    provider = os.getenv("ETH_ARB_LOCAL_EXECUTION_PROVIDER", "direct").strip().lower()
+    if provider not in ("matcha", "auto", "direct", "okx", "defillama"):
+        raise ArbError(f"ETH_ARB_LOCAL_EXECUTION_PROVIDER must name an aggregator provider, not {provider!r}")
+    return provider
+
+
 def local_route_summary(payload: dict[str, Any]) -> str:
     """Hops of a local quote in order, split legs joined by '+', with the block it was priced at."""
     hops: dict[int, list[str]] = {}
@@ -1563,17 +1572,49 @@ class MatchaClient:
 
     def _local_quotes(
         self,
+        executor: str,
+        sell_amount: int,
+        slippage_bps: int,
+        sell_token_address: str,
+        buy_token_address: str,
+        aggregators: Iterable[str] | None = None,
+    ) -> list[tuple[str, Any]]:
+        """Price from the local EVM quoter. The quote carries no calldata (target and data are empty): a route that
+        clears the profit floor fetches it from ETH_ARB_LOCAL_EXECUTION_PROVIDER. While the local quoter cannot
+        price the leg, that provider quotes it instead, unless ETH_ARB_LOCAL_FALLBACK=false."""
+        try:
+            return self._local_price(sell_amount, sell_token_address, buy_token_address)
+        except ArbError as exc:
+            if os.getenv("ETH_ARB_LOCAL_FALLBACK", "true").strip().lower() not in ("true", "1", "yes"):
+                raise
+            provider = local_execution_provider()
+            logger.warning(
+                "[LocalQuoter] %s; quoting through %s for this check", exc, QUOTE_PROVIDER_LABELS.get(provider, provider)
+            )
+            fallback = MatchaClient(
+                self.http, self.base_url, quote_provider=provider, rpc_url=self.rpc_url, operator=self.operator
+            )
+            return fallback.quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                aggregators if aggregators is not None else MATCHA_AGGREGATORS,
+                sell_token_address=sell_token_address,
+                buy_token_address=buy_token_address,
+            )
+
+    def _local_price(
+        self,
         sell_amount: int,
         sell_token_address: str,
         buy_token_address: str,
     ) -> list[tuple[str, Any]]:
-        """Price from the local EVM quoter. The quote carries no calldata (target and data are empty)."""
         symbols = {address.lower(): symbol for symbol, address in LOAN_TOKENS.items()}
         sell_symbol = symbols.get(sell_token_address.lower())
         buy_symbol = symbols.get(buy_token_address.lower())
         if not sell_symbol or not buy_symbol:
             raise ArbError(f"local quoter has no symbol for {sell_token_address} -> {buy_token_address}")
-        base = os.getenv("ETH_LOCAL_QUOTE_URL", LOCAL_EVM_QUOTE_URL).rstrip("/")
+        base = (os.getenv("ETH_LOCAL_QUOTE_URL") or os.getenv("EVM_LOCAL_QUOTER_URL") or LOCAL_EVM_QUOTE_URL).rstrip("/")
         amount = f"{Decimal(sell_amount) / (Decimal(10) ** DECIMALS):.{DECIMALS}f}"
         url = f"{base}/quote?input={sell_symbol}&output={buy_symbol}&amount={amount}"
         try:
@@ -1617,7 +1658,14 @@ class MatchaClient:
         buy_token_address: str = USDC,
     ) -> list[tuple[str, Any]]:
         if self.quote_provider == "local":
-            return self._local_quotes(sell_amount, sell_token_address, buy_token_address)
+            return self._local_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+                aggregators=aggregators,
+            )
         if self.quote_provider == "okx":
             return self._direct_quotes(
                 executor,
@@ -2622,7 +2670,7 @@ def parser() -> argparse.ArgumentParser:
         help=(
             "Ethereum DEX quote source: matcha (meta.matcha.xyz), okx (OKX DEX Aggregator), "
             "direct (multi-aggregator: OKX, Velora, etc.), auto, defillama, or local "
-            "(local EVM quoter at ETH_LOCAL_QUOTE_URL; calldata from ETH_ARB_LOCAL_EXECUTION_PROVIDER "
+            "(revm quoter at ETH_LOCAL_QUOTE_URL; calldata from ETH_ARB_LOCAL_EXECUTION_PROVIDER "
             "only once the local price clears the profit floor)"
         ),
     )
@@ -2772,9 +2820,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         buy_token_address: str,
     ) -> MatchaQuote:
         """A local quote prices the DEX leg; the transaction still needs a router's calldata."""
-        provider = os.getenv("ETH_ARB_LOCAL_EXECUTION_PROVIDER", "okx").strip().lower()
-        if provider not in ("matcha", "auto", "direct", "okx", "defillama"):
-            raise ArbError(f"ETH_ARB_LOCAL_EXECUTION_PROVIDER must name an aggregator provider, not {provider!r}")
+        provider = local_execution_provider()
         proxy = os.getenv("MATCHA_PROXY", "").strip() if provider in ("matcha", "auto") else ""
         client = MatchaClient(
             HttpJsonClient(args.timeout, user_agent, proxy=proxy),

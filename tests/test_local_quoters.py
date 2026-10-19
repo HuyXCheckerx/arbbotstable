@@ -60,6 +60,7 @@ class LocalEvmQuoteTests(unittest.TestCase):
         # select_best accepts it, so the profit floor is checked on the local price.
         self.assertIs(pyusd_arb.select_best_matcha_quote(responses, 100_000_000_000), quote)
 
+    @patch.dict(os.environ, {"ETH_ARB_LOCAL_FALLBACK": "false"})
     def test_local_quote_rejects_errors_and_changed_inputs(self):
         http = Mock()
         client = pyusd_arb.MatchaClient(http, quote_provider="local")
@@ -88,6 +89,34 @@ class LocalEvmQuoteTests(unittest.TestCase):
         http.get.side_effect = None
         with self.assertRaisesRegex(pyusd_arb.ArbError, "no symbol"):
             client.quotes("0x1", 1_000_000, 5, ["0x"], sell_token_address="0x" + "ab" * 20, buy_token_address=pyusd_arb.USDC)
+
+    def test_local_quote_falls_back_to_the_execution_provider_while_the_quoter_cannot_price(self):
+        http = Mock()
+        http.get.side_effect = pyusd_arb.RetryableArbError(
+            'http://127.0.0.1:8795/quote returned HTTP 503: {"error":"mirrored state is not current"}'
+        )
+        client = pyusd_arb.MatchaClient(http, quote_provider="local")
+        executable = pyusd_arb.MatchaQuote(
+            aggregator="Velora", target="0x" + "11" * 20, allowance_target="0x" + "11" * 20, data="0xabcd",
+            value=0, sell_amount=1_000_000, buy_amount=999_000,
+        )
+        providers = []
+
+        def direct_quotes(fallback, *args, **kwargs):
+            providers.append(fallback.quote_provider)
+            return [("Velora", executable)]
+
+        with patch.dict(os.environ, {"ETH_ARB_LOCAL_EXECUTION_PROVIDER": "direct"}), patch.object(
+            pyusd_arb.MatchaClient, "_direct_quotes", autospec=True, side_effect=direct_quotes
+        ):
+            responses = client.quotes(
+                "0x1", 1_000_000, 5, ["0x"], sell_token_address=pyusd_arb.USDT, buy_token_address=pyusd_arb.USDC
+            )
+        self.assertEqual(responses, [("Velora", executable)])
+        self.assertEqual(providers, ["direct"])
+        with patch.dict(os.environ, {"ETH_ARB_LOCAL_EXECUTION_PROVIDER": "local"}):
+            with self.assertRaisesRegex(pyusd_arb.ArbError, "must name an aggregator provider"):
+                client.quotes("0x1", 1_000_000, 5, ["0x"], sell_token_address=pyusd_arb.USDT, buy_token_address=pyusd_arb.USDC)
 
     def test_parser_accepts_local(self):
         args = pyusd_arb.parser().parse_args(["--quote-provider", "local"])

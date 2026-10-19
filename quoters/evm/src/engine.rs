@@ -2,7 +2,7 @@
 
 use crate::chains::{Chain, Token};
 use crate::evm::{exec, revert_reason, ChainEnv};
-use crate::mirror::{account_from, Mirror};
+use crate::mirror::{account_from, Group, Mirror, NotCurrent};
 use crate::venues::{IHelper, IERC20, Kind, Pool};
 use alloy_sol_types::SolCall;
 use anyhow::{anyhow, bail, Result};
@@ -14,6 +14,27 @@ pub const HELPER: Address = address!("00000000000000000000000000000000c0ffee01")
 pub const CALLER: Address = address!("00000000000000000000000000000000c0ffee02");
 
 const HELPER_HEX: &str = include_str!("helper.hex");
+
+/// A simulation could not read the state it needed (an RPC failure, or the node no longer has
+/// the mirror's block). Unlike a revert, it says nothing about the pool and is not cached; a
+/// quote that hits one is refused rather than served from the pools that did load.
+#[derive(Debug)]
+pub struct ReadFailed {
+    pub not_current: bool,
+    pub msg: String,
+}
+
+impl std::fmt::Display for ReadFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let why = if self.not_current { " (the node no longer serves the mirrored block)" } else { "" };
+        write!(f, "state read failed{why}: {}", self.msg)
+    }
+}
+
+impl std::error::Error for ReadFailed {}
+
+/// Cache version of a pool: (sum of its accounts' versions, hash of the token balances it reads).
+type Version = (u64, u64);
 
 #[derive(Clone, Debug, Default)]
 pub struct Sim {
@@ -33,11 +54,12 @@ pub struct Engine {
     pub limit_bps: std::sync::atomic::AtomicU16,
     approved: parking_lot::Mutex<std::collections::HashSet<(Address, Address)>>,
     grouped: parking_lot::Mutex<std::collections::HashSet<String>>,
-    /// Accounts each pool's simulations read (tokens, helper and caller excluded).
-    groups: parking_lot::Mutex<HashMap<String, Vec<Address>>>,
+    /// Accounts each pool's simulations read (tokens, helper and caller excluded), and the token
+    /// slots they read (balances; pinned helper slots excluded), sorted.
+    groups: parking_lot::Mutex<HashMap<String, (Vec<Address>, Vec<(Address, U256)>)>>,
     /// Simulation cache across quotes: (pool, input token, amount, price limit) ->
-    /// (pool state version, block, result). See `cached`.
-    cache: parking_lot::Mutex<HashMap<(String, Address, u128, u16), (u64, u64, Result<Sim, String>)>>,
+    /// (pool state version, block, result). See `simulate_raw`.
+    cache: parking_lot::Mutex<HashMap<(String, Address, u128, u16), (Version, u64, Result<Sim, String>)>>,
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub cache_misses: std::sync::atomic::AtomicU64,
 }
@@ -188,11 +210,18 @@ impl Engine {
         }
     }
 
-    fn pool_version(&self, pool: &Pool) -> Option<u64> {
+    fn pool_version(&self, pool: &Pool) -> Option<Version> {
+        use std::hash::{Hash, Hasher};
         let groups = self.groups.lock();
-        let g = groups.get(&pool.id)?;
+        let (accounts, token_slots) = groups.get(&pool.id)?;
         let st = self.mirror.state.read();
-        Some(g.iter().map(|a| st.versions.get(a).copied().unwrap_or(0)).sum())
+        // Token versions would change on every transfer of the token anywhere, so the pool's
+        // own balance slots stand in for them: DODO's price moves with them.
+        let mut h = std::hash::DefaultHasher::new();
+        for (t, k) in token_slots {
+            st.storage.get(t).and_then(|m| m.get(k)).hash(&mut h);
+        }
+        Some((accounts.iter().map(|a| st.versions.get(a).copied().unwrap_or(0)).sum(), h.finish()))
     }
 
     /// Like `simulate`, but also returns partial fills (a swap stopped at the price limit).
@@ -209,7 +238,8 @@ impl Engine {
             }
         }
         self.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let r = self.simulate_uncached(pool, tin, tout, amount);
+        // Read failures propagate and are not cached; reverts are a property of the pool.
+        let r = self.simulate_uncached(pool, tin, tout, amount)?;
         if let Some(v) = version.or_else(|| self.pool_version(pool)) {
             if self.mirror.block() == block {
                 self.cache.lock().insert(key, (v, block, r.as_ref().map(|s| s.clone()).map_err(|e| e.to_string())));
@@ -218,7 +248,8 @@ impl Engine {
         r
     }
 
-    fn simulate_uncached(&self, pool: &Pool, tin: Address, tout: Address, amount: u128) -> Result<Sim> {
+    /// Outer error: the state could not be read (`ReadFailed`). Inner: the swap's outcome.
+    fn simulate_uncached(&self, pool: &Pool, tin: Address, tout: Address, amount: u128) -> Result<Result<Sim>> {
         let data = pool.helper_call(HELPER, tin, tout, U256::from(amount), self.limit())?;
         self.sims.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let head = self.mirror.state.read().header.clone();
@@ -226,27 +257,46 @@ impl Engine {
             .into_iter()
             .chain(self.chain.tokens.iter().map(|t| t.address))
             .collect();
-        let (ok, out, halt, touched) = self.mirror.run(|view| {
-            let r = exec(view, &self.env, &head, CALLER, HELPER, data.clone());
-            let touched: std::collections::HashSet<Address> = if r.success && !self.grouped.lock().contains(&pool.id) {
-                r.state.keys().copied().filter(|a| !skip.contains(a) && *a != head.beneficiary).collect()
-            } else {
-                Default::default()
-            };
-            (r.success, r.output, r.halt, touched)
-        })?;
-        if !touched.is_empty() && self.grouped.lock().insert(pool.id.clone()) {
-            self.groups.lock().insert(pool.id.clone(), touched.iter().copied().collect());
-            self.mirror.add_group(touched.into_iter().collect());
+        let (ok, out, halt, touched) = self
+            .mirror
+            .run(|view| {
+                let r = exec(view, &self.env, &head, CALLER, HELPER, data.clone());
+                let mut g = Group::default();
+                if r.success && !self.grouped.lock().contains(&pool.id) {
+                    for (a, acc) in r.state.iter() {
+                        if *a == HELPER || *a == CALLER || *a == head.beneficiary {
+                            continue;
+                        }
+                        if skip.contains(a) {
+                            let pinned = view.st.pinned_storage.get(a);
+                            g.token_slots.extend(acc.storage.keys().filter(|k| !pinned.is_some_and(|m| m.contains_key(*k))).map(|k| (*a, *k)));
+                        } else {
+                            g.accounts.insert(*a);
+                        }
+                    }
+                }
+                (r.success, r.output, r.halt, g)
+            })
+            .map_err(|e| ReadFailed { not_current: e.downcast_ref::<NotCurrent>().is_some(), msg: e.to_string() })?;
+        if !touched.accounts.is_empty() && self.grouped.lock().insert(pool.id.clone()) {
+            let mut slots: Vec<(Address, U256)> = touched.token_slots.iter().copied().collect();
+            slots.sort();
+            self.groups.lock().insert(pool.id.clone(), (touched.accounts.iter().copied().collect(), slots));
+            self.mirror.add_group(touched);
         }
         if !ok {
-            return Err(anyhow!("{}", halt.unwrap_or_else(|| revert_reason(&out))));
+            return Ok(Err(anyhow!("{}", halt.unwrap_or_else(|| revert_reason(&out)))));
         }
         if out.len() < 96 {
-            bail!("short helper output");
+            return Ok(Err(anyhow!("short helper output")));
         }
         let w = |i: usize| U256::from_be_slice(&out[i * 32..i * 32 + 32]);
-        Ok(Sim { out: w(0).to::<u128>(), spent: w(1).to::<u128>(), gas: w(2).to::<u64>() })
+        Ok(Ok(Sim { out: w(0).to::<u128>(), spent: w(1).to::<u128>(), gas: w(2).to::<u64>() }))
+    }
+
+    #[cfg(test)]
+    pub fn clear_cache(&self) {
+        self.cache.lock().clear();
     }
 
     pub fn limit(&self) -> u16 {
@@ -321,9 +371,22 @@ impl Engine {
         bail!("no native price pool found")
     }
 
-    /// The gas price read with the mirror's latest header.
+    /// The gas price read with the mirror's latest header, using EIP-1559 next-block prediction.
     pub fn gas_price(&self) -> Result<u128> {
         let h = self.mirror.state.read().header.clone();
-        Ok(h.gas_price.max(h.basefee as u128))
+        let basefee = h.basefee as u128;
+        if basefee == 0 || h.gas_limit == 0 {
+            return Ok(h.gas_price.max(basefee));
+        }
+        let target = (h.gas_limit / 2) as u128;
+        let gas_used = h.gas_used as u128;
+        let next_base_fee = if gas_used > target {
+            let delta = basefee * (gas_used - target) / target / 8;
+            basefee + delta.max(1)
+        } else {
+            let delta = basefee * (target - gas_used) / target / 8;
+            basefee.saturating_sub(delta)
+        };
+        Ok(h.gas_price.max(next_base_fee))
     }
 }

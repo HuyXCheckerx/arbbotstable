@@ -27,24 +27,31 @@ Start the servers first, then set the providers in `.env`:
 
 ```
 SOL_FLASH_ARB_DEX_PROVIDER=local          # solana_flash_arb.ts quotes and builds its DEX leg from the Solana server
-SOL_LOCAL_QUOTE_URL=http://127.0.0.1:8787
+SOL_LOCAL_QUOTE_URL=http://127.0.0.1:8787     # SOL_LOCAL_QUOTER_URL is read too
 # SOL_LOCAL_QUOTE_TOKEN=                  # the server's QUOTE_SERVER_TOKEN, when it listens beyond loopback
 ETH_ARB_QUOTE_PROVIDER=local              # eth_flash_arb_pyusd_usdc.py prices its DEX leg on the EVM server
-ETH_LOCAL_QUOTE_URL=http://127.0.0.1:8795
-ETH_ARB_LOCAL_EXECUTION_PROVIDER=okx      # okx, direct, matcha, auto or defillama
+ETH_LOCAL_QUOTE_URL=http://127.0.0.1:8795     # EVM_LOCAL_QUOTER_URL is read too
+ETH_ARB_LOCAL_EXECUTION_PROVIDER=direct   # direct (default), okx, matcha, auto or defillama
+# ETH_ARB_LOCAL_FALLBACK=true             # false: pause instead of quoting through that provider
 ```
 
 - **Solana** takes both the price and the instructions from the local server, so its DEX leg needs no aggregator.
   Serve every pair and its USDC legs (`QUOTE_PAIRS=PYUSD/USDG,USDG/USDC,PYUSD/USDC QUOTE_VIA=USDC`): the sniper
   allows two-hop routes for the local provider, and a direct PYUSD/USDG market alone often cannot fill the size. A
-  route that moved below its quote between `/quote` and `/swap-instructions` is refused and re-quoted.
+  route that moved below its quote between `/quote` and `/swap-instructions` is refused and re-quoted. With
+  `SOL_FLASH_ARB_FALLBACK_DFLOW=true`, a failed local quote is replaced by a DFlow quote for that check.
 - **Ethereum** has no executor for direct pool swaps yet, so the local server only prices the leg. The route is
   checked against the profit floor on the local price. Only a route that clears it fetches calldata from
   `ETH_ARB_LOCAL_EXECUTION_PROVIDER`. The floor is then checked again on that executable quote, and the route is
   dropped if the executable price no longer clears it. The log prints both prices and the local route's pools.
-- A server whose mirror is behind the chain answers 503. The sniper pauses that chain's local routes
-  (`transient-local`, dependency `local:<chain>`) and resumes when the server is current. A size the modelled pools
-  cannot fill (422) is reported as "no routes found".
+  While the local server cannot price the leg (503, 422, or not running), that provider quotes it instead.
+- A server whose mirror is behind the chain answers 503. Without a fallback (Solana by default, Ethereum with
+  `ETH_ARB_LOCAL_FALLBACK=false`), the sniper pauses that chain's local routes (`transient-local`, dependency
+  `local:<chain>`) and resumes when the server is current. A size the modelled pools cannot fill (422) is reported
+  as "no routes found".
+- Before spawning an engine, the sniper asks that chain's server for the route's DEX leg at the base amount. It
+  skips the route (`FILTERED`) when that leg alone is below the floor (`ENABLE_LOCAL_QUOTER_FILTER`, on by
+  default). A server that is down or behind skips the pre-check, not the route.
 - Observed in an 11-hour dry run (2026-10-18/19): the EVM server on PublicNode often fell behind the 30 s sync limit,
   so Ethereum routes paused. Give it a dedicated RPC, not the one the engines use. After the host slept, the
   Solana server's websockets stayed open but silent; it now opens new ones when it rebuilds a stalled market.
