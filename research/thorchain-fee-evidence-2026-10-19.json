@@ -1,0 +1,1955 @@
+{
+  "research_date": "2026-10-19",
+  "timezone": "Asia/Ho_Chi_Minh",
+  "documentation_fetch": {
+    "fetched_at_utc": "2026-10-19T02:27:25.996396+00:00",
+    "index": "https://docs.thorswap.finance/thorswap/llms.txt",
+    "indexed_pages": 102,
+    "successful_pages": 102,
+    "pages": [
+      {
+        "url": "https://docs.thorswap.finance/thorswap/welcome.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/welcome.md",
+        "ok": true,
+        "bytes": 11878,
+        "sha256": "55f33cb9a7196281ae62849ae95efae71cb8ad3d47a8d049e2ef0052d5cf500a"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets.md",
+        "ok": true,
+        "bytes": 6498,
+        "sha256": "a900aa84dda2f6362de58901a74763249e76973fe88f8950aac1baac7a0421a5"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap.md",
+        "ok": true,
+        "bytes": 2069,
+        "sha256": "621d66a1073428a2ff5e8bd7b04dfc02ca5031207a2efcd47021b54e2b71da0d"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets/create-a-new-keystore-wallet-1.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets/create-a-new-keystore-wallet-1.md",
+        "ok": true,
+        "bytes": 3810,
+        "sha256": "f7f551137cd6d032421e32aaf17dbbbe42334946b2e1015a48ac70799b552b13"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets/multiple-wallets-management.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets/multiple-wallets-management.md",
+        "ok": true,
+        "bytes": 2806,
+        "sha256": "fdaa76911d093933e331e968da295cd31c463d328f85ac05edb1ee9827f4430a"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets/importing-a-wallet-to-keystore.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets/importing-a-wallet-to-keystore.md",
+        "ok": true,
+        "bytes": 3526,
+        "sha256": "86bfdccc83f8c368ec9a15b543aac4f66108e5f765eb66687d3cbdddd66923ec"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets/ledger-hardware-wallet.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets/ledger-hardware-wallet.md",
+        "ok": true,
+        "bytes": 2170,
+        "sha256": "f0b2d3a4a8176f2d4aca9c38a7c73793d85ba46deaefd960827c96eae57ef056"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets/trezor-hardware-wallet.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets/trezor-hardware-wallet.md",
+        "ok": true,
+        "bytes": 3088,
+        "sha256": "5f7acde281ee62e744a33ceab229f1ffe93a3fe32a3f45ba209d30afa928d338"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets/keepkey-hardware-wallet.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets/keepkey-hardware-wallet.md",
+        "ok": true,
+        "bytes": 11304,
+        "sha256": "78c6ceaea86d1311066dd43a4c69b6a775d58a4a1aac86e86023e380d4f9da48"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/wallets/migrate-ctrl-wallet.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/wallets/migrate-ctrl-wallet.md",
+        "ok": true,
+        "bytes": 2032,
+        "sha256": "9128b15667c2645d28126eafc0c4a4d4b0373be77ee0b532e63a96b4ee738916"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/fees/tron-usdtrx-network-fees.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/fees/tron-usdtrx-network-fees.md",
+        "ok": true,
+        "bytes": 3173,
+        "sha256": "dfedfbeb7d40db4db2ea9eb7bfcdf352699edaaca4e8f7553281e8e83c829e43"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/fees.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/fees.md",
+        "ok": true,
+        "bytes": 3050,
+        "sha256": "dae70c64ab64b5937afb941a79cb69a4e185f1fe4b909faff12f6d881d197bc0"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/cross-chain-dex-aggregation.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/cross-chain-dex-aggregation.md",
+        "ok": true,
+        "bytes": 2710,
+        "sha256": "468d7163ceae7ca1c12bdf0d178bb8c2cc955bda6f242eeadef489f426c57fa2"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/direct-swaps.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/direct-swaps.md",
+        "ok": true,
+        "bytes": 3972,
+        "sha256": "73dbf7c950e6e47e5a401d61d69f202999b855038ec5d07b3ae87333f34cf2c1"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/cross-chain-dex-aggregation/bnb-smart-chain-dex-aggregator.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/cross-chain-dex-aggregation/bnb-smart-chain-dex-aggregator.md",
+        "ok": true,
+        "bytes": 2372,
+        "sha256": "a296b3e31d32ce07384d3ff29b9f0964d5e08179927b3764005e987777e3cb01"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/streaming-swaps.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/streaming-swaps.md",
+        "ok": true,
+        "bytes": 3525,
+        "sha256": "d0575b69c28e22de6ea0c5ac8a8bc1914942896fe4345f2666e1a8a33abee48e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/cross-chain-dex-aggregation/avalanche-dex-aggregator.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/cross-chain-dex-aggregation/avalanche-dex-aggregator.md",
+        "ok": true,
+        "bytes": 2474,
+        "sha256": "cfb0760defc697e03a6951740d6ecc2644d5c60cd98b7807c884f9dc9c5e765d"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/cross-chain-dex-aggregation/ethereum-dex-aggregator.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/cross-chain-dex-aggregation/ethereum-dex-aggregator.md",
+        "ok": true,
+        "bytes": 2586,
+        "sha256": "ab561d1962df0e58ab8c42f98e56b9170b97492aa0f4cc9687e77587e1e12cf2"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thorswap/boosted-swaps.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thorswap/boosted-swaps.md",
+        "ok": true,
+        "bytes": 2777,
+        "sha256": "921d63588325cf510d3beebbcd2b97f2e0ec3ef4394d984f669f5c697dc6c1b7"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thoryield.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thoryield.md",
+        "ok": true,
+        "bytes": 812,
+        "sha256": "b26c978a8621746c8965b761637a75123168c8e3816f6acaf6008d7c3ad659a8"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thoryield/thoryield-webapp.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thoryield/thoryield-webapp.md",
+        "ok": true,
+        "bytes": 6115,
+        "sha256": "06561802eb1e8aab6a98bc787752e5d8ca283051811717830aa30fa8b64ef259"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/referral-program.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/referral-program.md",
+        "ok": true,
+        "bytes": 5463,
+        "sha256": "f06d9661ebd9df7599f98eadcb5b697240f1367a9c319839341a0f3db3743ce6"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thoryield/mobile-app.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thoryield/mobile-app.md",
+        "ok": true,
+        "bytes": 1764,
+        "sha256": "831c36f10bf15d0fd59f30a3d0646490b5d19e86f3505ddd9d473e2e868b599f"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thoryield/lp-calculator.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thoryield/lp-calculator.md",
+        "ok": true,
+        "bytes": 1147,
+        "sha256": "9dec05b74afd87333ceb679a416cf6a0fade3173a9005d00f040af80fbbf2097"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain.md",
+        "ok": true,
+        "bytes": 2088,
+        "sha256": "133d114fca0994e06b9e15e9e57a930b37762ec7de20344175dc6fc5953d06a5"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thoryield/thoryield-discord-bot.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thoryield/thoryield-discord-bot.md",
+        "ok": true,
+        "bytes": 4563,
+        "sha256": "cb61091362ef77bf486eee06cc039b946c479e85499fe04057bde33936ce7d44"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thorswap-rune-edition.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thorswap-rune-edition.md",
+        "ok": true,
+        "bytes": 4242,
+        "sha256": "73317902fb82be9044ef24e7ddcbd035742235191c6b8dbb041b9e97f650ff8d"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/tcy.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/tcy.md",
+        "ok": true,
+        "bytes": 3436,
+        "sha256": "a7a7670510ec4891a984b13b7c75d61fef76451dbc6879a432b577b40015feeb"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/tcy/how-to-use-tcy.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/tcy/how-to-use-tcy.md",
+        "ok": true,
+        "bytes": 2417,
+        "sha256": "bf63c9f147ace5d43c4062bd4d3cdba57e8ab8ffee123f28b000a2be22eae062"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thornames.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thornames.md",
+        "ok": true,
+        "bytes": 4663,
+        "sha256": "1f5bd97b39b31e81ebad9c468c7d1d64732c422ecbc147ac4490dcd5ec1340aa"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/runepool/how-to-use-runepool.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/runepool/how-to-use-runepool.md",
+        "ok": true,
+        "bytes": 1556,
+        "sha256": "d62a53b74a5ec26e8c7ae5a82ebec58877d6c8f4e2d93c7deb51b1ac0cd56060"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thorsafe.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thorsafe.md",
+        "ok": true,
+        "bytes": 1969,
+        "sha256": "1df0e65fc35e267686392e13e082f50c3b0a34bc453a8364a7d1336bb499e867"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thornode-management.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thornode-management.md",
+        "ok": true,
+        "bytes": 4985,
+        "sha256": "2ca107bbfea7ba673402b34384cf935e20ab0e657791082f22822e2bd4509ebe"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/runepool.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/runepool.md",
+        "ok": true,
+        "bytes": 3671,
+        "sha256": "b4f80ddf6d236e922ce329637a7cff6cdc8f2b30364f76029ead536429dfd008"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thorsafe/how-it-works.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thorsafe/how-it-works.md",
+        "ok": true,
+        "bytes": 2839,
+        "sha256": "87515c826339035f05cadbc52850d3dc849f59b71784b8e566b01cd910958a73"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thorsafe/benefits-and-use-cases.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thorsafe/benefits-and-use-cases.md",
+        "ok": true,
+        "bytes": 2782,
+        "sha256": "93ffadec6fda83033a8d7138cbdaf783eb018a2541de7aed38a6b65979662284"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thorsafe/signing-multi-sig-transaction.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thorsafe/signing-multi-sig-transaction.md",
+        "ok": true,
+        "bytes": 1219,
+        "sha256": "b6fc2e3f2707ac67dbe22d4a159cf283d007bd8d80ef9376b16ef8889d832fa0"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/thorsafe/creating-a-thorsafe.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/thorsafe/creating-a-thorsafe.md",
+        "ok": true,
+        "bytes": 779,
+        "sha256": "c2cbb1819312dc206395e04a4275dd4aa38ee0afa4f94a3d6626c67ace876e5e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/earn.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/earn.md",
+        "ok": true,
+        "bytes": 4074,
+        "sha256": "da4c16c0ec4409e08bb7ce0150d782cf8ded8949118b1686bd2cb5254335f756"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived.md",
+        "ok": true,
+        "bytes": 446,
+        "sha256": "0a873fcace253bdf1dc8627bc5fd86a148ee3e9e35c7287d49db2acf68f79812"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/earn/how-to-earn.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/earn/how-to-earn.md",
+        "ok": true,
+        "bytes": 1848,
+        "sha256": "7fdc5e3e5d6ed2e47f39752ac0128629f59df29397c631bbd1865c03e88955a9"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/synthetic-assets.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/synthetic-assets.md",
+        "ok": true,
+        "bytes": 2656,
+        "sha256": "a9ef0fce03b076c74c60ba963c0548491cd55975099280579240f416915d32e6"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/synthetic-assets/thorsynths-101.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/synthetic-assets/thorsynths-101.md",
+        "ok": true,
+        "bytes": 4104,
+        "sha256": "31ac24ae74752689873e22738a8283deb8c08bba6af47f2569f33ad4d01141f6"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/synthetic-assets/how-it-works.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/synthetic-assets/how-it-works.md",
+        "ok": true,
+        "bytes": 2143,
+        "sha256": "5cef67f6682d8edf019f0e3ddb70ef5de286a915f74708c6f290b85f209ce4cc"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/synthetic-assets/risks.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/synthetic-assets/risks.md",
+        "ok": true,
+        "bytes": 1047,
+        "sha256": "03bdc47bc0b3a460e15de99d8fe9e0d665fcb953367811f96ee526670b3e575e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/synthetic-assets/benefits-and-use-cases.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/synthetic-assets/benefits-and-use-cases.md",
+        "ok": true,
+        "bytes": 1173,
+        "sha256": "f336e6dd6dc32bbbb7c2303bf8c3fbe57edd222930d47dc980973dd6286541d7"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/lending-deprecated/lending-design.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/lending-deprecated/lending-design.md",
+        "ok": true,
+        "bytes": 3863,
+        "sha256": "0a15d72df3c002b3473ae706a210962aa00bdcd8437ab8caf05d3dec08b85d28"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/lending-deprecated.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/lending-deprecated.md",
+        "ok": true,
+        "bytes": 3722,
+        "sha256": "71e10f217e618a4de98ee8fe2a2db26ba4ea30cb621970c442f5fff30b9d65f5"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/tutorials/sidebar-navigation.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/tutorials/sidebar-navigation.md",
+        "ok": true,
+        "bytes": 1580,
+        "sha256": "a65d3b2df96736ec0ff8a90e7b905b7d755e8b686b4e7056e6da349fbff20c0b"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/tutorials.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/tutorials.md",
+        "ok": true,
+        "bytes": 1176,
+        "sha256": "d5f541b50806a163f0f07b860b172985b5c0fabf73cc44aef093cf20b0d77845"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/tutorials/add-liquidity.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/tutorials/add-liquidity.md",
+        "ok": true,
+        "bytes": 8392,
+        "sha256": "02258af8ff63e27332bbeea5d31654b099c75cd9df2876e34b153d7b3f7efd6f"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/ecosystem/thorchain/archived/lending-deprecated/how-to-lend.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/ecosystem/thorchain/archived/lending-deprecated/how-to-lend.md",
+        "ok": true,
+        "bytes": 2327,
+        "sha256": "58b1267a18abdc9b1481e62e53c0d09c8de85274b5795221b62fbed3d56e8a78"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/tutorials/track-your-lp-yield.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/tutorials/track-your-lp-yield.md",
+        "ok": true,
+        "bytes": 807,
+        "sha256": "9ed4350b2712ea8db92bee726cd23cd46a87817d5475040abf80eb923cd20e70"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/general.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/general.md",
+        "ok": true,
+        "bytes": 1394,
+        "sha256": "2212577331377ebc390df24c0db240718dd410a57662dd20e8a360334b2b61eb"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions.md",
+        "ok": true,
+        "bytes": 1544,
+        "sha256": "f0ec7f3a0685c56a48425fc72ae7fd53c8a7318f418f92470fe1d481386a82f3"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/thorchain-rune.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/thorchain-rune.md",
+        "ok": true,
+        "bytes": 1745,
+        "sha256": "fb8396c32f89a4e04ec308064e22c65e3917aa7c447c1c508bc0431b056fa581"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/thorswap-thor.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/thorswap-thor.md",
+        "ok": true,
+        "bytes": 1120,
+        "sha256": "6e6d4a883cdb2737aed3e42cdcb38fd72c20d370d1b90f834314a98bbb8cca4e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/cross-chain-swaps.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/cross-chain-swaps.md",
+        "ok": true,
+        "bytes": 1777,
+        "sha256": "e678c5cbda1f85200683d11686bd6ca83607aab65ff4cffcaaedc75957934912"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/provide-liquidity.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/provide-liquidity.md",
+        "ok": true,
+        "bytes": 3371,
+        "sha256": "9615ace89cba1c1495ed180632372047d860585dc724c84af3e90e31aba963be"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/fees.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/fees.md",
+        "ok": true,
+        "bytes": 2902,
+        "sha256": "b883fb5c8cda1d1355b9e2ac464d6a127d9d7cc5879d091cc5a81a12d82570e4"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/troubleshooting.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/troubleshooting.md",
+        "ok": true,
+        "bytes": 1268,
+        "sha256": "8ffc22d2d8c854767b0bde0ebbcfd59af970d8f0240b4ff064d6da124d46ffd6"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/streaming-swaps.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/streaming-swaps.md",
+        "ok": true,
+        "bytes": 3549,
+        "sha256": "2bb6849e971196431ab2483c5e22a247fe5747140a0c35a33df29b7be7ad2a1b"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/supported-wallets.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/supported-wallets.md",
+        "ok": true,
+        "bytes": 1118,
+        "sha256": "6a86eba945274587335b7489e93d7248687462e5ab0b847fdaf7b718ecc3b893"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/how-tos/frequently-asked-questions/lending-faqs.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/how-tos/frequently-asked-questions/lending-faqs.md",
+        "ok": true,
+        "bytes": 4776,
+        "sha256": "2c208e5644613c13f8c1dab74615ffe83c6d64aff4e852c33f3e38732349bf7e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about.md",
+        "ok": true,
+        "bytes": 2541,
+        "sha256": "a596daac778e9be967c81a99a6b05fe12aa0f6902ad2be8ad6906d84fab55859"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/thor-utility.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/thor-utility.md",
+        "ok": true,
+        "bytes": 4747,
+        "sha256": "f001c89dd287715e0262e8bf8de9cc86e0445e773d223161b3d4ba534ad3c13a"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/fee-discounts.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/fee-discounts.md",
+        "ok": true,
+        "bytes": 1378,
+        "sha256": "e1a71ea7ecaac4a24fd4de0099b60fff7deeabdc6321946bba5782bc8509ed5b"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/thor-tokenomics.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/thor-tokenomics.md",
+        "ok": true,
+        "bytes": 2195,
+        "sha256": "b04efd0c7439b91523e49a1e1ea11cb31513b10e5c438a02dbbac7fd9dc5d69d"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/vthor.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/vthor.md",
+        "ok": true,
+        "bytes": 4934,
+        "sha256": "cebefe09324ea1b2a97508b9cd70d652acbb1e5a509c2ae0ea5285d334b4c514"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/uthor.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/uthor.md",
+        "ok": true,
+        "bytes": 2766,
+        "sha256": "65f8e4cec06877a6e39e483bd9c5987cee7aad79be9d8a3e1cffcfa66ac93c18"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/thor-buyback-+-burn-programme.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/thor-buyback-+-burn-programme.md",
+        "ok": true,
+        "bytes": 1266,
+        "sha256": "6bf1393cff6d5f7a7768da602c78946c251f517235e2a7c9ccb9a5b70946769d"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/trading-black-hole.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/trading-black-hole.md",
+        "ok": true,
+        "bytes": 1455,
+        "sha256": "8fcb1c03b19e3af9a63c08fb6a93b8dc36982cf549645d8de5da95911d6c3209"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/efficient-emissions.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/efficient-emissions.md",
+        "ok": true,
+        "bytes": 1726,
+        "sha256": "525d9bd2b589fe566b3381927c2f34f79670335dc20aead30e20c2b8ba258793"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/community-governance/governance-process.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/community-governance/governance-process.md",
+        "ok": true,
+        "bytes": 2003,
+        "sha256": "a091af7eebc4cd15a4014eac2b4084212b53dab50bb8dd75458f7d05418e7007"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/community-governance.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/community-governance.md",
+        "ok": true,
+        "bytes": 1665,
+        "sha256": "bd8e17d8b0783db8c7c75b9c316b527a24ce64fe6cf65f3d4c79639eee4d1127"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/thor-burn.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/thor-burn.md",
+        "ok": true,
+        "bytes": 7113,
+        "sha256": "2ac772d358b4062324cafa097354bb4b199f7ccb3bce90d4f4bf9526fcfb4a42"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/sushi-onsen.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/sushi-onsen.md",
+        "ok": true,
+        "bytes": 2510,
+        "sha256": "214aa3941ac23da581d832e55fe900b985da0a0921cbc0451e0f4b61d3de237e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/resources/brand-design-and-assets.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/resources/brand-design-and-assets.md",
+        "ok": true,
+        "bytes": 3773,
+        "sha256": "9b37c75eafbceb518d9f552b902f6f71e8a51b2c4925673226620b4f85ab32ce"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/sushi-onsen/how-to-stake-on-onsen.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/sushi-onsen/how-to-stake-on-onsen.md",
+        "ok": true,
+        "bytes": 1928,
+        "sha256": "01528f4ba56f3e8e9c85255d3bebccfd8b8e22e20c2f963ec6193ab1661a0ca8"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/resources/audits.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/resources/audits.md",
+        "ok": true,
+        "bytes": 918,
+        "sha256": "b095500ea2f2c5c9141c323db262ab8197b734389fb07cc3d2160d9b21a7fee1"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/resources/terms-of-service.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/resources/terms-of-service.md",
+        "ok": true,
+        "bytes": 65492,
+        "sha256": "cf03bfee4bea251b9f1c129ae1c89477f160d62312c438c27501d4679702ae47"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/thor/about/sushi-onsen/how-to-lp-on-sushiswap.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/thor/about/sushi-onsen/how-to-lp-on-sushiswap.md",
+        "ok": true,
+        "bytes": 2181,
+        "sha256": "aaa627f9e3a44418db1bf5a8935bea2f61fd84f176a1ccf1499ac89073e28b80"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/resources/useful-links.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/resources/useful-links.md",
+        "ok": true,
+        "bytes": 1354,
+        "sha256": "dfc3199c0adcd712ed484f523180a4c4586fde16b727d70c930af7f970af66d2"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/community-and-support.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/community-and-support.md",
+        "ok": true,
+        "bytes": 2289,
+        "sha256": "0d399ac3834a4345fd17174206c20cfa76a3733514909ea3c4d578d2ddd100c0"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/support-tickets.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/support-tickets.md",
+        "ok": true,
+        "bytes": 1223,
+        "sha256": "49b5be78de2d5de6d00c3bfcbd5b9938d9f03c290600e77263c14503d5050a1c"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs.md",
+        "ok": true,
+        "bytes": 372,
+        "sha256": "fac30a7e7216cce637d219e987bad572216345c94ca353fd7eb12de2b42c155e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/thorchain-rune.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/thorchain-rune.md",
+        "ok": true,
+        "bytes": 1888,
+        "sha256": "7a1331ad52fdfac980bcf4cf69b54deb3a573bc884fee09bfd0c06f7e07baf0c"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/general.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/general.md",
+        "ok": true,
+        "bytes": 2978,
+        "sha256": "a3648dc203c6594c342aa91cc84623af87025e98137572ad3fef89a2a64c98eb"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/streaming-swaps.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/streaming-swaps.md",
+        "ok": true,
+        "bytes": 4029,
+        "sha256": "86646e83712eeb07039bdc0b5381007e909973288cbd634703b19d11a5e3535c"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/provide-liquidity.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/provide-liquidity.md",
+        "ok": true,
+        "bytes": 3624,
+        "sha256": "6a059deca244e4d1212fc8c5e405843411f8df171b320ede4a24003f89c40f7f"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/tcy.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/tcy.md",
+        "ok": true,
+        "bytes": 1105,
+        "sha256": "ae97f211a03d721010438a287a1326eadcbcdb5772cf96ba5f28778a03495edd"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/i-made-a-swap-but-the-funds-havent-arrived.-when-can-i-expect-them.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/i-made-a-swap-but-the-funds-havent-arrived.-when-can-i-expect-them.md",
+        "ok": true,
+        "bytes": 783,
+        "sha256": "dad2e05f482e4f32c821db419c8adffa763743b04d106e3db49ddbb5678653e6"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/no-available-quote.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/no-available-quote.md",
+        "ok": true,
+        "bytes": 634,
+        "sha256": "e3f93b81ba6882e2a1d607090e345d153c20a97d752ad8dede1d5fa3af8591e8"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/browser-wallet-troubleshooting.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/browser-wallet-troubleshooting.md",
+        "ok": true,
+        "bytes": 1809,
+        "sha256": "9274d31cbeab10ef943f9630af81ef20127e2a53777b877d79ace3995e2c07ea"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/how-to-reset-your-hardware-wallet-connection.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/how-to-reset-your-hardware-wallet-connection.md",
+        "ok": true,
+        "bytes": 988,
+        "sha256": "3e998d6563b05fd4bd2549d3afac138a2062ecbf48a9956f130b1a1498c8713e"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/why-does-my-ledger-balance-show-zero-when-i-can-see-my-balance-on-ledger-live.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/why-does-my-ledger-balance-show-zero-when-i-can-see-my-balance-on-ledger-live.md",
+        "ok": true,
+        "bytes": 1802,
+        "sha256": "23b07df93faab930db722caaadf1dd9452b0b008a474f6510cddaa3bf7393945"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/i-cant-see-my-asset-s-in-savers-or-repay-my-loan.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/i-cant-see-my-asset-s-in-savers-or-repay-my-loan.md",
+        "ok": true,
+        "bytes": 1147,
+        "sha256": "fcb0c666061ca7eadaacfa3a5503a00f0fd8e691749ceb7be371d9b5916a1ba9"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/ledger-errors-cla_not_supported-and-0x6e01.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/ledger-errors-cla_not_supported-and-0x6e01.md",
+        "ok": true,
+        "bytes": 1339,
+        "sha256": "6f5af89158b0f3bbec8e43acf7af820612403c11fa70c31c7311e2f1f8132fc3"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/i-cant-withdraw-my-lp.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/i-cant-withdraw-my-lp.md",
+        "ok": true,
+        "bytes": 907,
+        "sha256": "7c458eb002b8b90736ec40f9d8bf23377513839ea805053acc1990474d0e6453"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/basic-ledger-troubleshooting.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/basic-ledger-troubleshooting.md",
+        "ok": true,
+        "bytes": 1003,
+        "sha256": "afacf6af6900a4aefb1f4055548368d93a65701ad1c29fd410c83ff3d393806f"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/helpful-links.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/helpful-links.md",
+        "ok": true,
+        "bytes": 966,
+        "sha256": "4be9331cf2fa074cd64fcd0abc928008d581926e0818d933eecf95f6842740d7"
+      },
+      {
+        "url": "https://docs.thorswap.finance/thorswap/customer-support/support-faqs/basic-browser-wallet-troubleshooting.md",
+        "path": "/var/folders/71/v02nr5md7qq94td0wgdhymx80000gn/T/thorswap-docs-20261019-l5c1jx0x/customer-support/support-faqs/basic-browser-wallet-troubleshooting.md",
+        "ok": true,
+        "bytes": 696,
+        "sha256": "9d75c10915bb7f7854db4b3a2213b003178145f979d81bc84f4940f603dbcf93"
+      }
+    ]
+  },
+  "quote_comparison": [
+    {
+      "name": "direct",
+      "observed_at_utc": "2026-10-19T02:27:43.351094+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/quote/swap?from_asset=ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48&to_asset=ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1&amount=1000000000000&streaming_interval=0&streaming_quantity=0",
+      "response": {
+        "inbound_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+        "inbound_confirmation_blocks": 2,
+        "inbound_confirmation_seconds": 24,
+        "outbound_delay_blocks": 15,
+        "outbound_delay_seconds": 90,
+        "fees": {
+          "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+          "affiliate": "0",
+          "outbound": "240868310",
+          "liquidity": "2008589508",
+          "total": "2249457818",
+          "slippage_bps": 20,
+          "total_bps": 22
+        },
+        "router": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+        "expiry": 1792377751,
+        "warning": "Do not cache this response. Do not send funds after the expiry. Rapid streaming time is a best-case estimate. Actual execution may take longer due to direction skipping, swap failures, or queue budget limits.",
+        "notes": "Base Asset: Send the inbound_address the asset with the memo encoded in hex in the data field. Tokens: First approve router to spend tokens from user: asset.approve(router, amount). Then call router.depositWithExpiry(inbound_address, asset, amount, memo, expiry). Asset is the token contract address. Amount should be in native asset decimals (eg 1e18 for most tokens). Do not swap to smart contract addresses.",
+        "dust_threshold": "1000",
+        "recommended_min_amount_in": "721430700",
+        "recommended_gas_rate": "15",
+        "gas_rate_units": "gwei",
+        "expected_amount_out": "1000415145481",
+        "max_streaming_quantity": 164,
+        "streaming_swap_blocks": 55,
+        "streaming_swap_seconds": 330,
+        "total_swap_seconds": 354
+      }
+    },
+    {
+      "name": "ss_1bps",
+      "observed_at_utc": "2026-10-19T02:27:45.265329+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/quote/swap?from_asset=ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48&to_asset=ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1&amount=1000000000000&streaming_interval=0&streaming_quantity=0&affiliate=ss&affiliate_bps=1",
+      "response": {
+        "inbound_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+        "inbound_confirmation_blocks": 2,
+        "inbound_confirmation_seconds": 24,
+        "outbound_delay_blocks": 15,
+        "outbound_delay_seconds": 90,
+        "fees": {
+          "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+          "affiliate": "100162490",
+          "outbound": "241206307",
+          "liquidity": "1705612188",
+          "total": "2046980985",
+          "slippage_bps": 16,
+          "total_bps": 20
+        },
+        "router": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+        "expiry": 1792377757,
+        "warning": "Do not cache this response. Do not send funds after the expiry. Rapid streaming time is a best-case estimate. Actual execution may take longer due to direction skipping, swap failures, or queue budget limits.",
+        "notes": "Base Asset: Send the inbound_address the asset with the memo encoded in hex in the data field. Tokens: First approve router to spend tokens from user: asset.approve(router, amount). Then call router.depositWithExpiry(inbound_address, asset, amount, memo, expiry). Asset is the token contract address. Amount should be in native asset decimals (eg 1e18 for most tokens). Do not swap to smart contract addresses.",
+        "dust_threshold": "1000",
+        "recommended_min_amount_in": "721502843",
+        "recommended_gas_rate": "15",
+        "gas_rate_units": "gwei",
+        "expected_amount_out": "1001338088083",
+        "max_streaming_quantity": 548,
+        "streaming_swap_blocks": 183,
+        "streaming_swap_seconds": 1098,
+        "total_swap_seconds": 1122
+      }
+    },
+    {
+      "name": "ej_1bps",
+      "observed_at_utc": "2026-10-19T02:27:47.333431+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/quote/swap?from_asset=ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48&to_asset=ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1&amount=1000000000000&streaming_interval=0&streaming_quantity=0&affiliate=ej&affiliate_bps=1",
+      "response": {
+        "inbound_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+        "inbound_confirmation_blocks": 2,
+        "inbound_confirmation_seconds": 24,
+        "outbound_delay_blocks": 15,
+        "outbound_delay_seconds": 90,
+        "fees": {
+          "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+          "affiliate": "100243201",
+          "outbound": "241302716",
+          "liquidity": "1103831190",
+          "total": "1445377107",
+          "slippage_bps": 10,
+          "total_bps": 14
+        },
+        "router": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+        "expiry": 1792377757,
+        "warning": "Do not cache this response. Do not send funds after the expiry. Rapid streaming time is a best-case estimate. Actual execution may take longer due to direction skipping, swap failures, or queue budget limits.",
+        "notes": "Base Asset: Send the inbound_address the asset with the memo encoded in hex in the data field. Tokens: First approve router to spend tokens from user: asset.approve(router, amount). Then call router.depositWithExpiry(inbound_address, asset, amount, memo, expiry). Asset is the token contract address. Amount should be in native asset decimals (eg 1e18 for most tokens). Do not swap to smart contract addresses.",
+        "dust_threshold": "1000",
+        "recommended_min_amount_in": "721502843",
+        "recommended_gas_rate": "15",
+        "gas_rate_units": "gwei",
+        "expected_amount_out": "1002145117346",
+        "max_streaming_quantity": 1645,
+        "streaming_swap_blocks": 549,
+        "streaming_swap_seconds": 3294,
+        "total_swap_seconds": 3318
+      }
+    },
+    {
+      "name": "symbiosis_1bps",
+      "observed_at_utc": "2026-10-19T02:27:49.145455+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/quote/swap?from_asset=ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48&to_asset=ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1&amount=1000000000000&streaming_interval=0&streaming_quantity=0&affiliate=symbiosis&affiliate_bps=1",
+      "response": {
+        "inbound_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+        "inbound_confirmation_blocks": 2,
+        "inbound_confirmation_seconds": 24,
+        "outbound_delay_blocks": 15,
+        "outbound_delay_seconds": 90,
+        "fees": {
+          "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+          "affiliate": "100293359",
+          "outbound": "241302692",
+          "liquidity": "602114415",
+          "total": "943710466",
+          "slippage_bps": 5,
+          "total_bps": 9
+        },
+        "router": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+        "expiry": 1792377757,
+        "warning": "Do not cache this response. Do not send funds after the expiry. Rapid streaming time is a best-case estimate. Actual execution may take longer due to direction skipping, swap failures, or queue budget limits.",
+        "notes": "Base Asset: Send the inbound_address the asset with the memo encoded in hex in the data field. Tokens: First approve router to spend tokens from user: asset.approve(router, amount). Then call router.depositWithExpiry(inbound_address, asset, amount, memo, expiry). Asset is the token contract address. Amount should be in native asset decimals (eg 1e18 for most tokens). Do not swap to smart contract addresses.",
+        "dust_threshold": "1000",
+        "recommended_min_amount_in": "721502843",
+        "recommended_gas_rate": "15",
+        "gas_rate_units": "gwei",
+        "expected_amount_out": "1002646640848",
+        "max_streaming_quantity": 1645,
+        "streaming_swap_blocks": 549,
+        "streaming_swap_seconds": 3294,
+        "total_swap_seconds": 3318
+      }
+    }
+  ],
+  "quote_controls": [
+    {
+      "name": "symbiosis_zero_affiliate",
+      "observed_at_utc": "2026-10-19T02:29:24.939209+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/quote/swap?from_asset=ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48&to_asset=ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1&amount=1000000000000&streaming_interval=0&streaming_quantity=0&affiliate=symbiosis&affiliate_bps=0",
+      "response": {
+        "inbound_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+        "inbound_confirmation_blocks": 2,
+        "inbound_confirmation_seconds": 24,
+        "outbound_delay_blocks": 15,
+        "outbound_delay_seconds": 90,
+        "fees": {
+          "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+          "affiliate": "0",
+          "outbound": "240868353",
+          "liquidity": "2008318416",
+          "total": "2249186769",
+          "slippage_bps": 20,
+          "total_bps": 22
+        },
+        "router": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+        "expiry": 1792377854,
+        "warning": "Do not cache this response. Do not send funds after the expiry. Rapid streaming time is a best-case estimate. Actual execution may take longer due to direction skipping, swap failures, or queue budget limits.",
+        "notes": "Base Asset: Send the inbound_address the asset with the memo encoded in hex in the data field. Tokens: First approve router to spend tokens from user: asset.approve(router, amount). Then call router.depositWithExpiry(inbound_address, asset, amount, memo, expiry). Asset is the token contract address. Amount should be in native asset decimals (eg 1e18 for most tokens). Do not swap to smart contract addresses.",
+        "dust_threshold": "1000",
+        "recommended_min_amount_in": "721495500",
+        "recommended_gas_rate": "15",
+        "gas_rate_units": "gwei",
+        "expected_amount_out": "1000325283464",
+        "max_streaming_quantity": 164,
+        "streaming_swap_blocks": 55,
+        "streaming_swap_seconds": 330,
+        "total_swap_seconds": 354
+      }
+    },
+    {
+      "name": "symbiosis_fixed164",
+      "observed_at_utc": "2026-10-19T02:29:27.140514+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/quote/swap?from_asset=ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48&to_asset=ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1&amount=1000000000000&streaming_interval=0&streaming_quantity=164&affiliate=symbiosis&affiliate_bps=1",
+      "response": {
+        "inbound_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+        "inbound_confirmation_blocks": 2,
+        "inbound_confirmation_seconds": 24,
+        "outbound_delay_blocks": 15,
+        "outbound_delay_seconds": 90,
+        "fees": {
+          "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+          "affiliate": "100101169",
+          "outbound": "240868112",
+          "liquidity": "1507563440",
+          "total": "1848532721",
+          "slippage_bps": 15,
+          "total_bps": 18
+        },
+        "router": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+        "expiry": 1792377854,
+        "warning": "Do not cache this response. Do not send funds after the expiry. Rapid streaming time is a best-case estimate. Actual execution may take longer due to direction skipping, swap failures, or queue budget limits.",
+        "notes": "Base Asset: Send the inbound_address the asset with the memo encoded in hex in the data field. Tokens: First approve router to spend tokens from user: asset.approve(router, amount). Then call router.depositWithExpiry(inbound_address, asset, amount, memo, expiry). Asset is the token contract address. Amount should be in native asset decimals (eg 1e18 for most tokens). Do not swap to smart contract addresses.",
+        "dust_threshold": "1000",
+        "recommended_min_amount_in": "721567649",
+        "recommended_gas_rate": "15",
+        "gas_rate_units": "gwei",
+        "expected_amount_out": "1000724937527",
+        "max_streaming_quantity": 1645,
+        "streaming_swap_blocks": 55,
+        "streaming_swap_seconds": 330,
+        "total_swap_seconds": 354
+      }
+    }
+  ],
+  "network_state": [
+    {
+      "name": "mimir",
+      "observed_at_utc": "2026-10-19T02:29:19.994253+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/mimir",
+      "response": {
+        "ADR021": 2,
+        "ADR029": 1,
+        "ADR031": 1,
+        "ADR23": 1,
+        "ADR25": 1,
+        "ADR26": 1,
+        "ADR28": 1,
+        "ADVSWAPQUEUERAPIDSWAPMAX": 3,
+        "ASGARDSIZE": 20,
+        "ATTESTATIONMAXBATCHSIZE": 200,
+        "ATTESTATIONPEERCONCURRENTRECEIVES": 9,
+        "ATTESTATIONPEERCONCURRENTSENDS": 8,
+        "BADVALIDATORREDLINE": 20,
+        "BANKSENDENABLED": 1,
+        "BONDSLASHBAN": 100000000000000,
+        "BURNSYNTHS": 1,
+        "CHURNINTERVAL": 43200,
+        "CHURNMIGRATEROUNDS": 2,
+        "CLOUTLIMIT": 5000000000000,
+        "COMPROMISEDVAULT-THORPUB1ADDWNPEPQVPNHWZQKD2ZQKXSJ272FAF4EZSNGWH773WJDFKUS8M4F860U3G5KA22V28": 1,
+        "CONFMULTIPLIERBASISPOINTS-LTC": 10000,
+        "DERIVEDDEPTHBASISPTS": 10000,
+        "DERIVEDMINDEPTH": 10000,
+        "DERIVEDSLIPMINBPS": 15,
+        "DESIREDVALIDATORSET": 120,
+        "DISABLETSSSIGNERFILTERING": 1,
+        "DYNAMICFEE-WHITELIST-EJ": 1,
+        "DYNAMICFEE-WHITELIST-SS": 1,
+        "DYNAMICFEE-WHITELIST-SYMBIOSIS": 1,
+        "DYNAMICMAXANCHORTARGET": 9500,
+        "EMISSIONCURVE": 100000,
+        "ENABLEADVSWAPQUEUE": 1,
+        "ENABLESWITCH-GAIA-AUTO": 1,
+        "ENABLESWITCH-GAIA-FUZN": 1,
+        "ENABLESWITCH-GAIA-KUJI": 1,
+        "ENABLESWITCH-GAIA-LQDY": 1,
+        "ENABLESWITCH-GAIA-LVN": 1,
+        "ENABLESWITCH-GAIA-NAMI": 0,
+        "ENABLESWITCH-GAIA-NSTK": 1,
+        "ENABLESWITCH-GAIA-RKUJI": 1,
+        "ENABLESWITCH-GAIA-WINK": 1,
+        "ENABLESWITCH-GAIA-XUSK": 1,
+        "EVMALLOWANCECHECK-AVAX": 1,
+        "EVMALLOWANCECHECK-BASE": 1,
+        "EVMDISABLECONTRACTWHITELIST": 1,
+        "FUNDMIGRATIONINTERVAL": 720,
+        "HALTAVAXCHAIN": 0,
+        "HALTAVAXTRADING": 0,
+        "HALTBASETRADING": 0,
+        "HALTBCHCHAIN": 0,
+        "HALTBCHTRADING": 0,
+        "HALTBSCCHAIN": 0,
+        "HALTBSCTRADING": 0,
+        "HALTBTCCHAIN": 0,
+        "HALTBTCHAIN": 0,
+        "HALTBTCTRADING": 0,
+        "HALTCHAINGLOBAL": 0,
+        "HALTCHURNING": 1,
+        "HALTDOGECHAIN": 0,
+        "HALTDOGETRADING": 0,
+        "HALTETHCHAIN": 0,
+        "HALTETHSIGNING": 0,
+        "HALTETHTRADING": 0,
+        "HALTGAIACHAIN": 1,
+        "HALTGAIATRADING": 0,
+        "HALTLTCCHAIN": 0,
+        "HALTLTCTRADING": 0,
+        "HALTMEMOLESS": 1,
+        "HALTSECUREDGLOBAL": 0,
+        "HALTSECUREDWITHDRAW-BASE": 0,
+        "HALTSECUREDWITHDRAW-BSC": 0,
+        "HALTSIGNING": 0,
+        "HALTSIGNINGAVAX": 0,
+        "HALTSIGNINGBASE": 0,
+        "HALTSIGNINGBCH": 0,
+        "HALTSIGNINGBSC": 0,
+        "HALTSIGNINGBTC": 0,
+        "HALTSIGNINGDOGE": 0,
+        "HALTSIGNINGETH": 0,
+        "HALTSIGNINGGAIA": 0,
+        "HALTSIGNINGLTC": 0,
+        "HALTSIGNINGSOL": 0,
+        "HALTSIGNINGTRON": 0,
+        "HALTSIGNINGXRP": 0,
+        "HALTSIGNINGZEC": 1,
+        "HALTSOLTRADING": 1,
+        "HALTTCYTRADING": 0,
+        "HALTTHORCHAIN": 0,
+        "HALTTRADEWITHDRAW-BASE": 0,
+        "HALTTRADEWITHDRAW-BSC": 0,
+        "HALTTRADING": 0,
+        "HALTTRONCHAIN": 0,
+        "HALTTRONTRADING": 0,
+        "HALTTRRONTRADING": 1,
+        "HALTWASMCONTRACT": 0,
+        "HALTWASMCONTRACT-27DUYT": 0,
+        "HALTWASMCONTRACT-D5A6R5": 0,
+        "HALTWASMCONTRACT-JY3TQX": 1,
+        "HALTWASMCONTRACT-YEVLEC": 0,
+        "HALTWASMGLOBAL": 1,
+        "HALTXRPCHAIN": 0,
+        "HALTXRPTRADING": 0,
+        "HALTZECTRADING": 1,
+        "KEYGENRETRYINTERVAL": 100,
+        "L1DYNAMICFEEENABLED": 1,
+        "L1SLIPMINBPS": 10,
+        "LENDING-THOR-BTC": 0,
+        "LENDING-THOR-ETH": 0,
+        "LENDINGLEVER": 3333,
+        "LIQUIDITYLOCKUPBLOCKS": 600,
+        "LOANREPAYMENTMATURITY": 432000,
+        "LOANSTREAMINGSWAPSINTERVAL": 1,
+        "MANUALSWAPSTOSYNTHDISABLED": 1,
+        "MAXANCHORBLOCKS": 300,
+        "MAXANCHORSLIP": 72000,
+        "MAXBONDPROVIDERS": 100,
+        "MAXCONFIRMATIONS-BCH": 3,
+        "MAXCONFIRMATIONS-BTC": 2,
+        "MAXCONFIRMATIONS-DOGE": 15,
+        "MAXCONFIRMATIONS-ETH": 14,
+        "MAXCONFIRMATIONS-LTC": 6,
+        "MAXCR": 20000,
+        "MAXIMUMLIQUIDITYRUNE": 50000000000000000,
+        "MAXMISSINGBLOCKCHURNOUT": 3,
+        "MAXNODETOCHURNOUTFORLOWVERSION": 3,
+        "MAXOUTBOUNDATTEMPTS": 0,
+        "MAXOUTBOUNDFEEMULTIPLIERBASISPOINTS": 30000,
+        "MAXRUNESUPPLY": 35978855675321195,
+        "MAXSYNTHPERPOOLDEPTH": 6000,
+        "MAXSYNTHSFORSAVERSYIELD": 0,
+        "MAXTXOUTOFFSET": 200,
+        "MAXUTXOSTOSPEND": 10,
+        "MEMOLESSTXNCOST": 200000,
+        "MINCR": 20000,
+        "MINIMUMBONDINRUNE": 30000000000000,
+        "MINIMUML1OUTBOUNDFEEUSD": 25000000,
+        "MINOUTBOUNDFEEMULTIPLIERBASISPOINTS": 100,
+        "MINRUNEPOOLDEPTH": 1000000000000,
+        "MINSWAPSPERBLOCK": 50,
+        "MINTSYNTHS": 1,
+        "MINTXOUTVOLUMETHRESHOLD": 2000000000000,
+        "MISSINGBLOCKCHURNOUT": 10,
+        "NODEOPERATORFEE": 0,
+        "NODEPAUSECHAINGLOBAL": 28050693,
+        "NUMBEROFNEWNODESPERCHURN": 4,
+        "OBSERVATIONDELAYFLEXIBILITY": 20,
+        "OVERSOLVENCYTOTREASURYBPS-LTC-LTC": 100,
+        "OVERSOLVENCYTOTREASURYBPS-TRON-TRX": 2500,
+        "PAUSELOANS": 1,
+        "PAUSELP": 0,
+        "PAUSELPAVAX": 0,
+        "PAUSELPBCH": 0,
+        "PAUSELPBSC": 0,
+        "PAUSELPBTC": 0,
+        "PAUSELPDEPOSIT-AVAX-AVAX": 1,
+        "PAUSELPDEPOSIT-AVAX-SOL-0XFE6B19286885A4F7F55ADAD09C3CD1F906D2478F": 1,
+        "PAUSELPDEPOSIT-AVAX-USDC-0XB97EF9EF8734C71904D8002F8B6BC66DD9C48A6E": 1,
+        "PAUSELPDEPOSIT-AVAX-USDT-0X9702230A8EA53601F5CD2DC00FDBC13D4DF4A8C7": 1,
+        "PAUSELPDEPOSIT-BCH-BCH": 1,
+        "PAUSELPDEPOSIT-BSC-BNB": 1,
+        "PAUSELPDEPOSIT-BSC-USDC-0X8AC76A51CC950D9822D68B83FE1AD97B32CD580D": 0,
+        "PAUSELPDEPOSIT-BSC-USDT-0X55D398326F99059FF775485246999027B3197955": 0,
+        "PAUSELPDEPOSIT-BTC-BTC": 1,
+        "PAUSELPDEPOSIT-DOGE-DOGE": 1,
+        "PAUSELPDEPOSIT-ETH-AAVE-0X7FC66500C84A76AD7E9C93437BFC5AC33E2DDAE9": 1,
+        "PAUSELPDEPOSIT-ETH-DAI-0X6B175474E89094C44DA98B954EEDEAC495271D0F": 1,
+        "PAUSELPDEPOSIT-ETH-DPI-0X1494CA1F11D487C2BBE4543E90080AEBA4BA3C2B": 1,
+        "PAUSELPDEPOSIT-ETH-ETH": 1,
+        "PAUSELPDEPOSIT-ETH-FLIP-0X826180541412D574CF1336D22C0C0A287822678A": 1,
+        "PAUSELPDEPOSIT-ETH-FOX-0XC770EEFAD204B5180DF6A14EE197D99D808EE52D": 1,
+        "PAUSELPDEPOSIT-ETH-GUSD-0X056FD409E1D7A124BD7017459DFEA2F387B6D5CD": 1,
+        "PAUSELPDEPOSIT-ETH-LINK-0X514910771AF9CA656AF840DFF83E8264ECF986CA": 1,
+        "PAUSELPDEPOSIT-ETH-LUSD-0X5F98805A4E8BE255A32880FDEC7F6728C6568BA0": 1,
+        "PAUSELPDEPOSIT-ETH-SNX-0XC011A73EE8576FB46F5E1C5751CA3B9FE0AF2A6F": 1,
+        "PAUSELPDEPOSIT-ETH-TGT-0X108A850856DB3F85D0269A2693D896B394C80325": 1,
+        "PAUSELPDEPOSIT-ETH-THOR-0XA5F2211B9B8170F694421F2046281775E8468044": 1,
+        "PAUSELPDEPOSIT-ETH-USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48": 1,
+        "PAUSELPDEPOSIT-ETH-USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1": 1,
+        "PAUSELPDEPOSIT-ETH-USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7": 1,
+        "PAUSELPDEPOSIT-ETH-VTHOR-0X815C23ECA83261B6EC689B60CC4A58B54BC24D8D": 1,
+        "PAUSELPDEPOSIT-ETH-WBTC-0X2260FAC5E5542A773AA44FBCFEDF7C193BC2C599": 1,
+        "PAUSELPDEPOSIT-ETH-XDEFI-0X72B886D09C117654AB7DA13A14D603001DE0B777": 1,
+        "PAUSELPDEPOSIT-ETH-XRUNE-0X69FA0FEE221AD11012BAB0FDB45D444D3D2CE71C": 1,
+        "PAUSELPDEPOSIT-ETH-YFI-0X0BC529C00C6401AEF6D220BE8C6EA1667F6AD93E": 1,
+        "PAUSELPDEPOSIT-GAIA-ATOM": 1,
+        "PAUSELPDEPOSIT-LTC-LTC": 1,
+        "PAUSELPDEPOSIT-TRON-USDT-TR7NHQJEKQXGTCI8Q8ZY4PL8OTSZGJLJ6T": 0,
+        "PAUSELPDOGE": 0,
+        "PAUSELPETH": 0,
+        "PAUSELPGAIA": 0,
+        "PAUSELPLTC": 0,
+        "PAUSELPTRON": 0,
+        "PAUSEONSLASHTHRESHOLD": 50000000000,
+        "PAUSEUNBOND": 0,
+        "PENDINGLIQUIDITYAGELIMIT": 100800,
+        "PENDULUMUSEEFFECTIVESECURITY": 1,
+        "POL-AVAX-AVAX": 1,
+        "POL-AVAX-USDC-0XB97EF9EF8734C71904D8002F8B6BC66DD9C48A6E": 1,
+        "POL-BCH-BCH": 1,
+        "POL-BSC-BNB": 1,
+        "POL-BSC-USDC-0X8AC76A51CC950D9822D68B83FE1AD97B32CD580D": 1,
+        "POL-BTC-BTC": 1,
+        "POL-DOGE-DOGE": 1,
+        "POL-ETH-DAI-0X6B175474E89094C44DA98B954EEDEAC495271D0F": 1,
+        "POL-ETH-ETH": 1,
+        "POL-ETH-USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48": 1,
+        "POL-ETH-USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7": 1,
+        "POL-GAIA-ATOM": 1,
+        "POL-LTC-LTC": 1,
+        "POLBUFFER": 2000,
+        "POLMAXNETWORKDEPOSIT": 600000000000000,
+        "POLMAXPOOLMOVEMENT": 10,
+        "POLRESERVESYSTEMINCOMEBPS": 2000,
+        "POLTARGETSYNTHPERPOOLDEPTH": 3000,
+        "POOLCYCLE": 43200,
+        "PREFERREDASSETOUTBOUNDFEEMULTIPLIER": 200,
+        "PROTOCOLAFFILIATEFEEBASISPOINTS": 1200,
+        "RESCHEDULECOALESCEBLOCKS": 20,
+        "REVSHARE-SWAPKIT": 2000,
+        "RUNEPOOLDEPOSITMATURITYBLOCKS": 432000,
+        "RUNEPOOLENABLED": 1,
+        "SAVERSSTREAMINGSWAPSINTERVAL": 1,
+        "SCHEDULEDMIGRATION": 25231500,
+        "SECUREDASSETSLIPMINBPS": 10,
+        "SIGNATUREREFRESHBLOCKS": 3600,
+        "SIGNERCONCURRENCY": 20,
+        "SLASHPENALTY": 20000,
+        "SOLVENCYHALTAVAXCHAIN": 0,
+        "SOLVENCYHALTBASECHAIN": 0,
+        "SOLVENCYHALTBCHCHAIN": 0,
+        "SOLVENCYHALTBSCCHAIN": 0,
+        "SOLVENCYHALTBTCCHAIN": 0,
+        "SOLVENCYHALTDOGECHAIN": 0,
+        "SOLVENCYHALTETHCHAIN": 0,
+        "SOLVENCYHALTGAIACHAIN": 0,
+        "SOLVENCYHALTLTCCHAIN": 0,
+        "SOLVENCYHALTSOLCHAIN": 0,
+        "SOLVENCYHALTTRONCHAIN": 0,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQ0Z4X67EDVRSVSFR2VTQFVQPJE9D42CS0F3ZQGYAH8JQTV9HV92354M3V63-ETH": 0,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQ2W263PPN263CGJTJY583G0QSX3GDWQ0QEE304CFM8V03HZX86KVVQVE29D-AVAX": 0,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQF7LCSE8WGSEU327KM3S6Z3UK9T4S4FP0LWVKVYJDS6PQVA4K28QKYEJDF8-AVAX": 0,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQT8P5595WZPJ2ED8ZDHD5FSXKSVVDE0YWZ6KXRSSDESS4AWRZVUXVS34J5J-AVAX": 0,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQV5EGW7F0545UH3GL6JUZZRA3DWD7TVYW67U28VV93DV832NQ4ZY6JELNEV-AVAX": 0,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQVLENA222ZLUK5P3R0S9UEY758RD43QEDTXF2XALPRYNUAXP69RSCR0JY4H-GAIA": 28296533,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQWHQW3MRGEPFURQT497XRRPXD4U89Y6P5EV6KM7AY4FK82Z4P6XNCAV37HT-AVAX": 0,
+        "SOLVENCYHALTVAULT-THORPUB1ADDWNPEPQWHQW3MRGEPFURQT497XRRPXD4U89Y6P5EV6KM7AY4FK82Z4P6XNCAV37HT-SOL": 0,
+        "SOLVENCYHALTXRPCHAIN": 0,
+        "STABLESLIPMINBPS": 2,
+        "STOPSOLVENCYCHECK": 0,
+        "STOPSOLVENCYCHECKAVAX": 0,
+        "STOPSOLVENCYCHECKBASE": 0,
+        "STOPSOLVENCYCHECKBCH": 0,
+        "STOPSOLVENCYCHECKBSC": 0,
+        "STOPSOLVENCYCHECKBTC": 0,
+        "STOPSOLVENCYCHECKDOGE": 0,
+        "STOPSOLVENCYCHECKETH": 0,
+        "STOPSOLVENCYCHECKGAIA": 1,
+        "STOPSOLVENCYCHECKLTC": 0,
+        "STOPSOLVENCYCHECKSOL": 0,
+        "STOPSOLVENCYCHECKTRON": 0,
+        "STOPSOLVENCYCHECKXRP": 0,
+        "STREAMINGLIMITSWAPMAXAGE": 10,
+        "STREAMINGSWAPMAXLENGTH": 14400,
+        "STREAMINGSWAPMAXLENGTHNATIVE": 14400,
+        "STREAMINGSWAPMINBPFEE": 5,
+        "SYNTHSLIPMINBPS": 15,
+        "SYNTHYIELDBASISPOINTS": 0,
+        "SYSTEMINCOMEBURNRATEBPS": 100,
+        "TARGETOUTBOUNDFEESURPLUSRUNE": 1000000000000,
+        "TCYCLAIMINGHALT": 0,
+        "TCYCLAIMINGSWAPHALT": 0,
+        "TCYSTAKEDISTRIBUTIONHALT": 0,
+        "TCYSTAKINGHALT": 0,
+        "TCYUNSTAKINGHALT": 0,
+        "THORNAMES": 1,
+        "TORANCHOR-AVAX-USDC-0XB97EF9EF8734C71904D8002F8B6BC66DD9C48A6E": 1,
+        "TORANCHOR-AVAX-USDT-0X9702230A8EA53601F5CD2DC00FDBC13D4DF4A8C7": 1,
+        "TORANCHOR-BASE-USDC-0X833589FCD6EDB6E08F4C7C32D4F71B54BDA02913": 1,
+        "TORANCHOR-BSC-USDC-0X8AC76A51CC950D9822D68B83FE1AD97B32CD580D": 1,
+        "TORANCHOR-BSC-USDT-0X55D398326F99059FF775485246999027B3197955": 1,
+        "TORANCHOR-ETH-DAI-0X6B175474E89094C44DA98B954EEDEAC495271D0F": 1,
+        "TORANCHOR-ETH-USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48": 1,
+        "TORANCHOR-ETH-USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7": 1,
+        "TORANCHOR-TRON-USDT-TR7NHQJEKQXGTCI8Q8ZY4PL8OTSZGJLJ6T": 1,
+        "TRADEACCOUNTSENABLED": 1,
+        "TRADEACCOUNTSSLIPMINBPS": 10,
+        "TVLCAPBASISPOINTS": 15000,
+        "TXOUTDELAYRATE": 100000000000,
+        "VIRTUALMULTSYNTHS": 1,
+        "WASMARBSLIPMINBPS": 0
+      }
+    },
+    {
+      "name": "constants",
+      "observed_at_utc": "2026-10-19T02:29:20.606941+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/constants",
+      "response": {
+        "int_64_values": {
+          "AdvSwapQueueRapidSwapMax": 1,
+          "AllowWideBlame": 0,
+          "AsgardSize": 40,
+          "BadValidatorRedline": 3,
+          "BankSendEnabled": 0,
+          "BlocksPerYear": 5256000,
+          "BondSlashBan": 500000000000,
+          "ChurnInterval": 43200,
+          "ChurnMigrateRounds": 5,
+          "ChurnOutForLowVersionBlocks": 21600,
+          "ChurnRetryInterval": 720,
+          "CloutLimit": 0,
+          "CloutReset": 720,
+          "DerivedDepthBasisPts": 0,
+          "DerivedMinDepth": 100,
+          "DerivedSlipMinBps": 0,
+          "DesiredValidatorSet": 100,
+          "DevFundSystemIncomeBps": 500,
+          "DoubleBlockSignSlashPoints": 1000,
+          "DoubleSignMaxAge": 24,
+          "DynamicMaxAnchorCalcInterval": 14400,
+          "DynamicMaxAnchorSlipBlocks": 201600,
+          "DynamicMaxAnchorTarget": 0,
+          "EVMDisableContractWhitelist": 0,
+          "EmissionCurve": 6,
+          "EnableAdvSwapQueue": 0,
+          "EnableDerivedAssets": 0,
+          "EnableOrderBooks": 0,
+          "EnableUSDFees": 0,
+          "FailKeygenSlashPoints": 720,
+          "FailKeysignSlashPoints": 2,
+          "FeeUSDRoundSignificantDigits": 2,
+          "FundMigrationInterval": 360,
+          "JailTimeKeygen": 4320,
+          "JailTimeKeysign": 60,
+          "KeygenRetryInterval": 0,
+          "L1DynamicFeeCeilingBPS": 20,
+          "L1DynamicFeeDeadbandBPS": 1000,
+          "L1DynamicFeeEnabled": 0,
+          "L1DynamicFeeEpochBlocks": 14400,
+          "L1DynamicFeeFloorBPS": 1,
+          "L1DynamicFeeStepBPS": 1,
+          "L1DynamicFeeWindowEpochs": 3,
+          "L1SlipMinBps": 0,
+          "LackOfObservationPenalty": 2,
+          "LendingLever": 3333,
+          "LiquidityLockUpBlocks": 0,
+          "MarketingFundSystemIncomeBps": 500,
+          "MaxAbsentKeygenReporters": 1,
+          "MaxAffiliateFeeBasisPoints": 10000,
+          "MaxAnchorBlocks": 300,
+          "MaxAnchorSlip": 1500,
+          "MaxAvailablePools": 100,
+          "MaxBondProviders": 6,
+          "MaxCR": 60000,
+          "MaxDepositTxIDRetries": 100,
+          "MaxMissingBlockChurnOut": 0,
+          "MaxNodeToChurnOutForLowVersion": 1,
+          "MaxOutboundAttempts": 0,
+          "MaxOutboundFeeMultiplierBasisPoints": 30000,
+          "MaxRetiredVaultRecoveryAttempts": 100,
+          "MaxRuneSupply": -1,
+          "MaxSwapsPerBlock": 100,
+          "MaxSynthPerPoolDepth": 1700,
+          "MaxSynthsForSaversYield": 0,
+          "MaxTrackMissingBlock": 700,
+          "MaxTxOutOffset": 720,
+          "MemolessTxnCost": 0,
+          "MemolessTxnMaxUse": 1,
+          "MemolessTxnRefCount": 99999,
+          "MemolessTxnTTL": 3600,
+          "MigrationVaultSecurityBps": 0,
+          "MinCR": 10000,
+          "MinOutboundFeeMultiplierBasisPoints": 15000,
+          "MinRuneForTCYStakeDistribution": 210000000000,
+          "MinRunePoolDepth": 1000000000000,
+          "MinSlashPointsForBadValidator": 100,
+          "MinSwapsPerBlock": 10,
+          "MinTCYForTCYStakeDistribution": 100000,
+          "MinTxOutVolumeThreshold": 100000000000,
+          "MinimumBondInRune": 100000000000000,
+          "MinimumL1OutboundFeeUSD": 1000000,
+          "MinimumNodesForBFT": 4,
+          "MinimumPoolLiquidityFee": 0,
+          "MissBlockSignSlashPoints": 1,
+          "MissingBlockChurnOut": 0,
+          "ModifyLimitSwapMaxIterations": 100,
+          "MultipleAffiliatesMaxCount": 5,
+          "NativeOutboundFeeUSD": 2000000,
+          "NativeTransactionFee": 2000000,
+          "NativeTransactionFeeUSD": 2000000,
+          "NodeOperatorFee": 500,
+          "NodePauseChainBlocks": 720,
+          "ObservationDelayFlexibility": 10,
+          "ObserveSlashPoints": 1,
+          "OperationalVotesMin": 3,
+          "OutboundTransactionFee": 2000000,
+          "OverSolvencyCheckInterval": 600,
+          "OverSolvencyToTreasuryBps": 0,
+          "POLBuffer": 0,
+          "POLMaxNetworkDeposit": 0,
+          "POLMaxPoolMovement": 100,
+          "POLReserveMaxDeployment": 10000000000,
+          "POLReserveSystemIncomeBps": 0,
+          "POLTargetSynthPerPoolDepth": 0,
+          "PauseBond": 0,
+          "PauseOnSlashThreshold": 10000000000,
+          "PauseUnbond": 0,
+          "PendingLiquidityAgeLimit": 100800,
+          "PendulumAssetsBasisPoints": 10000,
+          "PendulumUseEffectiveSecurity": 0,
+          "PendulumUseVaultAssets": 0,
+          "PermittedSolvencyGap": 100,
+          "PermittedSolvencyGapUSD": 50000000000,
+          "PoolCycle": 43200,
+          "PreferredAssetOutboundFeeMultiplier": 100,
+          "RUNEPoolDepositMaturityBlocks": 1296000,
+          "RUNEPoolEnabled": 0,
+          "RUNEPoolHaltDeposit": 0,
+          "RUNEPoolHaltWithdraw": 0,
+          "RUNEPoolMaxReserveBackstop": 500000000000000,
+          "RagnarokProcessNumOfLPPerIteration": 200,
+          "RescheduleCoalesceBlocks": 0,
+          "ReserveMaxCap": 0,
+          "SaversEjectInterval": 0,
+          "SaversStreamingSwapsInterval": 0,
+          "SecuredAssetSlipMinBps": 5,
+          "SigningTransactionPeriod": 300,
+          "SlashPenalty": 15000,
+          "SlipMinBpsMax": 100,
+          "StableReserveDepegToleranceBps": 100,
+          "StableReserveEnabled": 0,
+          "StableReserveOraclePricing": 0,
+          "StableReservePOLShareBps": 0,
+          "StableReserveWithdrawalRequestMax": 10000,
+          "StableSlipMinBps": 0,
+          "StagedPoolCost": 1000000000,
+          "StreamingLimitSwapMaxAge": 43200,
+          "StreamingSwapMaxLength": 14400,
+          "StreamingSwapMaxLengthNative": 5256000,
+          "StreamingSwapMinBPFee": 0,
+          "StreamingSwapPause": 0,
+          "SynthSlipMinBps": 0,
+          "SynthYieldBasisPoints": 5000,
+          "SynthYieldCycle": 0,
+          "SystemIncomeBurnRateBps": 1,
+          "TCYClaimingHalt": 1,
+          "TCYClaimingSwapHalt": 1,
+          "TCYStakeDistributionHalt": 1,
+          "TCYStakeSystemIncomeBps": 1000,
+          "TCYStakingHalt": 1,
+          "TCYUnstakingHalt": 1,
+          "TNSFeeOnSale": 1000,
+          "TNSFeePerBlock": 20,
+          "TNSFeePerBlockUSD": 20,
+          "TNSRegisterFee": 1000000000,
+          "TNSRegisterFeeUSD": 1000000000,
+          "TVLCapBasisPoints": 0,
+          "TargetOutboundFeeSurplusRune": 10000000000000,
+          "TradeAccountsDepositEnabled": 1,
+          "TradeAccountsEnabled": 0,
+          "TradeAccountsSlipMinBps": 0,
+          "TxOutDelayMax": 17280,
+          "TxOutDelayRate": 2500000000,
+          "ValidatorMaxRewardRatio": 1,
+          "VaultDeficitGasHaltMaxGasMultiplier": 30,
+          "VirtualMultSynths": 2,
+          "VirtualMultSynthsBasisPoints": 10000,
+          "WasmArbSlipMinBps": 10
+        },
+        "bool_values": {
+          "StrictBondLiquidityRatio": true
+        },
+        "string_values": {
+          "DefaultPoolStatus": "Staged",
+          "DevFundAddress": "thor1sgnuptp32y2fht3258vlx68mq8wsk2uz4wrshu",
+          "MarketingFundAddress": "thor1usj8cqjmjea32csxn5fma96ffeulln40gyrahn",
+          "OverSolvencyAddress": "thor1lhufh0mwasa0lk9udppdegmvnkgqt08f0m9p5g",
+          "RequiredPriceFeeds": "ATOM,AVAX,BCH,BNB,BTC,DOGE,ETH,LTC,RUNE,SOL,TRX,USDC,USDT,XRP,ZEC",
+          "WasmArbContract": "thor1n5a08r0zvmqca39ka2tgwlkjy9ugalutk7fjpzptfppqcccnat2ska5t4g"
+        }
+      }
+    },
+    {
+      "name": "dynamic_l1_fees",
+      "observed_at_utc": "2026-10-19T02:29:21.347944+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/dynamic_l1_fees",
+      "response": {
+        "entries": [
+          {
+            "thorname": "ej",
+            "pair": "AVAX.AVAX|THOR.RUNE",
+            "dynamic_bps": "4",
+            "whitelist_state": "1",
+            "last_active_epoch": "1962",
+            "latest_fees_tor": "150606"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BASE.ETH|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "194298"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BASE.USDC-0X833589FCD6EDB6E08F4C7C32D4F71B54BDA02913|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "206745601"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BASE.VVV-0XACFE6019ED1A7DC6F7B508C02D1B04EC88CC21BF|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1956",
+            "latest_fees_tor": "340206"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BCH.BCH|THOR.RUNE",
+            "dynamic_bps": "8",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "13190082"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BSC.BNB|THOR.RUNE",
+            "dynamic_bps": "7",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "4056378"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BSC.BTCB-0X7130D2A12B9BCBFAE4F2634D864A1EE1CE3EAD9C|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1947",
+            "latest_fees_tor": "675677"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BSC.USDC-0X8AC76A51CC950D9822D68B83FE1AD97B32CD580D|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1960",
+            "latest_fees_tor": "36558921"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BSC.USDT-0X55D398326F99059FF775485246999027B3197955|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1950",
+            "latest_fees_tor": "36009892"
+          },
+          {
+            "thorname": "ej",
+            "pair": "BTC.BTC|THOR.RUNE",
+            "dynamic_bps": "1",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "2001243455"
+          },
+          {
+            "thorname": "ej",
+            "pair": "DOGE.DOGE|THOR.RUNE",
+            "dynamic_bps": "1",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "34122194"
+          },
+          {
+            "thorname": "ej",
+            "pair": "ETH.DAI-0X6B175474E89094C44DA98B954EEDEAC495271D0F|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "145877082"
+          },
+          {
+            "thorname": "ej",
+            "pair": "ETH.ETH|THOR.RUNE",
+            "dynamic_bps": "11",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "8053165859"
+          },
+          {
+            "thorname": "ej",
+            "pair": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48|THOR.RUNE",
+            "dynamic_bps": "10",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "347420479"
+          },
+          {
+            "thorname": "ej",
+            "pair": "ETH.USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "331347464"
+          },
+          {
+            "thorname": "ej",
+            "pair": "GAIA.ATOM|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "30042"
+          },
+          {
+            "thorname": "ej",
+            "pair": "LTC.LTC|THOR.RUNE",
+            "dynamic_bps": "8",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "324850350"
+          },
+          {
+            "thorname": "ej",
+            "pair": "THOR.RUNE|THOR.TCY",
+            "dynamic_bps": "4",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "1494424"
+          },
+          {
+            "thorname": "ej",
+            "pair": "THOR.RUNE|TRON.TRX",
+            "dynamic_bps": "4",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "12501274"
+          },
+          {
+            "thorname": "ej",
+            "pair": "THOR.RUNE|TRON.USDT-TR7NHQJEKQXGTCI8Q8ZY4PL8OTSZGJLJ6T",
+            "dynamic_bps": "8",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "594358478"
+          },
+          {
+            "thorname": "ej",
+            "pair": "THOR.RUNE|XRP.XRP",
+            "dynamic_bps": "1",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "19287641"
+          },
+          {
+            "thorname": "ej",
+            "pair": "THOR.RUNE|ZEC.ZEC",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1951",
+            "latest_fees_tor": "130235"
+          },
+          {
+            "thorname": "ss",
+            "pair": "AVAX.AVAX|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1955",
+            "latest_fees_tor": "463538"
+          },
+          {
+            "thorname": "ss",
+            "pair": "AVAX.USDC-0XB97EF9EF8734C71904D8002F8B6BC66DD9C48A6E|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1952",
+            "latest_fees_tor": "27486063"
+          },
+          {
+            "thorname": "ss",
+            "pair": "AVAX.USDT-0X9702230A8EA53601F5CD2DC00FDBC13D4DF4A8C7|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1944",
+            "latest_fees_tor": "7898849"
+          },
+          {
+            "thorname": "ss",
+            "pair": "BASE.ETH|THOR.RUNE",
+            "dynamic_bps": "6",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "92509489"
+          },
+          {
+            "thorname": "ss",
+            "pair": "BASE.USDC-0X833589FCD6EDB6E08F4C7C32D4F71B54BDA02913|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1950",
+            "latest_fees_tor": "105561763"
+          },
+          {
+            "thorname": "ss",
+            "pair": "BASE.VVV-0XACFE6019ED1A7DC6F7B508C02D1B04EC88CC21BF|THOR.RUNE",
+            "dynamic_bps": "7",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "105250299"
+          },
+          {
+            "thorname": "ss",
+            "pair": "BCH.BCH|THOR.RUNE",
+            "dynamic_bps": "8",
+            "whitelist_state": "1",
+            "last_active_epoch": "1959",
+            "latest_fees_tor": "44097359"
+          },
+          {
+            "thorname": "ss",
+            "pair": "BSC.BNB|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1960",
+            "latest_fees_tor": "192185"
+          },
+          {
+            "thorname": "ss",
+            "pair": "BSC.USDT-0X55D398326F99059FF775485246999027B3197955|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "38171899"
+          },
+          {
+            "thorname": "ss",
+            "pair": "BTC.BTC|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "11853697"
+          },
+          {
+            "thorname": "ss",
+            "pair": "DOGE.DOGE|THOR.RUNE",
+            "dynamic_bps": "1",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "51048559"
+          },
+          {
+            "thorname": "ss",
+            "pair": "ETH.DAI-0X6B175474E89094C44DA98B954EEDEAC495271D0F|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1953",
+            "latest_fees_tor": "30131731"
+          },
+          {
+            "thorname": "ss",
+            "pair": "ETH.ETH|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1961",
+            "latest_fees_tor": "253143909"
+          },
+          {
+            "thorname": "ss",
+            "pair": "ETH.THOR-0XA5F2211B9B8170F694421F2046281775E8468044|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1941",
+            "latest_fees_tor": "13247243"
+          },
+          {
+            "thorname": "ss",
+            "pair": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48|THOR.RUNE",
+            "dynamic_bps": "14",
+            "whitelist_state": "1",
+            "last_active_epoch": "1961",
+            "latest_fees_tor": "58787662"
+          },
+          {
+            "thorname": "ss",
+            "pair": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1962",
+            "latest_fees_tor": "58495458"
+          },
+          {
+            "thorname": "ss",
+            "pair": "ETH.USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7|THOR.RUNE",
+            "dynamic_bps": "10",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "11147673"
+          },
+          {
+            "thorname": "ss",
+            "pair": "ETH.WBTC-0X2260FAC5E5542A773AA44FBCFEDF7C193BC2C599|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1948",
+            "latest_fees_tor": "354845959"
+          },
+          {
+            "thorname": "ss",
+            "pair": "GAIA.ATOM|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1962",
+            "latest_fees_tor": "19341957"
+          },
+          {
+            "thorname": "ss",
+            "pair": "LTC.LTC|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "1216472855"
+          },
+          {
+            "thorname": "ss",
+            "pair": "THOR.RUNE|THOR.TCY",
+            "dynamic_bps": "17",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "5412822"
+          },
+          {
+            "thorname": "ss",
+            "pair": "THOR.RUNE|TRON.TRX",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "10239354"
+          },
+          {
+            "thorname": "ss",
+            "pair": "THOR.RUNE|TRON.USDT-TR7NHQJEKQXGTCI8Q8ZY4PL8OTSZGJLJ6T",
+            "dynamic_bps": "4",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "2505510454"
+          },
+          {
+            "thorname": "ss",
+            "pair": "THOR.RUNE|XRP.XRP",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1944",
+            "latest_fees_tor": "19978134439"
+          },
+          {
+            "thorname": "ss",
+            "pair": "THOR.RUNE|ZEC.ZEC",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1953",
+            "latest_fees_tor": "189178"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "AVAX.USDC-0XB97EF9EF8734C71904D8002F8B6BC66DD9C48A6E|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "23578341"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "AVAX.USDT-0X9702230A8EA53601F5CD2DC00FDBC13D4DF4A8C7|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1946",
+            "latest_fees_tor": "5525175781"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "BCH.BCH|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1956",
+            "latest_fees_tor": "99929"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "BSC.BNB|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "2022048"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "BSC.BTCB-0X7130D2A12B9BCBFAE4F2634D864A1EE1CE3EAD9C|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1959",
+            "latest_fees_tor": "620253192"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "BSC.USDC-0X8AC76A51CC950D9822D68B83FE1AD97B32CD580D|THOR.RUNE",
+            "dynamic_bps": "4",
+            "whitelist_state": "1",
+            "last_active_epoch": "1962",
+            "latest_fees_tor": "141947"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "BSC.USDT-0X55D398326F99059FF775485246999027B3197955|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "27645961"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "BTC.BTC|THOR.RUNE",
+            "dynamic_bps": "10",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "737404"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "DOGE.DOGE|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "179414"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "ETH.ETH|THOR.RUNE",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "8926651"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "59998636"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "ETH.USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7|THOR.RUNE",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1963",
+            "latest_fees_tor": "2803822"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "ETH.WBTC-0X2260FAC5E5542A773AA44FBCFEDF7C193BC2C599|THOR.RUNE",
+            "dynamic_bps": "3",
+            "whitelist_state": "1",
+            "last_active_epoch": "1960",
+            "latest_fees_tor": "82013955"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "LTC.LTC|THOR.RUNE",
+            "dynamic_bps": "6",
+            "whitelist_state": "1",
+            "last_active_epoch": "1965",
+            "latest_fees_tor": "75271960"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "THOR.RUNE|TRON.TRX",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1953",
+            "latest_fees_tor": "333489"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "THOR.RUNE|TRON.USDT-TR7NHQJEKQXGTCI8Q8ZY4PL8OTSZGJLJ6T",
+            "dynamic_bps": "2",
+            "whitelist_state": "1",
+            "last_active_epoch": "1964",
+            "latest_fees_tor": "323929"
+          },
+          {
+            "thorname": "symbiosis",
+            "pair": "THOR.RUNE|XRP.XRP",
+            "dynamic_bps": "5",
+            "whitelist_state": "1",
+            "last_active_epoch": "1957",
+            "latest_fees_tor": "71501374"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version",
+      "observed_at_utc": "2026-10-19T02:29:22.912203+00:00",
+      "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/version",
+      "response": {
+        "current": "3.20.3",
+        "next": "3.20.3",
+        "next_since_height": 27937292,
+        "querier": "3.20.2"
+      }
+    }
+  ],
+  "execution": "Public read-only queries only; no wallet connection or transactions."
+}

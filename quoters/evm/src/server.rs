@@ -5,14 +5,20 @@
 //! groups). If the socket fails, it polls once per block time and retries the socket. Every
 //! `RESYNC_SECS` it re-reads everything, since notifications and log filters can miss updates.
 //! Quotes run against the mirror and reuse cached simulations of pools whose state did not change.
+//!
+//! A quote is served only if it was computed within one mirror epoch (no sync wrote while it
+//! ran), every state read it needed succeeded, and its rate is near the pair's recent quotes
+//! (see `guard`). Otherwise the server answers 503, like it does for a stale mirror.
 
-use crate::engine::Engine;
+use crate::engine::{Engine, ReadFailed};
+use crate::guard::{Guard, Verdict};
+use crate::mirror::NotCurrent;
 use crate::optimizer::Params;
 use crate::quote::{self, parse_amount};
 use anyhow::Result;
 use serde_json::json;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::stream::MaybeTlsStream;
@@ -30,6 +36,12 @@ pub struct Status {
     pub ws_stalls: AtomicU64,
     pub latencies: Mutex<Vec<u128>>,
     pub served: AtomicU64,
+    /// Set by the quote guard; the sync thread then re-reads every cached account.
+    pub want_full: AtomicBool,
+    /// 503s: a sync wrote while the quote ran (twice), a state read failed, or the guard refused.
+    pub refused_moved: AtomicU64,
+    pub refused_read: AtomicU64,
+    pub refused_outlier: AtomicU64,
 }
 
 fn now_ms() -> u64 {
@@ -69,6 +81,28 @@ fn sync_once(engine: &Engine, st: &Status, force_full: bool) {
     }
 }
 
+fn due_full(last_full: &Instant, st: &Status) -> bool {
+    st.want_full.swap(false, Ordering::Relaxed) || last_full.elapsed().as_secs() >= RESYNC_SECS
+}
+
+/// Runs `quote` until it completes within one mirror epoch (two tries). Returns the result and
+/// whether it is consistent.
+pub fn in_one_epoch<T>(epoch: impl Fn() -> u64, mut quote: impl FnMut() -> T) -> (T, bool) {
+    let mut r;
+    let mut tries = 0;
+    loop {
+        let e0 = epoch();
+        r = quote();
+        tries += 1;
+        if epoch() == e0 {
+            return (r, true);
+        }
+        if tries == 2 {
+            return (r, false);
+        }
+    }
+}
+
 pub fn sync_loop(engine: &'static Engine, ws_url: String, st: &'static Status) {
     let block_ms = engine.chain.block_time_ms.max(400);
     let mut last_full = Instant::now();
@@ -91,7 +125,7 @@ pub fn sync_loop(engine: &'static Engine, ws_url: String, st: &'static Status) {
                                 if let Ok(n) = u64::from_str_radix(n.trim_start_matches("0x"), 16) {
                                     st.head.fetch_max(n, Ordering::Relaxed);
                                 }
-                                let full = last_full.elapsed().as_secs() >= RESYNC_SECS;
+                                let full = due_full(&last_full, st);
                                 // Heads that arrive during a sync queue in the socket; the next
                                 // sync jumps straight to the latest block.
                                 sync_once(engine, st, full);
@@ -108,7 +142,7 @@ pub fn sync_loop(engine: &'static Engine, ws_url: String, st: &'static Status) {
                             if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
                         {
                             st.ws_stalls.fetch_add(1, Ordering::Relaxed);
-                            let full = last_full.elapsed().as_secs() >= RESYNC_SECS;
+                            let full = due_full(&last_full, st);
                             sync_once(engine, st, full);
                             if full {
                                 last_full = Instant::now();
@@ -127,7 +161,7 @@ pub fn sync_loop(engine: &'static Engine, ws_url: String, st: &'static Status) {
         // Poll for ~30 s, then try the socket again.
         let t = Instant::now();
         while t.elapsed().as_secs() < 30 {
-            let full = last_full.elapsed().as_secs() >= RESYNC_SECS;
+            let full = due_full(&last_full, st);
             sync_once(engine, st, full);
             if full {
                 last_full = Instant::now();
@@ -147,7 +181,7 @@ fn query(url: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-pub fn serve(engine: &'static Engine, host: &str, port: u16, params: Params, max_lag: u64, max_age_ms: u64) -> Result<()> {
+pub fn serve(engine: &'static Engine, host: &str, port: u16, params: Params, max_lag: u64, max_age_ms: u64, guard: &'static Guard) -> Result<()> {
     let st: &'static Status = Box::leak(Box::new(Status {
         head: AtomicU64::new(engine.mirror.block()),
         synced_at_ms: AtomicU64::new(now_ms()),
@@ -157,6 +191,10 @@ pub fn serve(engine: &'static Engine, host: &str, port: u16, params: Params, max
         ws_stalls: AtomicU64::new(0),
         latencies: Mutex::new(Vec::new()),
         served: AtomicU64::new(0),
+        want_full: AtomicBool::new(false),
+        refused_moved: AtomicU64::new(0),
+        refused_read: AtomicU64::new(0),
+        refused_outlier: AtomicU64::new(0),
     }));
     let ws = engine.chain.rpc_ws.to_string();
     std::thread::spawn(move || sync_loop(engine, ws, st));
@@ -192,6 +230,12 @@ pub fn serve(engine: &'static Engine, host: &str, port: u16, params: Params, max
                         "cacheHits": engine.cache_hits.load(Ordering::Relaxed), "cacheMisses": engine.cache_misses.load(Ordering::Relaxed),
                         "served": st.served.load(Ordering::Relaxed), "p50Ms": pct(0.5), "p90Ms": pct(0.9), "p99Ms": pct(0.99),
                         "rpcRequests": engine.mirror.rpc.requests.load(Ordering::Relaxed), "rpcRetries": engine.mirror.rpc.retries.load(Ordering::Relaxed),
+                        "epoch": engine.mirror.epoch().0, "fullEpoch": engine.mirror.full_epoch(),
+                        "witnessRereads": engine.mirror.witness_rereads.load(Ordering::Relaxed),
+                        "droppedDuringSync": engine.mirror.dropped_during_sync.load(Ordering::Relaxed),
+                        "logRetries": engine.mirror.log_retries.load(Ordering::Relaxed),
+                        "refusedMoved": st.refused_moved.load(Ordering::Relaxed), "refusedRead": st.refused_read.load(Ordering::Relaxed),
+                        "refusedOutlier": st.refused_outlier.load(Ordering::Relaxed),
                     }),
                 )
             } else if url.starts_with("/quote") {
@@ -208,15 +252,57 @@ pub fn serve(engine: &'static Engine, host: &str, port: u16, params: Params, max
                                 p.max_splits = ms;
                             }
                             let t = Instant::now();
-                            let r = quote::market(engine, tout).and_then(|m| quote::quote(engine, tin, tout, amount, &p, &m));
+                            let (r, one_epoch) = in_one_epoch(
+                                || engine.mirror.epoch().0,
+                                || quote::market(engine, tout).and_then(|m| quote::quote(engine, tin, tout, amount, &p, &m)),
+                            );
                             let ms = t.elapsed().as_millis();
                             match r {
+                                Ok(_) if !one_epoch => {
+                                    st.refused_moved.fetch_add(1, Ordering::Relaxed);
+                                    (503, json!({"error": "mirrored state moved to a new block during the quote, twice"}))
+                                }
                                 Ok(out) => {
-                                    st.served.fetch_add(1, Ordering::Relaxed);
-                                    st.latencies.lock().unwrap().push(ms);
-                                    let mut v = serde_json::to_value(&out).unwrap();
-                                    v["serverMs"] = json!(ms);
-                                    (200, v)
+                                    let atomic = |s: &str| s.parse::<u128>().unwrap_or(0);
+                                    let verdict = guard.check(
+                                        (tin.address, tout.address, p.max_splits),
+                                        amount,
+                                        atomic(&out.out_atomic),
+                                        engine.mirror.full_epoch(),
+                                        Instant::now(),
+                                    );
+                                    match verdict {
+                                        Verdict::Refuse { deviation_bps, reference } => {
+                                            st.refused_outlier.fetch_add(1, Ordering::Relaxed);
+                                            st.want_full.store(true, Ordering::Relaxed);
+                                            eprintln!(
+                                                "guard: {} {} -> {} {} is {deviation_bps:.0} bp from recent quotes (block {}); re-reading all state",
+                                                out.amount_in, out.input, out.amount_out, out.output, out.block
+                                            );
+                                            (
+                                                503,
+                                                json!({
+                                                    "error": "quote is far from the pair's recent quotes; re-reading all mirrored state before serving it",
+                                                    "deviationBps": deviation_bps, "recentRate": reference, "block": out.block,
+                                                    "legs": out.legs,
+                                                }),
+                                            )
+                                        }
+                                        v => {
+                                            if let Verdict::Confirmed { deviation_bps } = v {
+                                                eprintln!("guard: {}/{} moved {deviation_bps:.0} bp and held after a full re-read; accepted", out.input, out.output);
+                                            }
+                                            st.served.fetch_add(1, Ordering::Relaxed);
+                                            st.latencies.lock().unwrap().push(ms);
+                                            let mut v = serde_json::to_value(&out).unwrap();
+                                            v["serverMs"] = json!(ms);
+                                            (200, v)
+                                        }
+                                    }
+                                }
+                                Err(e) if e.downcast_ref::<ReadFailed>().is_some() || e.downcast_ref::<NotCurrent>().is_some() => {
+                                    st.refused_read.fetch_add(1, Ordering::Relaxed);
+                                    (503, json!({"error": e.to_string()}))
                                 }
                                 Err(e) => (422, json!({"error": e.to_string()})),
                             }
@@ -235,4 +321,28 @@ pub fn serve(engine: &'static Engine, host: &str, port: u16, params: Params, max
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_one_epoch;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_quote_that_spans_a_sync_is_retried_once_then_refused() {
+        let epoch = Cell::new(0u64);
+        // A sync lands during the first try only.
+        let tries = Cell::new(0);
+        let (r, ok) = in_one_epoch(|| epoch.get(), || {
+            tries.set(tries.get() + 1);
+            if tries.get() == 1 {
+                epoch.set(epoch.get() + 1);
+            }
+            tries.get()
+        });
+        assert_eq!((r, ok), (2, true));
+        // A sync lands during both tries.
+        let (_, ok) = in_one_epoch(|| epoch.get(), || epoch.set(epoch.get() + 1));
+        assert!(!ok);
+    }
 }

@@ -1,5 +1,63 @@
 # Stablecoin Arbitrage Bot
 
+## THORChain USDC to USDP quotes
+
+`scripts/quote_thorchain_usdp.py` is a standalone, read-only Python quoter with
+no third-party dependencies. It defaults to 10,000 native Ethereum USDC for
+Paxos USDP, compares direct access with currently enrolled affiliate routes,
+and also checks a faster fixed-count version of the best affiliate route.
+It never loads `.env`, connects a wallet, signs, or broadcasts.
+
+```bash
+python3 scripts/quote_thorchain_usdp.py
+python3 scripts/quote_thorchain_usdp.py --max-seconds 600
+python3 scripts/quote_thorchain_usdp.py --affiliate symbiosis --affiliate-bps 1
+python3 scripts/quote_thorchain_usdp.py --owner YOUR_PUBLIC_ETHEREUM_ADDRESS
+python3 scripts/quote_thorchain_usdp.py --approval-gas-units 0
+python3 scripts/quote_thorchain_usdp.py --gas-cost-usdc 2 --slippage-bps 10
+python3 scripts/quote_thorchain_usdp.py --json --output logs/thorchain-usdp-quotes.json
+```
+
+Expected USDP already includes quoted liquidity, affiliate and outbound fees.
+The separate slippage scenario applies a 10 bp output haircut by default, using
+`liquidity_tolerance_bps`; it is a full-fill scenario, not a guaranteed wallet
+minimum. Partial fills, refunds, and changing delivery costs can change the
+outcome. `--destination PUBLIC_ETH_ADDRESS` requests the server's memo and also
+reports its encoded trade target. Zero slippage bps is rejected because the
+protocol interprets that value as disabling the price limit.
+
+Sender gas uses live Ethereum mainnet RPC `eth_gasPrice` and a pool-implied
+ETH/USDC rate. It does not use THORChain's recommended gas-price hint. Set
+`--rpc-url` for your own endpoint. If RPC gas pricing fails, gas/net are marked
+unknown and no fully costed best route is selected; there is no silent fallback
+to the old 15 gwei recommendation. Manual `--gas-price-gwei` and total
+`--gas-cost-usdc` overrides remain available.
+
+Gas units remain a budget, not an actual transaction simulation: 150,000 for
+the router deposit. With `--owner PUBLIC_ETHEREUM_ADDRESS`, the script reads
+USDC `allowance(owner, quoted_router)` via `eth_call`; a sufficient allowance
+removes approval gas, while an insufficient allowance budgets 50,000 approval
+gas. Checks use native USDC's six decimals and are cached per owner/router only
+within that run. The RPC is checked for Ethereum mainnet chain ID 1.
+Without an owner, or if the allowance check fails, approval is unknown and the
+50,000-unit budget is retained. `--approval-gas-units 0` explicitly assumes an
+existing approval without checking it. A different router requires a separate
+allowance check. Unlimited approval can avoid repeat approval transactions,
+but the script only reads allowance and never changes it.
+
+USDC gas costs are valued separately and do not reduce the USDP token amount
+delivered. Actual gas used and gas prices at submission can differ from this
+estimate. Protocol liquidity and quoted outbound fees remain unchanged by
+switching the sender-side gas-price source.
+
+The quoter prints estimated parity surplus and the USDC-per-exit-token rate
+needed to break even. Parity surplus assumes the acquired USDP can ultimately
+realize one USDC; the script does not quote Stable.com or the USDG/PYUSD exit.
+Its best-route ranking uses the slippage scenario's break-even rate and the
+optional `--max-seconds` filter. Rapid-streaming times are best-case estimates.
+An affiliate's fee is paid to that named affiliate. Registering your own
+THORName does not automatically grant its discounted protocol floor.
+
 ## Standalone LlamaSwap quotes
 
 `scripts/get_defillama_quotes.py` opens the normal LlamaSwap website, selects an

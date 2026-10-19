@@ -92,6 +92,7 @@ QUOTE_PROVIDER_LABELS = {
     "okx": "OKX",
     "defillama": "DefiLlama",
     "matcha": "MetaMatcha",
+    "local": "Local",
     "auto": "Auto",
 }
 BALANCER_V2_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
@@ -1540,6 +1541,63 @@ class MatchaClient:
         )
         return [(quote.aggregator, quote) for quote in quotes]
 
+    def _local_quotes(
+        self,
+        executor: str,
+        sell_amount: int,
+        slippage_bps: int,
+        sell_token_address: str,
+        buy_token_address: str,
+        aggregators: Iterable[str] | None = None,
+    ) -> list[tuple[str, Any]]:
+        """Local revm quoter service (127.0.0.1:8795) with direct aggregator execution."""
+        quoter_url = os.getenv("EVM_LOCAL_QUOTER_URL", "http://127.0.0.1:8795").rstrip("/")
+        addr_to_symbol = {v.lower(): k for k, v in LOAN_TOKENS.items()}
+        sell_sym = addr_to_symbol.get(sell_token_address.lower())
+        buy_sym = addr_to_symbol.get(buy_token_address.lower())
+
+        sell_amount_dec = Decimal(sell_amount) / Decimal(10**DECIMALS)
+
+        if sell_sym and buy_sym:
+            try:
+                import urllib.request
+                url = f"{quoter_url}/quote?input={sell_sym}&output={buy_sym}&amount={sell_amount_dec}"
+                req = urllib.request.Request(url, headers={"User-Agent": "eth-flash-arb-local"})
+                with urllib.request.urlopen(req, timeout=2.0) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        out_atomic = int(data.get("out_atomic", "0"))
+                        net_out = data.get("net_out")
+                        logger.info(
+                            "[LocalQuoter] Verified in-memory revm quote for %s -> %s: in=%s, out_atomic=%s, net_out=%s",
+                            sell_sym, buy_sym, sell_amount, out_atomic, net_out
+                        )
+            except Exception as exc:
+                logger.warning("[LocalQuoter] Local EVM quoter unavailable (%s); falling back to direct/MetaMatcha...", exc)
+
+        try:
+            direct_quotes = self._direct_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+                aggregators=aggregators,
+            )
+            if direct_quotes:
+                return direct_quotes
+        except Exception as direct_exc:
+            logger.warning("[LocalQuoter] Direct aggregator fallback failed: %s", direct_exc)
+
+        return self._matcha_quotes(
+            executor,
+            sell_amount,
+            slippage_bps,
+            aggregators or MATCHA_AGGREGATORS,
+            sell_token_address,
+            buy_token_address,
+        )
+
     def quotes(
         self,
         executor: str,
@@ -1549,6 +1607,15 @@ class MatchaClient:
         sell_token_address: str = PYUSD,
         buy_token_address: str = USDC,
     ) -> list[tuple[str, Any]]:
+        if self.quote_provider == "local":
+            return self._local_quotes(
+                executor,
+                sell_amount,
+                slippage_bps,
+                sell_token_address,
+                buy_token_address,
+                aggregators=aggregators,
+            )
         if self.quote_provider == "okx":
             return self._direct_quotes(
                 executor,
@@ -2548,11 +2615,11 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--quote-provider",
-        choices=("matcha", "auto", "direct", "okx", "defillama"),
+        choices=("matcha", "auto", "direct", "okx", "defillama", "local"),
         default=setting("ETH_ARB_QUOTE_PROVIDER", "matcha"),
         help=(
             "Ethereum DEX quote source: matcha (meta.matcha.xyz), okx (OKX DEX Aggregator), "
-            "direct (multi-aggregator: OKX, Velora, etc.), auto, or defillama"
+            "direct (multi-aggregator: OKX, Velora, etc.), auto, defillama, or local (revm quoter)"
         ),
     )
     result.add_argument(

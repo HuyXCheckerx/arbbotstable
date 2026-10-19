@@ -1,0 +1,110 @@
+{
+  "checked_at_utc": "2026-10-19T03:16:47.034898+00:00",
+  "jupiter_direct_route_checks": [
+    {
+      "observed_at_utc": "2026-10-19T03:14:23.146763+00:00",
+      "input_usdc": 10,
+      "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM&amount=10000000&slippageBps=10&onlyDirectRoutes=true&restrictIntermediateTokens=false",
+      "response": {
+        "error": "The token HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM is not tradable",
+        "errorCode": "TOKEN_NOT_TRADABLE"
+      }
+    },
+    {
+      "observed_at_utc": "2026-10-19T03:14:24.480586+00:00",
+      "input_usdc": 100,
+      "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM&amount=100000000&slippageBps=10&onlyDirectRoutes=true&restrictIntermediateTokens=false",
+      "response": {
+        "error": "The token HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM is not tradable",
+        "errorCode": "TOKEN_NOT_TRADABLE"
+      }
+    },
+    {
+      "observed_at_utc": "2026-10-19T03:14:26.147897+00:00",
+      "input_usdc": 1000,
+      "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM&amount=1000000000&slippageBps=10&onlyDirectRoutes=true&restrictIntermediateTokens=false",
+      "response": {
+        "error": "The token HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM is not tradable",
+        "errorCode": "TOKEN_NOT_TRADABLE"
+      }
+    },
+    {
+      "observed_at_utc": "2026-10-19T03:14:27.656836+00:00",
+      "input_usdc": 10000,
+      "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM&amount=10000000000&slippageBps=10&onlyDirectRoutes=true&restrictIntermediateTokens=false",
+      "response": {
+        "error": "The token HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM is not tradable",
+        "errorCode": "TOKEN_NOT_TRADABLE"
+      }
+    }
+  ],
+  "stable_status_checks": [
+    {
+      "endpoint": "https://api-defi.stable.com/swap/status",
+      "request": {
+        "chainFrom": "102",
+        "chainTo": "102",
+        "assetFrom": "USDP",
+        "assetTo": "USDG",
+        "amountFrom": "10000",
+        "gasLess": false,
+        "addressFrom": "11111111111111111111111111111111",
+        "addressTo": "11111111111111111111111111111111"
+      },
+      "http_status": 200,
+      "response": {
+        "asset": {
+          "asset": "USDP",
+          "precision": 6,
+          "balance": 31.075253,
+          "min": 1000,
+          "max": 1000000,
+          "nativeFee": 6.12e-06,
+          "tokenFee": 0,
+          "address": "HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM",
+          "programAddress": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "nativeFeeUsd": 0.0006451398,
+          "amountFrom": "10000",
+          "amountTo": "10000",
+          "executionFeeNative": "0",
+          "executionFeeUSD": "0",
+          "amlFeeUSD": "0"
+        }
+      }
+    },
+    {
+      "endpoint": "https://api-defi.stable.com/swap/status",
+      "request": {
+        "chainFrom": "102",
+        "chainTo": "102",
+        "assetFrom": "USDP",
+        "assetTo": "PYUSD",
+        "amountFrom": "10000",
+        "gasLess": false,
+        "addressFrom": "11111111111111111111111111111111",
+        "addressTo": "11111111111111111111111111111111"
+      },
+      "http_status": 200,
+      "response": {
+        "asset": {
+          "asset": "USDP",
+          "precision": 6,
+          "balance": 29.836336,
+          "min": 1000,
+          "max": 1000000,
+          "nativeFee": 6.024e-06,
+          "tokenFee": 0,
+          "address": "HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM",
+          "programAddress": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "nativeFeeUsd": 0.0006348693,
+          "amountFrom": "10000",
+          "amountTo": "10000",
+          "executionFeeNative": "0",
+          "executionFeeUSD": "0",
+          "amlFeeUSD": "0"
+        }
+      }
+    }
+  ],
+  "note": "Read-only quotes; no order creation, signing, approval or broadcast. Stable status response is not proof of executable inventory."
+}

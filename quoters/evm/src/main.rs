@@ -4,12 +4,17 @@ mod chains;
 mod engine;
 mod enginebench;
 mod evm;
+mod guard;
+#[cfg(test)]
+mod livetest;
 mod mirror;
 mod optimizer;
 mod quote;
 mod router;
 mod rpc;
 mod server;
+#[cfg(test)]
+mod testnode;
 mod venues;
 mod verify;
 
@@ -44,6 +49,10 @@ enum Cmd {
         /// Pairs to warm before serving, besides USDC/USDT (e.g. "PYUSD,USDG;USDC,USDS").
         #[arg(long)]
         warm_pairs: Option<String>,
+        /// Refuse a quote whose rate is this far from the pair's recent quotes of a similar size
+        /// until a full re-read of the mirror confirms it (0 = off).
+        #[arg(long, default_value_t = 200.0)]
+        max_jump_bps: f64,
     },
     /// Local quotes vs ParaSwap, CoW and LI.FI at the same time; writes artifacts/bench.{md,json}.
     Bench {
@@ -148,7 +157,7 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Serve { chain, rpc, host, port, max_lag, max_sync_age_ms, warm_pairs } => {
+        Cmd::Serve { chain, rpc, host, port, max_lag, max_sync_age_ms, warm_pairs, max_jump_bps } => {
             let c = chains::by_key(&chain).ok_or_else(|| anyhow!("unknown chain {chain}"))?;
             if host != "127.0.0.1" && host != "localhost" {
                 eprintln!("warning: listening beyond loopback with no authentication");
@@ -161,6 +170,7 @@ fn main() -> Result<()> {
             // Load every pool's state at the largest sizes before serving: lazy loads during
             // requests are slow and draw rate limits on free endpoints.
             let t = std::time::Instant::now();
+            let guard: &'static guard::Guard = Box::leak(Box::new(guard::Guard::new(max_jump_bps, std::time::Duration::from_secs(600))));
             let mut warm = vec![(c.usdc, c.usdt), (c.usdt, c.usdc)];
             for pair in warm_pairs.unwrap_or_default().split(';').filter(|x| !x.is_empty()) {
                 let t: Vec<_> = pair.split(',').filter_map(|x| c.token(x.trim())).collect();
@@ -172,15 +182,17 @@ fn main() -> Result<()> {
             for (tin, tout) in warm {
                 if let Ok(m) = quote::market(&s.engine, tout) {
                     for size in [1_000_000u128, 100_000, 1_000] {
-                        if let Err(e) = quote::quote(&s.engine, tin, tout, size * 10u128.pow(tin.decimals as u32), &params, &m) {
-                            eprintln!("warm-up {}->{} {size}: {e}", tin.symbol, tout.symbol);
+                        let amount = size * 10u128.pow(tin.decimals as u32);
+                        match quote::quote(&s.engine, tin, tout, amount, &params, &m) {
+                            Ok(q) => guard.seed((tin.address, tout.address, params.max_splits), amount, q.out_atomic.parse().unwrap_or(0), std::time::Instant::now()),
+                            Err(e) => eprintln!("warm-up {}->{} {size}: {e}", tin.symbol, tout.symbol),
                         }
                     }
                 }
             }
             eprintln!("warm-up {} ms", t.elapsed().as_millis());
             let engine: &'static engine::Engine = Box::leak(Box::new(s.engine));
-            server::serve(engine, &host, port, params, max_lag, max_sync_age_ms)?;
+            server::serve(engine, &host, port, params, max_lag, max_sync_age_ms, guard)?;
         }
         Cmd::Bench { chains: cs, sizes, pair, rounds, aggs } => {
             let sizes: Vec<u128> = sizes.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>()?;

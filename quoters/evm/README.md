@@ -50,6 +50,13 @@ Multi-slot reads use one `eth_getProof` per account rather than one `eth_getStor
 
 `Mirror::sync` moves the mirror to the latest block. It reads the logs of every mirrored contract since the last sync, then re-reads the cached slots of every contract that logged, plus the token contracts. The engine also records the accounts each pool's simulation reads (its group). When any member of a group logs, the whole group is re-read. This matters because a v4 hook's storage changes on every swap, but only the PoolManager emits the event.
 
+**One block per snapshot.** PublicNode load-balances requests across nodes whose heads differ by up to 7 blocks, measured 2026-10-19. So the mirror never reads at `latest`:
+- Every state read is pinned to the mirror's block number. A node that has not imported that block refuses it ("block not found"), and the read is retried.
+- Each log query is batched with a header read of the head block. It is only accepted when the hash matches, because a lagging node returns the logs it has without an error.
+- A group also records the token balance slots its pool reads. If one of those balances changes and no log of the pool was seen, the group is re-read at the same block. DODO prices from `balanceOf(pool) − reserve`, so a balance one swap ahead of its reserve is free input.
+- A sync drops what a concurrent load inserted while it was reading, because those values come from the old block.
+- If the node no longer has the mirror's block (after the host sleeps), the load fails and the quote gets a 503. The next sync re-reads everything at the new head.
+
 **Gas price.** Local transactions pay the chain's `eth_gasPrice`, because some pools price by `tx.gasprice` (see Verification).
 
 **Discovery** (`src/venues.rs`, cached for a day in `artifacts/pools-<chain>.json`) covers every pair of the chain's tokens (15 pairs on Ethereum):
@@ -207,9 +214,22 @@ Net of gas, the local quote beat CoW in 5 of 6 cases (+0.32 to +1.31 bp).
 
 **Sync.** A thread follows websocket `newHeads`. PublicNode's socket sometimes holds heads back for a minute or more, so a read that waits longer than two block times syncs anyway. On socket errors it polls, and every 5 minutes it re-reads everything.
 
-**Caching.** A per-pool cache reuses simulations until an account in the pool's group actually changes. Time-dependent pools are re-simulated every block: Fluid, Curve, Balancer, hooked v4 and Infinity pools, and Algebra.
+**Caching.** A per-pool cache reuses simulations until an account in the pool's group, or one of the token balances the pool reads, actually changes. Time-dependent pools are re-simulated every block: Fluid, Curve, Balancer, hooked v4 and Infinity pools, and Algebra. A simulation whose state could not be read is not cached, and the quote it belongs to fails (503) instead of routing around the pool.
 
 **Health checks.** Requests are refused (503) while the mirror is more than 8 blocks behind the head or the last sync is older than 30 s. RPC requests are capped at 2 in flight, because bursts drew 429s that stalled sync.
+
+**Quote checks.** A quote is also refused (503) when:
+- a sync wrote while it ran, twice in a row (its legs would mix blocks);
+- a state read it needed failed;
+- its rate is more than `--max-jump-bps` (default 200) from the median of the pair's quotes of a similar size (½× to 2×, same `maxSplits`) in the last 10 minutes.
+
+The last check also triggers a full re-read. If the deviation holds after that re-read, the quote is served and becomes the pair's new reference. `/health` counts these refusals (`refusedMoved`, `refusedRead`, `refusedOutlier`), plus balance-witness re-reads (`witnessRereads`), values dropped during syncs and retried log queries.
+
+**2026-10-19 misquote.** A dry run got 61,498 PYUSD → 69,998 USDG and 39,999 USDG → 48,502 PYUSD for about 50 s (blocks 26223246–26223250).
+- **Trigger:** after a websocket reset, a pinned read was refused as archive. The old mirror then read at `latest` for the rest of the process, so the reads of one sync went to nodes up to 7 blocks apart.
+- **The swap:** at block 26223246 someone sold 8,505.396098 USDC into DODO PMM USDC/USDT (`0x04571c32`). Both quotes exceeded the market by that amount, less fees.
+- **The state:** the mirror held DODO's USDC balance from after that swap and its reserve from before it. Two things kept the pair apart. A pool was only re-read when its own log, or a log of a group that happened to share an account with it, was seen. And the simulation cache ignored token balances.
+- **Live reproduction:** `cargo test --release live_ -- --ignored --nocapture` rebuilds that state from a recent DODO swap. On block 26223558 (16,927.70 USDC sold into DODO) it added +16,925.64 USDG to 61,498 PYUSD → USDG and +16,926.62 PYUSD to 39,999 USDG → PYUSD, through a slice of under 0.1% routed into DODO. The fixed sync, with DODO's log hidden, re-read DODO through the balance witness and matched a full re-read exactly. The guard refused the mixed-state quote at +2,752 bp.
 
 **Soak test, Ethereum.** 5 minutes at about 5 quotes per second, random sizes 1k–1M in random directions:
 - all 1,485 requests returned 200;
@@ -248,8 +268,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
   - Ethereum: Ekubo, Balancer v3 boosted pools (ERC-4626 buffers), Curve metapools (`exchange_underlying`), Maverick;
   - everywhere: Uniswap v2 forks.
 - **More chains.** Each needs a `Chain` entry in `src/chains.rs`, which holds tokens, factories, managers, index names and its RPC. Arbitrum and Base are the obvious next ones.
-- **Snapshot consistency.** On BSC the free node's state window (~128 blocks, under a minute) is shorter than a throttled read pass. The mirror then reads at `latest`, so slots in one pass can come from blocks a second apart. Ethereum and Polygon reads are pinned to one block.
-- **Sync coverage.** Accounts are refreshed when they or a member of their group log. A direct token donation to a pool, with no pool event, is caught only by the 5-minute full re-read; pools that price from raw balances (DODO) are exposed to that. The hooked Infinity pool on BSC still differs from the node.
+- **Snapshot consistency.** Reads are pinned on every chain; the `latest` fallback is gone. On BSC the free node's state window (~128 blocks, under a minute) can be shorter than a throttled full re-read. Quotes are then refused (503) until a sync completes inside the window, instead of being served from slots a block apart. Not re-measured on BSC since this change. Pinning is by number, not hash, because Polygon's PublicNode refuses `eth_getLogs` by block hash. A reorg can therefore still mix forks for a block.
+- **Sync coverage.** Accounts are refreshed when they or a member of their group log, or when a token balance their pool reads moves. State that changes with no log and no balance move (an oracle-only update) is still caught only by the 5-minute full re-read. The hooked Infinity pool on BSC still differs from the node.
 - **Gas model.**
   - Leg gas is the pool interaction measured inside the helper.
   - The route's base cost is a flat 60k gas.

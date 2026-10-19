@@ -1,0 +1,222 @@
+================================================================================
+          THORCHAIN USDC -> USDP SNIPER & WEBAPP EXECUTION CHEATSHEET
+================================================================================
+Asset Pair:       Ethereum USDC -> THORChain -> Ethereum USDP
+Operator Wallet:  0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C
+Affiliate Tag:    symbiosis:1 (on THORChain's DYNAMICFEE-WHITELIST: 3 bps/leg liquidity fee,
+                  ~9.4 USDP total fees per 10k incl. 1 bp affiliate + outbound; checked 2026-10-19)
+                  [salactite is NOT whitelisted: 10 bps/leg, ~23.4 USDP per 10k]
+Floor Protection: 2bps (Limit = Input + 2 bps on the USDC that fills; fixed fees are not covered
+                  when only part of the deposit fills)
+Default Router:   0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146 (THORChain Router V4)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+PART 1: LAUNCHING & RUNNING THE WEBAPP TERMINAL
+--------------------------------------------------------------------------------
+The WebApp provides a full real-time institutional dashboard:
+- Live Wallet Balances (USDC, USDP, ETH, and Router Allowance)
+- Deposit Tx Inspector: Enter any Ethereum deposit hash to inspect sub-swaps,
+  fills, skips, delivered USDP tx link, refunded USDC tx link, and net P&L
+- Quick Inspect Chips: One-click inspect "📌 Latest Swap" or "⚡ Live Queue"
+- Live Quoter with instant +2 bps memo builder (symbiosis whitelisted fee tier)
+- Autonomous Sniper Bot: Start/Stop live background daemon directly from the UI
+- One-Click Live Swap Execution with dual-confirmation modal
+- Real-time consensus audit terminal logs
+
+1. Start WebApp (Default Port 8080 & Auto-Open Browser):
+   python3 thor_webapp.py
+
+   Or using project virtual environment:
+   .venv/bin/python3 thor_webapp.py
+
+2. Start WebApp on a Custom Port (e.g., 8888):
+   python3 thor_webapp.py --port 8888
+
+3. Start WebApp in Background / Headless (No browser popup):
+   python3 thor_webapp.py --no-open --port 8080
+
+4. Access WebApp in Browser:
+   http://127.0.0.1:8080
+
+5. API Health Check / JSON Endpoints:
+   curl http://127.0.0.1:8080/api/status
+   curl http://127.0.0.1:8080/api/deposit_info?tx=0x3a28744fee417c97b4064fc4d38fa38bf58af0ca8498b56b718c440f3cc2d203
+   curl "http://127.0.0.1:8080/api/quote?amount=10000&floor_mode=2bps&affiliate=symbiosis"
+
+
+--------------------------------------------------------------------------------
+PART 2: RUNNING THE SNIPER ENGINE VIA CLI
+--------------------------------------------------------------------------------
+
+1. SINGLE TEST QUOTE (DRY-RUN / SIMULATION):
+   Check the current live rate, pool reserves, fees, and protected memo without
+   spending any gas or capital:
+
+   python3 thor_usdp_sniper.py --once --amount 10000 --floor-mode 2bps
+
+   Or with explicit parameters:
+   python3 thor_usdp_sniper.py --once \
+     --amount 10000 \
+     --slippage-bps 1 \
+     --affiliate symbiosis \
+     --affiliate-bps 1 \
+     --floor-mode 2bps
+
+2. CONTINUOUS MONITORING / POLLING (DRY-RUN):
+   Monitors rate every 3 seconds. When target is reached, prints what it would do
+   without executing on-chain:
+
+   python3 thor_usdp_sniper.py \
+     --amount 10000 \
+     --min-profit-bps 2 \
+     --slippage-bps 1 \
+     --poll-interval 3 \
+     --affiliate symbiosis \
+     --floor-mode 2bps
+
+3. LIVE AUTONOMOUS SNIPER (MONITOR & AUTO-EXECUTE ON-CHAIN):
+   Keeps your USDC in your wallet. Polls THORNode and pool reserves every 3s, replays
+   the streaming swap against the pools, and deposits only the size the pool can absorb
+   when the modeled profit after outbound fee, refund fee and gas is >= --min-net-profit.
+   It signs and broadcasts via Flashbots / private RPC:
+
+   python3 thor_usdp_sniper.py \
+     --amount 10000 \
+     --min-profit-bps 2 \
+     --slippage-bps 1 \
+     --poll-interval 3 \
+     --affiliate symbiosis \
+     --affiliate-bps 1 \
+     --floor-mode 2bps \
+     --live \
+     --confirm-live EXECUTE_THOR_SNIPER
+
+4. LIVE ONE-OFF SWAP (TRIGGER IMMEDIATELY ONCE TARGET IS MET):
+   Executes one live trade protected with +2 bps floor and then exits cleanly:
+
+   python3 thor_usdp_sniper.py \
+     --once \
+     --amount 10000 \
+     --min-profit-bps 2 \
+     --slippage-bps 1 \
+     --affiliate symbiosis \
+     --affiliate-bps 1 \
+     --floor-mode 2bps \
+     --live \
+     --confirm-live EXECUTE_THOR_SNIPER
+
+
+5. RESTING ORDER (ONE DEPOSIT THAT WAITS ~24H FOR THE RATE):
+   Sends the full amount now as a stream of 720 slices, one every 20 blocks (~24h).
+   Each slice swaps only if the rate clears the +2 bps floor; the rest is refunded at
+   the end. Skips the fill-capacity trigger, keeps the balance and affiliate checks.
+   (Native THORChain limit orders expire after 10 blocks, so they cannot rest.)
+
+   python3 thor_usdp_sniper.py \
+     --resting \
+     --amount 10000 \
+     --affiliate symbiosis \
+     --affiliate-bps 1 \
+     --floor-mode 2bps \
+     --live \
+     --confirm-live EXECUTE_THOR_SNIPER
+
+   In the WebApp: set Execution Mode to "Resting order" before Execute Live Swap.
+
+
+--------------------------------------------------------------------------------
+PART 3: RUNNING 24/7 AS A BACKGROUND DAEMON
+--------------------------------------------------------------------------------
+
+1. Launch Live Sniper in Background with nohup:
+   nohup .venv/bin/python3 thor_usdp_sniper.py \
+     --amount 10000 \
+     --min-profit-bps 2 \
+     --slippage-bps 1 \
+     --poll-interval 3 \
+     --affiliate symbiosis \
+     --affiliate-bps 1 \
+     --floor-mode 2bps \
+     --live \
+     --confirm-live EXECUTE_THOR_SNIPER \
+     > logs/thor_sniper.log 2>&1 & echo $! > logs/thor_sniper.pid
+
+2. Monitor Real-Time Live Logs:
+   tail -f logs/thor_sniper.log
+
+3. Check if Sniper Process is Running:
+   ps aux | grep thor_usdp_sniper.py
+
+4. Stop the Sniper Daemon:
+   kill $(cat logs/thor_sniper.pid)
+   # Or by process name:
+   pkill -f thor_usdp_sniper.py
+
+
+--------------------------------------------------------------------------------
+PART 4: CORE PARAMETERS EXPLAINED
+--------------------------------------------------------------------------------
+--amount <USDC>
+  Largest deposit the sniper may send. It sizes each deposit down to what the
+  ~60k USDP pool can absorb above the floor, so a big --amount does not fill faster.
+
+--min-net-profit <USD>
+  Only deposit when the modeled profit after the USDP outbound fee (~2.4), the USDC
+  refund fee (~0.25) and deposit gas (~$0.4) is at least this much (default: 1).
+
+--no-capacity-check
+  Trigger on THORNode's quote alone and deposit the full --amount. That quote assumes
+  the pool is traded back between sub-swaps, so it overstates how much fills.
+
+--min-profit-bps <BPS>
+  Target rate above input used for the 'target' floor mode (default: 2 bps).
+
+--slippage-bps <BPS>
+  Slippage tolerance for quote computation (default: 1 bp = 0.01%, lowest possible).
+
+--floor-mode {2bps,1to1,target}
+  * 2bps (Default & Recommended): Enforces memo limit = Input + 2 bps
+    (1000200000000 for 10,000 USDC = 10,002.00 USDP).
+    Each sub-swap must return >= +2 bps after its share of the outbound fee, or it is
+    skipped and refunded. The full outbound fee is still charged when only part fills,
+    so a partial fill can lose money (0xce98: 67 of 10,000 USDC filled, -2.6 USDP).
+  * 1to1: Sets memo limit to exact 1:1 parity (1000000000000 for 10,000 USDC).
+  * target: Sets memo limit strictly to min profit target.
+
+--floor-buffer-bps <BPS>
+  Gas buffer in bps applied when using 2bps floor mode (default: 2).
+
+--affiliate <HANDLE>
+  Affiliate THORName in the swap memo. Names on THORChain's DYNAMICFEE-WHITELIST mimir
+  get a lower liquidity-fee floor per pool leg. Live quotes for 10,000 USDC (2026-10-19):
+  * symbiosis (Default & Recommended): 3 bps/leg, 6.01 USDP liquidity fee.
+  * ej: 5 bps/leg (11.02).   ss: ~9 bps/leg (17.02).
+  * salactite or none: not whitelisted, 10 bps/leg (20.07). salactite:1 also pays
+    1 bp, so it costs more than no affiliate. Whitelisting is a node vote.
+  The tier is set per epoch and can change; the sniper reads it from every live quote.
+
+--affiliate-bps <BPS>
+  Set to 1. A whitelisted name only gets its lower tier with a non-zero fee
+  (symbiosis:0 quotes at 10 bps/leg). The 1 bp goes to Symbiosis, not to you.
+
+--poll-interval <SECONDS>
+  Polling interval in seconds (default: 3.0s).
+
+
+--------------------------------------------------------------------------------
+PART 5: RECONCILING COMPLETED TRANSACTIONS
+--------------------------------------------------------------------------------
+Whenever a deposit transaction completes, you can inspect it in 3 ways:
+
+1. In the WebApp:
+   Paste the Tx hash into the "Deposit Transaction Inspector" at http://127.0.0.1:8080
+   or click the "📌 Previous Swap" chip.
+
+2. Via WebApp API (curl):
+   curl -s "http://127.0.0.1:8080/api/deposit_info?tx=0xce98133010002812f44dd2e9239b5963c2e4e94c7d36a8590293e0dda145816e" | python3 -m json.tool
+
+3. Directly from THORNode:
+   curl -s "https://gateway.liquify.com/chain/thorchain_api/thorchain/tx/status/CE98133010002812F44DD2E9239B5963C2E4E94C7D36A8590293E0DDA145816E" | python3 -m json.tool
+================================================================================
