@@ -124,7 +124,8 @@ class TestThorchainUsdpSniper(unittest.TestCase):
             CE98_POOLS, 10**12, 1637, 1000854156084, min_slip_bps=3, affiliate_bps=1, outbound_fee=241474082
         )
         sub_swap = 10**12 // 1637
-        self.assertEqual(filled, 3 * sub_swap)  # Own price impact stops it within a handful of sub-swaps.
+        # Advanced MsgSwap.NextSize distributes the division remainder first.
+        self.assertEqual(filled, 3 * (sub_swap + 1))
         self.assertGreater(emitted, filled)
 
     def test_unlimited_swap_fills_everything(self):

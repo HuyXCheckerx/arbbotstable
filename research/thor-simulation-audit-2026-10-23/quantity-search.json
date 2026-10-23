@@ -1,0 +1,16 @@
+{
+  "deposit_raw": 9996400000000,
+  "target_raw": 9998399280000,
+  "max_quantity": 3296,
+  "maximum_fill": {
+    "filled_raw": 5735169249,
+    "usdp_after_affiliate_raw": 5735882512,
+    "quantity": 1743
+  },
+  "best_before_refund_and_gas": {
+    "profit_raw": -234203283,
+    "filled_raw": 3048612382,
+    "usdp_after_affiliate_raw": 3051726358,
+    "quantity": 3279
+  }
+}

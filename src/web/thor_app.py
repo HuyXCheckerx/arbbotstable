@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -14,6 +15,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,8 @@ from src.engines.thorchain_usdp_sniper import (
     memo_stream_fields,
     parse_quote,
     slice_fill_rate,
+    resolve_sniper_settings,
+    load_quote_fee_floors,
     DEFAULT_THORNODE_BASE,
     THORCHAIN_SCALE,
     USDC_ASSET,
@@ -59,7 +63,10 @@ from src.engines.thorchain_usdp_sniper import (
 )
 
 ROUTER_V4 = "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146"
-KNOWN_ACTIVE_TX = "0x3dfaf115a61e469fccb987a7977d32326e32edc5683f26b16775c6da826f0610"
+USDT_ASSET = "ETH.USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7"
+# Only USDC -> USDP can be executed by the sniper; other pairs are quote-only.
+QUOTE_SOURCES = {"usdc": USDC_ASSET, "usdt": USDT_ASSET, "usdp": USDP_ASSET}
+MIDGARD_BASE = "https://gateway.liquify.com/chain/thorchain_midgard/v2"
 
 # A one-off swap quotes, may wait up to 120s for an approval receipt, then up to
 # 180s for the deposit receipt. The process is never killed when this runs out.
@@ -71,6 +78,24 @@ DEPOSIT_AMOUNT_RE = re.compile(r"Amount: \d+ atomic units \(([\d.]+) USDC\)")
 
 thor_client = ThorClient(base_url=DEFAULT_THORNODE_BASE, timeout=8.0)
 status_pool = ThreadPoolExecutor(max_workers=6)
+metric_cache: dict[str, dict[str, Any]] = {}
+metric_lock = threading.Lock()
+
+
+def cached_metric(name: str, loader, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Slow Ethereum RPCs must not block current swap updates or pile up polls."""
+    with metric_lock:
+        entry = metric_cache.setdefault(name, {"at": 0, "data": fallback, "future": None})
+        future = entry["future"]
+        if future is not None and future.done():
+            try:
+                entry.update(data=future.result(), at=time.time())
+            except Exception:
+                pass
+            entry["future"] = None
+        if entry["future"] is None and time.time() - entry["at"] >= 15:
+            entry["future"] = status_pool.submit(loader)
+        return {**entry["data"], "updated_at": entry["at"] or None, "refreshing": entry["future"] is not None}
 
 # Sniper processes spawned by this server, kept so exited ones get reaped
 # instead of lingering as zombies that still answer os.kill(pid, 0).
@@ -95,7 +120,7 @@ def get_web3_instance():
 
 
 def fetch_thornode(path: str, params: dict[str, Any] | None = None, timeout: float = 8.0) -> Any:
-    return thor_client.get(path, params=params)
+    return ThorClient(base_url=thor_client.base_url, timeout=timeout).get(path, params=params)
 
 
 def get_operator_address() -> str:
@@ -149,15 +174,184 @@ def read_wallet_balances() -> dict[str, Any]:
     return result
 
 
-def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
+# Status polling asks for the default deposit every few seconds; Midgard only needs a refresh now and then.
+deposits_cache: dict[str, Any] = {"at": float("-inf"), "items": [], "error": None}
+queue_cache: dict[str, Any] = {"at": float("-inf"), "items": [], "error": None}
+queue_lock = threading.Lock()
+actions_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+block_times: dict[int, int] = {}
+
+
+def wallet_queue() -> list[dict[str, Any]]:
+    """Find wallet swaps before Midgard indexes them, including native limit orders."""
+    with queue_lock:
+        if time.monotonic() - queue_cache["at"] < 3:
+            return queue_cache["items"]
+        operator = get_operator_address().lower()
+        items, errors = [], []
+        paths = ("swaps/streaming", "queue/swap", "queue/limit_swaps?sender=" + operator)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = [pool.submit(fetch_thornode, path, timeout=5) for path in paths]
+        for path, result in zip(paths, results):
+            try:
+                data = result.result()
+                rows = data.get("limit_swaps", []) if isinstance(data, dict) else data
+                for row in rows or []:
+                    tx = row.get("tx") or {}
+                    if operator not in {
+                        str(row.get("destination", "")).lower(),
+                        str(row.get("sender", "")).lower(),
+                        str(row.get("from_address", "")).lower(),
+                        str(tx.get("from_address", "")).lower(),
+                    }:
+                        continue
+                    tx_id = row.get("tx_id") or tx.get("id")
+                    if tx_id and re.fullmatch(r"(?:0x)?[0-9a-fA-F]{64}", tx_id):
+                        items.append({**row, "tx_id": tx_id.removeprefix("0x").upper(),
+                                      "queue_type": "limit" if "limit_swaps" in path else "market"})
+            except Exception as exc:
+                errors.append(str(exc))
+        queue_cache.update(at=time.monotonic(), items=items, error="; ".join(errors) or None)
+        return items
+
+
+def recorded_deposits() -> list[dict[str, Any]]:
+    try:
+        data = json.loads(TRANSACTIONS_PATH.read_text())
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def local_deposits() -> list[dict[str, Any]]:
+    items = recorded_deposits()
+    # CLI deposits may precede Midgard indexing and aren't recorded by the web server.
+    try:
+        with SNIPER_LOG_PATH.open("rb") as stream:
+            stream.seek(max(0, SNIPER_LOG_PATH.stat().st_size - 128_000))
+            for line in stream.read().decode("utf-8", errors="replace").splitlines():
+                match = DEPOSIT_HASH_RE.search(line)
+                if match:
+                    try:
+                        timestamp = int(datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").timestamp())
+                    except ValueError:
+                        timestamp = 0
+                    items.append({"tx_hash": match[1], "timestamp": timestamp, "status": "broadcast"})
+    except OSError:
+        pass
+    return items
+
+
+def merge_deposits(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = {}
+    for group in groups:
+        for row in group:
+            tx_id = str(row.get("tx_hash", "")).lower()
+            if re.fullmatch(r"(?:0x)?[0-9a-f]{64}", tx_id):
+                tx_id = "0x" + tx_id.removeprefix("0x")
+                merged[tx_id] = {**merged.get(tx_id, {}), **row, "tx_hash": tx_id}
+    return sorted(merged.values(), key=lambda row: int(row.get("timestamp") or 0), reverse=True)
+
+
+def recent_deposits(limit: int = 2) -> list[dict[str, Any]]:
+    """The operator wallet's newest THORChain swap deposits, pending ones included, newest first.
+
+    Read from Midgard so deposits placed from the CLI count too, not just ones this
+    webapp recorded.
+    """
+    if time.monotonic() - deposits_cache["at"] < 15:
+        return merge_deposits(local_deposits(), deposits_cache["items"])[:limit]
+    operator = get_operator_address().lower()
+    try:
+        req = urllib.request.Request(f"{MIDGARD_BASE}/actions?address={operator}&limit=20", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            actions = json.loads(resp.read().decode()).get("actions", [])
+    except Exception as exc:
+        deposits_cache.update(at=time.monotonic(), error=str(exc))
+        return merge_deposits(local_deposits(), deposits_cache["items"])[:limit]
+
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for act in actions:
+        # A refunded swap shows up as both a swap and a refund action with the same inbound tx.
+        if act.get("type") not in ("swap", "refund"):
+            continue
+        for tx_in in act.get("in") or []:
+            tx_id = (tx_in.get("txID") or "").lower()
+            if (tx_in.get("address") or "").lower() != operator or not tx_id or tx_id in seen:
+                continue
+            seen.add(tx_id)
+            items.append({
+                "tx_hash": "0x" + tx_id.removeprefix("0x"),
+                "status": act.get("status"),
+                "timestamp": int(act.get("date") or 0) // 10**9,
+            })
+    deposits_cache.update(at=time.monotonic(), items=items, error=None)
+    return merge_deposits(local_deposits(), items)[:limit]
+
+
+def block_timestamp(height: int) -> int | None:
+    if height in block_times:
+        return block_times[height]
+    try:
+        data = fetch_thornode("block", {"height": height}, timeout=5)
+        stamp = data.get("header", {}).get("time") or data.get("block", {}).get("header", {}).get("time")
+        timestamp = int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp())
+        if len(block_times) > 128:
+            block_times.pop(next(iter(block_times)))
+        block_times[height] = timestamp
+        return timestamp
+    except Exception:
+        return None
+
+
+def transaction_actions(tx_id: str) -> list[dict[str, Any]]:
+    cached = actions_cache.get(tx_id)
+    if cached and time.monotonic() - cached[0] < 60:
+        return cached[1]
+    try:
+        req = urllib.request.Request(f"{MIDGARD_BASE}/actions?txid={tx_id}", headers={"User-Agent": "arbbot-dashboard"})
+        with urllib.request.urlopen(req, timeout=4) as response:
+            actions = json.load(response).get("actions", [])
+        if len(actions_cache) > 128:
+            actions_cache.pop(next(iter(actions_cache)))
+        actions_cache[tx_id] = (time.monotonic(), actions)
+        return actions
+    except Exception:
+        return []
+
+
+def get_deposit_tx_info(tx_hash: str | None = None, queue: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Retrieve complete, institutional-grade information for any THORChain deposit transaction.
     
     Parses both active streaming swaps from /swaps/streaming and finalized/refunded
     outbounds from /tx/status/{hash}.
     """
-    search_hash = (tx_hash or KNOWN_ACTIVE_TX).strip()
-    if not search_hash:
-        return {"ok": False, "found": False, "error": "Empty transaction hash provided"}
+    if not tx_hash:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            queue_future = pool.submit(wallet_queue)
+            recent_future = pool.submit(recent_deposits, 20)
+            queue, recent = queue_future.result(), recent_future.result()
+        candidates = ["0x" + row["tx_id"].lower() for row in sorted(queue, key=lambda r: int(r.get("initial_height") or r.get("created_height") or 0), reverse=True)]
+        # Include recent CLI/web deposits and Midgard's pending actions. A newer
+        # completed swap must never hide an older swap that is still running.
+        candidates += [r["tx_hash"] for r in recent if r.get("status") not in ("success", "completed", "refunded", "failed")]
+        unresolved = None
+        for candidate in dict.fromkeys(candidates):
+            info = get_deposit_tx_info(candidate, queue=queue)
+            if info.get("found") and not info.get("is_completed"):
+                return info
+            if not info.get("found") and candidate in candidates[:2]:
+                unresolved = info
+        if unresolved:
+            return unresolved
+        discovery_error = queue_cache.get("error") or deposits_cache.get("error")
+        return {"ok": not bool(discovery_error), "found": False, "status": "UNAVAILABLE" if discovery_error else "NO_ACTIVE_SWAP",
+                "message": "No active swap found for this wallet. Select a recent deposit to inspect its settlement.",
+                "error": discovery_error}
+    search_hash = tx_hash.strip()
+    if not re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]{64}", search_hash):
+        return {"ok": False, "found": False, "status": "INVALID_HASH", "error": "Enter a 64-character Ethereum transaction hash"}
 
     clean_hash = search_hash[2:].upper() if (search_hash.startswith("0x") or search_hash.startswith("0X")) else search_hash.upper()
     formatted_hash = "0x" + clean_hash.lower()
@@ -165,11 +359,11 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
     # 1. Check swaps/streaming
     match = None
     try:
-        streaming_list = fetch_thornode("swaps/streaming", timeout=6.0)
+        streaming_list = queue if queue is not None else fetch_thornode("swaps/streaming", timeout=6.0)
         if isinstance(streaming_list, list):
             for item in streaming_list:
                 item_tx = str(item.get("tx_id", "")).upper()
-                if item_tx == clean_hash or clean_hash in item_tx:
+                if item_tx.removeprefix("0X") == clean_hash:
                     match = item
                     break
     except Exception:
@@ -192,6 +386,7 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
             "found": False,
             "tx_id": formatted_hash,
             "status": "NOT_FOUND",
+            "error": status_data.get("error"),
             "message": f"Transaction {formatted_hash} not yet indexed on THORNode. If recently submitted, allow 1-2 Ethereum blocks.",
         }
 
@@ -237,7 +432,7 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
             out_usdp += raw_amt / THORCHAIN_SCALE
             if not outbound_tx_hash and "0000000000" not in tx_id:
                 outbound_tx_hash = tx_id_fmt
-        elif "USDC" in asset and ("REFUND" in memo or raw_amt > 100000000):
+        elif "USDC" in asset and "REFUND" in memo.upper():
             refund_usdc += raw_amt / THORCHAIN_SCALE
             if not refund_tx_hash and "0000000000" not in tx_id:
                 refund_tx_hash = tx_id_fmt
@@ -249,12 +444,16 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
     swap_finalised = stages.get("swap_finalised", {}).get("completed", False)
     outbound_signed = stages.get("outbound_signed", {}).get("completed", False)
 
-    is_active = (match is not None) or (stages.get("swap_status", {}).get("pending", False) and not swap_finalised)
+    is_completed = bool(swap_finalised and outbound_signed)
+    is_active = not is_completed
+    is_limit = str(tx_in.get("memo") or "").startswith("=<:") or bool(match and match.get("queue_type") == "limit")
 
     # Status classification
-    if is_active:
-        status_label = "STREAMING"
-    elif swap_finalised or outbound_signed:
+    if not swap_finalised and (match is not None or stages.get("swap_status", {}).get("pending", False)):
+        status_label = "LIMIT_WAITING" if is_limit else "STREAMING"
+    elif swap_finalised and not outbound_signed:
+        status_label = "OUTBOUND_PENDING"
+    elif is_completed:
         if refund_usdc > 0 and out_usdp > 0:
             status_label = "COMPLETED_PARTIAL"
         elif refund_usdc > 0 and out_usdp == 0:
@@ -268,7 +467,7 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
 
     # Streaming stats
     streaming_info = None
-    if match:
+    if match and int(match.get("quantity") or 0) > 0:
         quantity = int(match.get("quantity", 0))
         count = int(match.get("count", 0))
         failed_swaps = match.get("failed_swaps", [])
@@ -283,8 +482,20 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
         progress_pct = (count / quantity * 100.0) if quantity > 0 else 0.0
         effective_rate = (out_amt / in_amt) if in_amt > 0 else 0.0
         profit_bps = ((effective_rate - 1.0) * 10000.0) if effective_rate > 0 else 0.0
-        blocks_left = max(0, quantity - count)
-        est_seconds_left = blocks_left * 6
+        interval = int(match.get("interval") or 0)
+        current_height = None
+        try:
+            current_height = max(int(row.get("thorchain") or 0) for row in fetch_thornode("lastblock", timeout=4))
+        except Exception:
+            pass
+        last_height = int(match.get("last_height") or match.get("initial_height") or 0)
+        elapsed_blocks = last_height - int(match.get("initial_height") or last_height)
+        # Rapid streams have no fixed cadence. Estimate from actual attempts
+        # over observed blocks when available, rather than inventing a cadence.
+        cadence = None if is_limit else interval if interval > 0 else elapsed_blocks / count if count > 0 and elapsed_blocks > 0 else None
+        end_height = last_height + math.ceil(max(0, quantity - count) * cadence) if cadence is not None else None
+        blocks_left = max(0, end_height - current_height) if end_height and current_height else None
+        est_seconds_left = blocks_left * 6 if blocks_left is not None else None
 
         reasons = match.get("failed_swap_reasons", [])
         latest_reason = reasons[-1] if reasons else "Sub-swaps executing smoothly"
@@ -304,6 +515,9 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
             "target_limit": round(target_limit, 4),
             "blocks_left": blocks_left,
             "est_seconds_left": est_seconds_left,
+            "interval_blocks": interval,
+            "estimated_finalize_height": end_height,
+            "estimate_basis": "scheduled_interval" if interval > 0 else "observed_pace" if cadence else None,
             "latest_reason": latest_reason,
             "recent_reasons": reasons[-10:] if reasons else [],
             "destination": match.get("destination"),
@@ -312,25 +526,52 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
         }
 
     # Reconciled capital
-    swapped_usdc = in_amount - refund_usdc if in_amount > 0 else 0.0
-    effective_rate = (out_usdp / swapped_usdc) if swapped_usdc > 0 else 0.0
-    net_profit = out_usdp - swapped_usdc if swapped_usdc > 0 else 0.0
-    net_profit_bps = (net_profit / swapped_usdc * 10000) if swapped_usdc > 0 else 0.0
+    planned_refund = sum(int(o.get("coin", {}).get("amount") or 0) / THORCHAIN_SCALE
+                         for o in status_data.get("planned_out_txs", [])
+                         if o.get("refund") and "USDC" in o.get("coin", {}).get("asset", ""))
+    # The inbound-minus-refund difference includes the refund fee; retain that
+    # cost in settlement P&L. While streaming, only network-reported fills count.
+    swapped_usdc = streaming_info["swapped_usdc"] if streaming_info else max(0, in_amount - max(refund_usdc, planned_refund)) if swap_finalised else 0
 
     refund_reason = None
-    if refund_usdc > 0:
-        try:
-            midgard_url = f"https://gateway.liquify.com/chain/thorchain_midgard/v2/actions?txid={clean_hash}"
-            mreq = urllib.request.Request(midgard_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(mreq, timeout=3.5) as mresp:
-                mdata = json.loads(mresp.read().decode())
-                for act in mdata.get("actions", []):
-                    rr = act.get("metadata", {}).get("refund", {}).get("reason")
-                    if rr:
-                        refund_reason = rr
-                        break
-        except Exception:
-            pass
+    finalized_at = None
+    started_at = None
+    history_stream = None
+    swapped_is_estimate = not bool(streaming_info)
+    if swap_finalised:
+        actions = transaction_actions(clean_hash)
+        final_height = 0
+        for action in actions:
+            metadata = action.get("metadata", {})
+            refund_reason = metadata.get("refund", {}).get("reason") or refund_reason
+            meta = metadata.get("swap", {}).get("streamingSwapMeta")
+            if meta:
+                if meta.get("inCoin", {}).get("amount") is not None:
+                    swapped_usdc = int(meta["inCoin"]["amount"]) / THORCHAIN_SCALE
+                    swapped_is_estimate = False
+                history_stream = {"count": int(meta.get("count") or 0), "quantity": int(meta.get("quantity") or 0),
+                                  "skipped_count": len(meta.get("failedSwaps") or []), "interval_blocks": int(meta.get("interval") or 0)}
+                history_stream["success_count"] = max(0, history_stream["count"] - history_stream["skipped_count"])
+                final_height = max(final_height, int(meta.get("lastHeight") or 0))
+            # Refund actions are emitted when the stream ends; the swap action
+            # itself is dated at its start and must not be called finalization.
+            if action.get("type") == "refund":
+                final_height = max(final_height, int(action.get("height") or 0))
+            elif not meta and action.get("type") == "swap":
+                final_height = max(final_height, int(action.get("height") or 0))
+            if action.get("type") == "swap":
+                started_at = int(action.get("date") or 0) // 10**9 or None
+        if final_height:
+            finalized_at = block_timestamp(final_height)
+    effective_rate = out_usdp / swapped_usdc if swapped_usdc > 0 else 0
+    # Total-token result includes refund fees; the filled portion alone does not.
+    net_profit = out_usdp + refund_usdc - in_amount if is_completed else None
+    net_profit_bps = net_profit / in_amount * 10000 if net_profit is not None and in_amount > 0 else None
+    seconds_left = streaming_info.get("est_seconds_left") if streaming_info else None
+    delay = stages.get("outbound_delay", {}).get("remaining_delay_seconds")
+    if streaming_info and streaming_info.get("initial_height"):
+        started_at = block_timestamp(int(streaming_info["initial_height"]))
+    estimated_finalize_at = int(time.time()) + seconds_left if seconds_left is not None else None
 
     return {
         "ok": True,
@@ -338,12 +579,19 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
         "tx_id": formatted_hash,
         "status": status_label,
         "is_active": is_active,
-        "is_completed": swap_finalised and outbound_signed,
-        "progress_pct": streaming_info["progress_pct"] if streaming_info else (100.0 if swap_finalised else 50.0),
+        "is_completed": is_completed,
+        "progress_pct": streaming_info["progress_pct"] if streaming_info else (100.0 if swap_finalised else 0.0),
+        "timing": {"started_at": started_at, "finalized_at": finalized_at,
+                   "estimated_finalize_at": estimated_finalize_at, "seconds_left": seconds_left,
+                   "estimate_basis": streaming_info.get("estimate_basis") if streaming_info else None,
+                   "outbound_delay_seconds": delay,
+                   "estimated_delivery_at": int(time.time()) + int(delay) if delay is not None and not outbound_signed else None,
+                   "estimate_note": "Estimated using 6-second THORChain blocks. Delivery and refunds follow stream finalization; network delays can change timing."},
+        "history_stream": history_stream,
         "inbound": {
             "tx_hash": formatted_hash,
             "asset": in_asset,
-            "amount": in_amount,
+            "amount": in_amount or (streaming_info["deposit_usdc"] if streaming_info else 0),
             "from_address": tx_in.get("from_address"),
             "to_address": tx_in.get("to_address"),
             "memo": tx_in.get("memo"),
@@ -355,10 +603,12 @@ def get_deposit_tx_info(tx_hash: str | None = None) -> dict[str, Any]:
             "refund_usdc": round(refund_usdc, 4),
             "refund_tx_hash": refund_tx_hash,
             "refund_reason": refund_reason,
+            "planned_refund_usdc": planned_refund,
             "swapped_usdc": round(swapped_usdc, 4),
+            "swapped_is_estimate": swapped_is_estimate,
             "effective_rate": round(effective_rate, 6),
-            "net_profit_usdp": round(net_profit, 4),
-            "net_profit_bps": round(net_profit_bps, 2),
+            "net_profit_usdp": round(net_profit, 4) if net_profit is not None else None,
+            "net_profit_bps": round(net_profit_bps, 2) if net_profit_bps is not None else None,
             "affiliate_rune": round(affiliate_rune, 6),
             "affiliate_collector": affiliate_collector,
             "all_out_txs": outbound_list,
@@ -382,19 +632,19 @@ def get_active_streaming_swap(tx_hash: str | None = None, info: dict[str, Any] |
     else:
         # Fallback fields for completed/refunded swaps
         settlement = info.get("settlement", {})
-        res["quantity"] = 164
-        res["count"] = 164
-        res["progress_pct"] = 100.0
-        res["deposit_usdc"] = info.get("inbound", {}).get("amount", 10000.0)
+        res["quantity"] = (info.get("history_stream") or {}).get("quantity")
+        res["count"] = (info.get("history_stream") or {}).get("count")
+        res["progress_pct"] = info.get("progress_pct", 0)
+        res["deposit_usdc"] = info.get("inbound", {}).get("amount", 0)
         res["swapped_usdc"] = settlement.get("swapped_usdc", 0.0)
         res["remaining_usdc"] = 0.0
         res["out_usdp"] = settlement.get("out_usdp", 0.0)
         res["effective_rate"] = settlement.get("effective_rate", 0.0)
         res["profit_bps"] = settlement.get("net_profit_bps", 0.0)
-        res["success_count"] = 1 if settlement.get("out_usdp", 0) > 0 else 0
-        res["skipped_count"] = 0
-        res["blocks_left"] = 0
-        res["est_seconds_left"] = 0
+        res["success_count"] = (info.get("history_stream") or {}).get("success_count")
+        res["skipped_count"] = (info.get("history_stream") or {}).get("skipped_count")
+        res["blocks_left"] = 0 if info.get("is_completed") else None
+        res["est_seconds_left"] = 0 if info.get("is_completed") else None
         if settlement.get("refund_reason"):
             res["latest_reason"] = f"Refunded by THORChain: {settlement['refund_reason']}"
         else:
@@ -402,6 +652,16 @@ def get_active_streaming_swap(tx_hash: str | None = None, info: dict[str, Any] |
                 f"Settled: Delivered {settlement.get('out_usdp')} USDP, refunded {settlement.get('refund_usdc')} USDC"
             )
     return res
+
+
+def pool_rate_to_usdp(source_asset: str, target_asset: str = USDP_ASSET) -> float | None:
+    """USDP per unit of source_asset at the two pools' current RUNE prices, before fees."""
+    try:
+        # Two single-pool lookups: the full pools list is much larger and slow on the gateway.
+        src, dst = fetch_thornode(f"pool/{source_asset}"), fetch_thornode(f"pool/{target_asset}")
+        return (int(src["balance_rune"]) / int(src["balance_asset"])) / (int(dst["balance_rune"]) / int(dst["balance_asset"]))
+    except Exception:
+        return None
 
 
 def get_pool_depths() -> dict[str, Any]:
@@ -433,7 +693,7 @@ def reap_children() -> None:
 
 
 def sniper_daemon_pids() -> list[int]:
-    """PIDs of live thor_usdp_sniper.py daemons; one-off --once/--resting swaps are excluded."""
+    """Find daemons, including explicitly marked resting daemons, excluding one-offs."""
     try:
         out = subprocess.check_output(["ps", "-A", "-o", "pid=,stat=,args="], text=True)
     except Exception:
@@ -444,7 +704,8 @@ def sniper_daemon_pids() -> list[int]:
         if len(fields) < 3 or fields[1].startswith("Z"):
             continue
         argv = fields[2].split()
-        if any(a.endswith("thor_usdp_sniper.py") for a in argv) and not {"--once", "--resting"} & set(argv):
+        if (any(a.endswith("thor_usdp_sniper.py") for a in argv) and "--once" not in argv
+                and ("--resting" not in argv or "--daemon" in argv)):
             pids.append(int(fields[0]))
     return pids
 
@@ -468,6 +729,47 @@ def is_sniper_process_running() -> tuple[bool, int | None]:
 def sniper_python() -> str:
     venv_bin = PROJECT_ROOT / ".venv" / "bin" / "python3"
     return str(venv_bin) if venv_bin.exists() else sys.executable
+
+
+def daemon_arguments(payload: dict[str, Any]) -> list[str]:
+    """Validate daemon controls without spawning a process or contacting RPCs."""
+    floor_mode = str(payload.get("floor_mode", "2bps")).strip()
+    if floor_mode not in ("2bps", "1bps", "1to1", "target"):
+        raise ValueError("Unknown slice execution price floor")
+    mode = str(payload.get("mode", "instant")).strip()
+    if mode not in ("instant", "resting"):
+        raise ValueError("Daemon mode must be instant or resting")
+    settings = argparse.Namespace(
+        amount=Decimal(str(payload.get("amount", "10000"))),
+        min_profit_bps=Decimal(str(payload.get("min_profit_bps", "2"))),
+        min_usdp=None,
+        min_net_profit=Decimal(str(payload.get("min_net_profit", os.getenv("THORCHAIN_SNIPER_MIN_NET_PROFIT", "1")))),
+        poll_interval=float(payload.get("poll_interval", "3")),
+        slippage_bps=int(str(payload.get("slippage_bps", "1"))),
+        affiliate_bps=int(str(payload.get("affiliate_bps", os.getenv("THORCHAIN_AFFILIATE_BPS", "1")))),
+        floor_mode=floor_mode,
+        floor_buffer_bps=int(str(payload.get("floor_buffer_bps", os.getenv("THORCHAIN_FLOOR_BUFFER_BPS", "2")))),
+        interval=RESTING_INTERVAL, quantity=RESTING_QUANTITY,
+    )
+    resolve_sniper_settings(settings)
+    affiliate = str(payload.get("affiliate", os.getenv("THORCHAIN_AFFILIATE", "symbiosis"))).strip()
+    arguments = [
+        "--amount", str(settings.amount),
+        "--min-profit-bps", str(settings.min_profit_bps),
+        "--min-net-profit", str(settings.min_net_profit),
+        "--slippage-bps", str(settings.slippage_bps),
+        "--poll-interval", str(settings.poll_interval),
+        "--affiliate", affiliate,
+        "--affiliate-bps", str(settings.affiliate_bps),
+        "--floor-mode", settings.floor_mode,
+        "--floor-buffer-bps", str(settings.floor_buffer_bps),
+        "--interval", str(settings.interval),
+        "--quantity", str(settings.quantity),
+        "--daemon", "--live", "--confirm-live", "EXECUTE_THOR_SNIPER",
+    ]
+    if mode == "resting":
+        arguments.append("--resting")
+    return arguments
 
 
 def spawn_sniper(args: list[str]) -> subprocess.Popen:
@@ -525,7 +827,7 @@ def settle_swap(
                 "deposited": deposited,
                 "output": tail,
                 "message": (
-                    f"Resting order of {deposited} USDC placed. THORChain will try one slice every {RESTING_INTERVAL} blocks for ~24h; track it in the inspector."
+                    f"Resting order of {deposited} USDC placed. THORChain will try the maximum permitted slices, one every {RESTING_INTERVAL} blocks; track its estimated completion in the inspector."
                     if resting
                     else f"Deposit of {deposited} USDC confirmed on Ethereum. THORChain is now streaming the swap; track it in the inspector."
                 ),
@@ -642,6 +944,9 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:
+        from src.web.thor_calculator import serve_calculator
+        if serve_calculator(self):
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
@@ -681,6 +986,11 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"Static file not found")
             return
 
+        # API: the wallet's newest deposits, for the inspector's Latest/Previous chips
+        if path == "/api/latest_deposits":
+            self._json(200, {"ok": True, "deposits": recent_deposits(2)})
+            return
+
         # API: Deposit Tx Inspector
         if path == "/api/deposit_info":
             custom_tx = query.get("tx", [None])[0]
@@ -693,20 +1003,18 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
             custom_tx = query.get("tx", [None])[0]
             # THORNode and the Ethereum RPC are independent; query them in parallel.
             deposit_future = status_pool.submit(get_deposit_tx_info, custom_tx)
-            balances_future = status_pool.submit(read_wallet_balances)
-            pools_future = status_pool.submit(get_pool_depths)
+            balances = cached_metric("wallet", read_wallet_balances, {"operator": get_operator_address(), "rpc_connected": False})
+            pools = cached_metric("pools", get_pool_depths, {})
             running, pid = is_sniper_process_running()
             deposit_info = deposit_future.result()
             swap_info = get_active_streaming_swap(info=deposit_info)
-            balances = balances_future.result()
-            pools = pools_future.result()
 
             self._json(200, {
                 "ok": True,
                 "timestamp": int(time.time()),
                 "wallet": balances,
                 "pools": pools,
-                "active_swap": swap_info,
+                "active_swap": swap_info if deposit_info.get("is_active") else None,
                 "deposit_info": deposit_info,
                 "sniper": {
                     "running": running,
@@ -755,25 +1063,50 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
             try:
                 amount_str = query.get("amount", ["10000"])[0]
                 amount = Decimal(amount_str)
-                slippage_bps = int(query.get("slippage_bps", ["5"])[0])
+                source = query.get("source", ["usdc"])[0].strip().lower()
+                slippage_bps = int(query.get("slippage_bps", ["5" if source == "usdc" else "50"])[0])
                 affiliate = query.get("affiliate", [os.getenv("THORCHAIN_AFFILIATE", "symbiosis")])[0].strip()
                 affiliate_bps = int(query.get("affiliate_bps", [os.getenv("THORCHAIN_AFFILIATE_BPS", "1")])[0])
-                floor_mode = query.get("floor_mode", [os.getenv("THORCHAIN_FLOOR_MODE", "2bps")])[0].strip()
+                floor_mode = query.get("floor_mode", [os.getenv("THORCHAIN_FLOOR_MODE", "2bps") if source == "usdc" else "market"])[0].strip()
                 resting = query.get("mode", ["instant"])[0].strip() == "resting"
+                if source not in QUOTE_SOURCES:
+                    self._json(400, {"ok": False, "error": f"source must be one of {sorted(QUOTE_SOURCES)}"})
+                    return
+                target = "usdc" if source == "usdp" else "usdp"
+                target_asset = QUOTE_SOURCES[target]
+                if not amount.is_finite() or amount <= 0:
+                    raise ValueError("Amount must be a positive, finite number")
+                if not 0 <= slippage_bps <= 10000 or not 0 <= affiliate_bps <= 10000:
+                    raise ValueError("Basis points must be between 0 and 10000")
+                if floor_mode not in ("market", "2bps", "gas_buffer", "1to1", "target"):
+                    raise ValueError("Unknown protection mode")
+                if floor_mode == "market" and (source == "usdc" or slippage_bps >= 10000):
+                    raise ValueError("Market quote mode is for quote-only pairs with slippage below 10000 bps")
+                if resting and source != "usdc":
+                    raise ValueError("Resting execution is available for USDC -> USDP only")
                 amount_1e8 = int(amount * THORCHAIN_SCALE)
+                if amount_1e8 <= 0:
+                    raise ValueError("Amount is below THORChain precision")
 
                 quote_params = {
-                    "from_asset": USDC_ASSET,
-                    "to_asset": USDP_ASSET,
+                    "from_asset": QUOTE_SOURCES[source],
+                    "to_asset": target_asset,
                     "amount": str(amount_1e8),
                     "destination": get_operator_address(),
                     "affiliate": affiliate,
                     "affiliate_bps": str(affiliate_bps),
+                    "streaming_interval": str(RESTING_INTERVAL),
+                    "streaming_quantity": str(RESTING_QUANTITY),
                 }
-                if resting:
-                    quote_params["streaming_interval"] = str(RESTING_INTERVAL)
-                    quote_params["streaming_quantity"] = str(RESTING_QUANTITY)
+                if floor_mode == "market":
+                    quote_params["liquidity_tolerance_bps"] = str(slippage_bps)
+                # Look up the pool rate while THORNode builds the quote.
+                pool_rate_future = status_pool.submit(pool_rate_to_usdp, QUOTE_SOURCES[source], target_asset)
                 data = fetch_thornode("quote/swap", params=quote_params, timeout=7.0)
+                if data.get("error") or not data.get("memo") or int(data.get("expected_amount_out") or 0) <= 0:
+                    raise ValueError(data.get("error") or "THORNode returned no executable quote")
+                if data.get("expiry") is not None and int(data["expiry"]) <= time.time():
+                    raise ValueError("THORNode quote has expired; request a fresh quote")
                 expected_raw = data.get("expected_amount_out", "0")
                 expected_usdp = Decimal(expected_raw) / Decimal(THORCHAIN_SCALE)
                 net_profit = expected_usdp - amount
@@ -782,7 +1115,7 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                 fees = data.get("fees", {})
                 fees_fmt = {}
                 for k, v in fees.items():
-                    if isinstance(v, (int, str)) and str(v).isdigit():
+                    if k not in ("slippage_bps", "total_bps") and isinstance(v, (int, str)) and str(v).isdigit():
                         fees_fmt[k] = float(Decimal(int(v)) / Decimal(THORCHAIN_SCALE))
                     else:
                         fees_fmt[k] = v
@@ -790,6 +1123,11 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                 streaming_blocks = data.get("streaming_swap_blocks", 0)
                 swap_seconds = data.get("total_swap_seconds", 0)
                 raw_memo = data.get("memo", "")
+                memo_parts = raw_memo.split(":")
+                if len(memo_parts) < 4 or memo_parts[1].upper() not in (target_asset.upper(), target_asset.split("-")[0].upper()):
+                    raise ValueError("THORNode returned a memo for the wrong output asset")
+                if fees.get("asset") and fees["asset"].upper() != target_asset.upper():
+                    raise ValueError("THORNode returned fees in the wrong output asset")
 
                 # Build protected memo versions
                 from src.engines.thorchain_usdp_sniper import build_protected_memo
@@ -801,21 +1139,36 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                     memo_1to1 = build_protected_memo(raw_memo, min_usdp_target=amount, input_amount=amount, floor_mode="1to1")
                     target_min = amount * (1 + Decimal(slippage_bps) / Decimal(10000))
                     memo_target = build_protected_memo(raw_memo, min_usdp_target=target_min, input_amount=amount, floor_mode="target")
-                except Exception:
-                    memo_2bps = raw_memo
-                    memo_1to1 = raw_memo
-                    memo_target = raw_memo
+                except Exception as exc:
+                    raise ValueError(f"Could not build a protected quote memo: {exc}") from exc
 
-                if floor_mode in ("2bps", "gas_buffer"):
+                if floor_mode == "market":
+                    # Base tolerance on expected output AFTER quoted fees, not
+                    # on nominal input parity. Never replace this with +2 bps.
+                    minimum = max(1, int(Decimal(expected_raw) * (10000 - slippage_bps) / 10000))
+                    stream_parts = memo_parts[3].split("/")
+                    stream_parts[0] = str(minimum)
+                    memo_parts[3] = "/".join(stream_parts)
+                    active_memo = ":".join(memo_parts)
+                elif floor_mode in ("2bps", "gas_buffer"):
                     active_memo = memo_2bps
                 elif floor_mode == "1to1":
                     active_memo = memo_1to1
                 else:
                     active_memo = memo_target
+                minimum_raw, _, _ = memo_stream_fields(active_memo)
+                quote_meets_floor = int(expected_raw) >= minimum_raw
+                floor_warning = (
+                    "Market estimate is below the selected minimum. This quote does not demonstrate a full fill at that floor; slices may fail and refund fees can apply."
+                    if not quote_meets_floor else
+                    "A premium floor applies to filled slices; it does not guarantee the premium after settlement and refund fees."
+                    if floor_mode != "market" else ""
+                )
 
                 resting_info = None
                 if resting:
                     _, interval, quantity = memo_stream_fields(raw_memo)
+                    quantity = quantity or int(data.get("max_streaming_quantity") or 0)
                     resting_info = {
                         "interval_blocks": interval,
                         "slices": quantity,
@@ -823,11 +1176,13 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                         "hours": round(swap_seconds / 3600, 1),
                     }
                     try:
+                        if source != "usdc":
+                            raise ValueError("slice fill rate is modeled for the USDC pool only")
                         pools = fetch_pool_spot_rate(thor_client)
                         target_rate = 1 + Decimal(slippage_bps) / Decimal(10000)
-                        fill_rate = slice_fill_rate(
-                            pools, parse_quote(data, amount), target_rate, floor_mode, 2, affiliate_bps
-                        )
+                        resting_quote = parse_quote(data, amount)
+                        load_quote_fee_floors(thor_client, resting_quote, affiliate, affiliate_bps)
+                        fill_rate = slice_fill_rate(pools, resting_quote, target_rate, floor_mode, 2, affiliate_bps)
                         resting_info["spot_rate"] = float(pools.spot_rate)
                         resting_info["slice_fill_rate"] = float(fill_rate) if fill_rate is not None else None
                     except Exception:
@@ -837,6 +1192,12 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "input_amount": float(amount),
                     "expected_output": float(round(expected_usdp, 4)),
+                    "minimum_output": float(Decimal(minimum_raw) / THORCHAIN_SCALE),
+                    "minimum_output_atomic": str(minimum_raw),
+                    "quote_meets_floor": quote_meets_floor,
+                    "quote_status": "QUOTED" if quote_meets_floor else "FLOOR_NOT_MET",
+                    "floor_warning": floor_warning,
+                    "slippage_bps": slippage_bps,
                     "net_profit": float(round(net_profit, 4)),
                     "profit_bps": float(round(profit_bps, 2)),
                     "is_profitable": bool(net_profit > 0),
@@ -849,12 +1210,18 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                     "memo_1to1": memo_1to1,
                     "memo_target": memo_target,
                     "floor_mode": floor_mode,
-                    "floor_buffer_bps": 2,
+                    "floor_buffer_bps": None if floor_mode == "market" else 2,
                     "router": data.get("router", ROUTER_V4),
                     "inbound_address": data.get("inbound_address", ""),
                     "warning": data.get("warning", ""),
                     "mode": "resting" if resting else "instant",
                     "resting": resting_info,
+                    "source": source,
+                    "target": target,
+                    "can_execute": source == "usdc",
+                    "quoted_at": int(time.time()),
+                    "expiry": data.get("expiry"),
+                    "pool_rate": pool_rate_future.result(),
                 })
             except Exception as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
@@ -874,30 +1241,16 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
 
         # API: Transactions History
         if path == "/api/transactions":
-            txs = []
-            if TRANSACTIONS_PATH.exists():
-                try:
-                    txs = json.loads(TRANSACTIONS_PATH.read_text())
-                except Exception:
-                    pass
-            # Ensure KNOWN_ACTIVE_TX is recorded
-            known_hashes = {t.get("tx_hash", "").lower() for t in txs}
-            if KNOWN_ACTIVE_TX.lower() not in known_hashes:
-                txs.append({
-                    "tx_hash": KNOWN_ACTIVE_TX,
-                    "amount": "10000",
-                    "asset_in": "USDC",
-                    "asset_out": "USDP",
-                    "timestamp": 1729315000,
-                    "status": "completed",
-                    "note": "Mainnet streaming swap (reconciled)",
-                })
+            txs = recent_deposits(20)
             self._json(200, {"ok": True, "transactions": txs})
             return
 
         self._send(404, "text/plain", b"Not Found")
 
     def do_POST(self) -> None:
+        from src.web.thor_calculator import serve_calculator
+        if serve_calculator(self):
+            return
         global swap_proc
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -925,30 +1278,29 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                 self._json(409, {"ok": False, "error": f"A live swap is in progress (PID {swap_proc.pid}); wait for it to finish"})
                 return
 
-            amount = str(payload.get("amount", "10000"))
-            min_profit_bps = str(payload.get("min_profit_bps", "2"))
-            slippage_bps = str(payload.get("slippage_bps", "1"))
-            poll_interval = str(payload.get("poll_interval", "3"))
-            affiliate = str(payload.get("affiliate", os.getenv("THORCHAIN_AFFILIATE", "symbiosis"))).strip()
-            affiliate_bps = str(payload.get("affiliate_bps", os.getenv("THORCHAIN_AFFILIATE_BPS", "1"))).strip()
-            floor_mode = str(payload.get("floor_mode", "2bps")).strip()
+            try:
+                arguments = daemon_arguments(payload)
+            except (ValueError, TypeError, ArithmeticError, RuntimeError) as exc:
+                self._json(400, {"ok": False, "error": f"Invalid daemon settings: {exc}"})
+                return
 
             try:
-                proc = spawn_sniper([
-                    "--amount", amount,
-                    "--min-profit-bps", min_profit_bps,
-                    "--slippage-bps", slippage_bps,
-                    "--poll-interval", poll_interval,
-                    "--affiliate", affiliate,
-                    "--affiliate-bps", affiliate_bps,
-                    "--floor-mode", floor_mode,
-                    "--live",
-                    "--confirm-live", "EXECUTE_THOR_SNIPER",
-                ])
-                SNIPER_PID_PATH.write_text(str(proc.pid))
+                with swap_lock:
+                    # A second Start request or manual swap may have won while
+                    # the first request was being validated.
+                    running, pid = is_sniper_process_running()
+                    if running or (swap_proc is not None and swap_proc.poll() is None):
+                        self._json(409, {"ok": False, "error": "A daemon or manual deposit already owns this wallet"})
+                        return
+                    proc = spawn_sniper(arguments)
+                    SNIPER_PID_PATH.write_text(str(proc.pid))
                 self._json(200, {
                     "ok": True,
-                    "message": f"Sniper daemon successfully launched! (PID {proc.pid}) with affiliate '{affiliate}' ({affiliate_bps} bps, floor: {floor_mode})",
+                    "message": (
+                        f"Resting daemon launched (PID {proc.pid}). It waits for the slice-price condition, places one stream, then exits. The full deposit is locked until settlement; the immediate net-profit check does not apply."
+                        if "--resting" in arguments else
+                        f"Immediate daemon launched (PID {proc.pid}). It waits for fills meeting the modeled net-profit threshold; a positive full-fill quote alone will not trigger a deposit."
+                    ),
                     "pid": proc.pid
                 })
             except Exception as exc:
@@ -970,20 +1322,33 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                         return
                     self._json(200, {"ok": True, "message": f"Waiting resting order (PID {pending['pid']}) cancelled; nothing was sent."})
                     return
+                if pending:
+                    self._json(409, {"ok": False, "error": f"The swap (PID {pending['pid']}) is already being placed; it can't be cancelled."})
+                    return
                 self._json(400, {"ok": False, "error": "No sniper daemon or waiting resting order to stop"})
                 return
 
             try:
                 os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 2
+                while pid in sniper_daemon_pids() and time.monotonic() < deadline:
+                    reap_children()
+                    time.sleep(0.05)
+                if pid in sniper_daemon_pids():
+                    self._json(409, {"ok": False, "error": "The daemon has not stopped; it may already be placing a deposit. It was not force-killed. Any submitted on-chain stream continues."})
+                    return
                 if SNIPER_PID_PATH.exists():
                     SNIPER_PID_PATH.unlink()
-                self._json(200, {"ok": True, "message": f"Sniper process {pid} stopped."})
+                self._json(200, {"ok": True, "message": f"Sniper process {pid} stopped. Any stream already submitted to THORChain continues on-chain."})
             except Exception as exc:
                 self._json(500, {"ok": False, "error": f"Failed to kill process {pid}: {exc}"})
             return
 
         # API: Execute One-off Live Swap
         if path == "/api/swap/live":
+            if payload.get("source", "usdc").lower() != "usdc" or payload.get("target", "usdp").lower() != "usdp":
+                self._json(400, {"ok": False, "error": "Live execution supports USDC -> USDP only; other pairs are quote-only"})
+                return
             confirm = payload.get("confirm", "").strip()
             if confirm != "EXECUTE_LIVE_SWAP":
                 self._json(400, {"ok": False, "error": "Confirmation phrase EXECUTE_LIVE_SWAP required"})
@@ -1013,8 +1378,10 @@ class ThorDashboardHandler(BaseHTTPRequestHandler):
                     # streaming swap from there, which can take far longer than an HTTP request.
                     # A resting order runs without --once: it polls until the rate lets slices fill.
                     proc = swap_proc = spawn_sniper([
-                        *([] if resting else ["--once"]),
+                        *([] if resting else ["--once", "--no-capacity-check"]),
                         "--no-monitor",
+                        "--interval", str(RESTING_INTERVAL),
+                        "--quantity", str(RESTING_QUANTITY),
                         *(["--resting"] if resting else []),
                         "--amount", amount,
                         "--slippage-bps", slippage_bps,

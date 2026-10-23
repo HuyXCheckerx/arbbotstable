@@ -36,10 +36,21 @@ import re
 import signal
 import sys
 import time
+import ssl
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+try:
+    import certifi
+    SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    try:
+        SSL_CONTEXT = ssl._create_unverified_context()
+    except Exception:
+        SSL_CONTEXT = None
+
 
 # Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -81,11 +92,10 @@ ETH_ASSET = "ETH.ETH"
 # gasUsed by past depositWithExpiry calls (0x3dfaf115..., 0xce981330...) was ~74,830.
 DEPOSIT_GAS_UNITS = 75_000
 PRIORITY_FEE_WEI = 2_000_000_000
-# Resting order: one sub-swap every 20 blocks, 720 of them = 14,400 blocks, THORChain's
-# STREAMINGSWAPMAXLENGTH (~24h). Native limit orders can't rest: STREAMINGLIMITSWAPMAXAGE
-# is 10 blocks. Longer gaps force fewer, bigger slices and a higher liquidity fee.
-RESTING_INTERVAL = 20
-RESTING_QUANTITY = 720
+# Quantity 0 asks THORChain for its maximum permitted slices at this interval.
+# The actual quantity depends on deposit size, pool depths, fees and duration cap.
+RESTING_INTERVAL = 2
+RESTING_QUANTITY = 0
 USDC_CONTRACT = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 USDP_CONTRACT = "0x8E870D67F660D95d5be530380D0eC0bd388289E1"
 THORCHAIN_SCALE = 100_000_000  # 1e8 for all THORNode assets
@@ -148,6 +158,9 @@ class PoolSpot:
     usdp_rune: int = 0
     usdp_asset: int = 0
     eth_usd: Decimal | None = None
+    usdc_decimals: int = 6
+    usdp_decimals: int = 0  # THORNode's 0 means retain all 8 internal decimals
+    height: int | None = None
 
 
 @dataclass
@@ -174,6 +187,10 @@ class QuoteResult:
     memo: str
     expiry: int
     raw: dict[str, Any]
+    fee_floors: tuple[int, int] | None = None  # USDC->RUNE and RUNE->USDP minimum fees
+    max_stream_length: int = 14400
+    fee_floor_error: str | None = None
+    height: int | None = None
 
 
 def init_web3(primary_rpc: str | None = None) -> tuple[Web3, str]:
@@ -239,6 +256,9 @@ def fetch_pool_spot_rate(thor_client: ThorClient) -> PoolSpot:
         usdp_rune=int(Yr),
         usdp_asset=int(Ya),
         eth_usd=eth_usd,
+        usdc_decimals=int(usdc_pool.get("decimals", 0)),
+        usdp_decimals=int(usdp_pool.get("decimals", 0)),
+        height=thor_client.response_heights.get("pools"),
     )
 
 
@@ -247,6 +267,9 @@ class ThorClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.last_quote_start = float("-inf")
+        self.fee_floor_cache: dict[str, tuple[float, tuple[int, int] | None]] = {}
+        self.network_fee_config: tuple[float, dict[str, int]] | None = None
+        self.response_heights: dict[str, int] = {}
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = self.base_url + "/" + path.lstrip("/")
@@ -261,10 +284,21 @@ class ThorClient:
             try:
                 request = Request(
                     url,
-                    headers={"User-Agent": "arbbot-thorchain-sniper/1.0", "Accept": "application/json"},
+                    headers={
+                        "User-Agent": "arbbot-thorchain-sniper/1.0",
+                        "Accept": "application/json",
+                        "x-client-id": "arbitrage-bot",
+                    },
                 )
-                with urlopen(request, timeout=self.timeout) as response:
+                kwargs = {"timeout": self.timeout}
+                if SSL_CONTEXT is not None:
+                    kwargs["context"] = SSL_CONTEXT
+                with urlopen(request, **kwargs) as response:
                     data = json.load(response)
+                    height = response.headers.get("Grpc-Metadata-X-Cosmos-Block-Height")
+                    self.response_heights.pop(path, None)
+                    if height and str(height).isdigit():
+                        self.response_heights[path] = int(height)
                 if isinstance(data, dict) and data.get("error"):
                     raise SniperError(str(data["error"])[:300])
                 return data
@@ -352,7 +386,8 @@ def build_protected_memo(
 
     floor_mode:
       - '2bps': Enforces at least +2 bps over input amount (LIMIT = input_amount * 1.0002).
-                Sub-swaps execute whenever rate >= 1.0002 USDP/USDC, covering gas in and outbound.
+                Applies to slice execution; fixed settlement/refund fees and wallet gas
+                can still leave the final return below the deposit.
       - '1to1': Enforces exact 1:1 parity (LIMIT = input_amount). Sub-swaps execute whenever
                 rate >= 1.0000 USDP/USDC.
       - 'target': Enforces strict target profit floor (LIMIT = min_usdp_target).
@@ -378,8 +413,9 @@ def protected_limit(
     buffer_bps: int = 2,
 ) -> int:
     """The memo LIMIT (1e8 units) build_protected_memo enforces for a floor mode."""
-    if floor_mode in ("2bps", "gas_buffer", "plus2bps"):
-        multiplier = Decimal(1) + Decimal(buffer_bps) / Decimal(10000)
+    if floor_mode in ("2bps", "1bps", "gas_buffer", "plus2bps"):
+        effective_buffer = 1 if floor_mode == "1bps" and buffer_bps == 2 else buffer_bps
+        multiplier = Decimal(1) + Decimal(effective_buffer) / Decimal(10000)
         return int(input_amount * multiplier * THORCHAIN_SCALE)
     if floor_mode == "1to1":
         return int(input_amount * THORCHAIN_SCALE)
@@ -395,15 +431,49 @@ def memo_stream_fields(memo: str) -> tuple[int, int, int]:
     return limit, interval, quantity
 
 
-def clp_leg(X: int, x: int, Y: int, min_slip_bps: int) -> int:
-    """Output of one pool leg, as THORNode's GetSwapCalc computes it (1e8 units)."""
-    if x <= 0:
+def thor_share(part: int, total: int, allocation: int) -> int:
+    """THORNode GetSafeShare: capped ratio, integer round-half-up (not truncation)."""
+    if part <= 0 or total <= 0 or allocation <= 0:
         return 0
-    slip_bps = round(x * 10000 / (x + X))
+    return (min(part, total) * allocation + total // 2) // total
+
+
+def _round_even(numerator: int, denominator: int) -> int:
+    quotient, remainder = divmod(numerator, denominator)
+    return quotient + int(2 * remainder > denominator or (2 * remainder == denominator and quotient % 2))
+
+
+def clp_leg_with_fee(X: int, x: int, Y: int, min_slip_bps: int) -> tuple[int, int]:
+    """THORNode v3.20.3 GetSwapCalc: (output, liquidity fee), both in output units."""
+    if x <= 0 or X <= 0 or Y <= 0:
+        return 0, 0
+    # LegacyDec.Quo rounds at 18 decimals, then CalcSwapSlip rounds to whole bps.
+    slip_dec = _round_even(x * 10**18, x + X)
+    slip_bps = _round_even(slip_dec * 10000, 10**18)
     if min_slip_bps > slip_bps:
-        fee = min_slip_bps * x * Y // 10000 // (x + X)
-        return max(0, x * Y // (x + X) - fee)
-    return x * X * Y // ((x + X) ** 2)
+        fee = thor_share(min_slip_bps, 10000, x * Y) // (x + X)
+        return max(0, x * Y // (x + X) - fee), fee
+    denominator = (x + X) ** 2
+    return x * X * Y // denominator, x * x * Y // denominator
+
+
+def clp_leg(X: int, x: int, Y: int, min_slip_bps: int) -> int:
+    return clp_leg_with_fee(X, x, Y, min_slip_bps)[0]
+
+
+def streaming_quantity_for(pools: PoolSpot, deposit: Decimal, floors: tuple[int, int],
+                           interval: int, requested: int = 0, max_length: int = 14400) -> int:
+    """Advanced queue max quantity for this L1 route (v3.20.3 getMaxSwapQuantity)."""
+    rune_sizes = [thor_share(floor, 10000, depth) for floor, depth in
+                  zip(floors, (pools.usdc_rune, pools.usdp_rune)) if floor > 0]
+    rune_size = min(rune_sizes) if rune_sizes else 0
+    # Pool.RuneValueInAsset uses round-half-up, then truncates to USDC's 6 decimals.
+    asset_size = ((rune_size * pools.usdc_asset + pools.usdc_rune // 2) // pools.usdc_rune
+                  if pools.usdc_rune > 0 else 0)
+    asset_size = asset_size // 100 * 100
+    maximum = max(1, int(deposit * THORCHAIN_SCALE) // asset_size) if asset_size else max(1, requested)
+    maximum = max(1, min(maximum, max_length // max(1, interval)))
+    return min(requested, maximum) if requested > 0 else maximum
 
 
 def simulate_streaming_fill(
@@ -411,44 +481,56 @@ def simulate_streaming_fill(
     deposit: int,
     quantity: int,
     trade_target: int,
-    min_slip_bps: int,
+    min_slip_bps: int | tuple[int, int],
     affiliate_bps: int,
     outbound_fee: int,
 ) -> tuple[int, int]:
-    """Replay a rapid streaming USDC -> RUNE -> USDP swap against a pool snapshot.
+    """Replay advanced-queue USDC -> RUNE -> USDP slices against a pool snapshot.
 
-    Follows THORNode's StreamingSwap.NextSize sizing and the per-sub-swap price-limit
+    Follows THORNode v3.20.3 MsgSwap.NextSize sizing and the per-sub-swap price-limit
     check (emit minus that sub-swap's share of the outbound fee must reach its share
     of the remaining target). Assumes nobody trades the pools back between sub-swaps,
-    so each fill pushes the USDP price against the next one; with a ~60k USDP pool
-    that is what stopped 0xce981330... after 11 of 1,637 sub-swaps.
+    so each fill pushes the USDP price against the next one. This is a conditional
+    snapshot estimate, not a forecast of arbitrage or competing queue activity.
 
-    Returns (USDC filled, USDP emitted before the outbound fee), in 1e8 units.
+    Returns (USDC filled, USDP after the affiliate skim but before outbound fee).
+    The current advanced queue takes the affiliate fee at outbound settlement;
+    the price-limit check and remaining-target state use gross emitted USDP.
+    Outbound fees are held at the supplied snapshot estimate.
     """
     Xa, Xr = pools.usdc_asset, pools.usdc_rune
     Yr, Ya = pools.usdp_rune, pools.usdp_asset
+    source_floor, target_floor = min_slip_bps if isinstance(min_slip_bps, tuple) else (min_slip_bps, min_slip_bps)
     quantity = max(1, quantity)
     fee_share = outbound_fee // quantity
     filled = emitted = 0
     for count in range(quantity):
-        size = deposit // quantity
-        if filled + size > deposit or count + 1 >= quantity:
-            size = deposit - filled
+        size = deposit // quantity + int(count < deposit % quantity)
+        size = min(size, deposit - filled)
         if size <= 0:
             break
-        target = size * max(0, trade_target - emitted) // (deposit - filled)
-        x = size - size * affiliate_bps // 10000
-        rune = clp_leg(Xa, x, Xr, min_slip_bps)
-        emit = clp_leg(Yr, rune, Ya, min_slip_bps)
-        if emit - fee_share < target:
+        target = thor_share(size, deposit - filled, max(0, trade_target - emitted))
+        rune, source_fee = clp_leg_with_fee(Xa, size, Xr, source_floor)
+        # swapOne rounds emission using pool.Decimals even on the asset->RUNE leg.
+        if 0 < pools.usdc_decimals < 8:
+            precision = 10 ** (8 - pools.usdc_decimals)
+            rune = rune // precision * precision
+        emit, target_fee = clp_leg_with_fee(Yr, rune, Ya, target_floor)
+        if 0 < pools.usdp_decimals < 8:
+            precision = 10 ** (8 - pools.usdp_decimals)
+            emit = emit // precision * precision
+        if emit <= 0 or (target > 0 and max(0, emit - fee_share) < target):
             # A skipped sub-swap leaves the pools as they were, so with nobody
             # trading them back every later sub-swap misses the limit too.
             break
-        Xa, Xr = Xa + x, Xr - rune
-        Yr, Ya = Yr + rune, Ya - emit
+        Xa, Xr = Xa + size, Xr - rune - source_fee
+        # swapOne removes the liquidity fee's RUNE value to the Reserve immediately.
+        # RuneDisbursementForAssetAdd is evaluated at post-swap asset depth.
+        target_fee_rune = ((Yr + rune) * target_fee + (Ya - emit) // 2) // (Ya - emit)
+        Yr, Ya = Yr + rune - target_fee_rune, Ya - emit
         filled += size
         emitted += emit
-    return filled, emitted
+    return filled, max(0, emitted - thor_share(affiliate_bps, 10000, emitted))
 
 
 def plan_deposit(
@@ -456,7 +538,7 @@ def plan_deposit(
     candidates: list[Decimal],
     sub_swap_size: Decimal,
     trade_target_for: Callable[[Decimal], int],
-    min_slip_bps: int,
+    min_slip_bps: int | tuple[int, int],
     affiliate_bps: int,
     usdp_outbound_fee: Decimal,
     usdc_refund_fee: Decimal,
@@ -472,6 +554,7 @@ def plan_deposit(
     scale = Decimal(THORCHAIN_SCALE)
     outbound_1e8 = int(usdp_outbound_fee * scale)
     best = None
+    best_filling = None
     for deposit in candidates:
         if deposit <= 0:
             continue
@@ -503,9 +586,13 @@ def plan_deposit(
         )
         if best is None or plan.net_profit > best.net_profit:
             best = plan
+        # A zero-fill refund is not an executable opportunity. Comparing it to
+        # actual fills hid every candidate behind the same refund+gas loss.
+        if filled > 0 and delivered > 0 and (best_filling is None or plan.net_profit > best_filling.net_profit):
+            best_filling = plan
     if best is None:
         raise SniperError("No deposit candidates to plan")
-    return best
+    return best_filling if best_filling is not None else best
 
 
 def deposit_candidates(max_amount: Decimal, min_amount: Decimal, count: int = 60) -> list[Decimal]:
@@ -540,8 +627,15 @@ def plan_for_quote(
     sub-swaps; this replays them against the snapshot instead. With exact=True
     only the quoted amount and its streaming quantity are evaluated.
     """
-    existing_limit, _, quantity = memo_stream_fields(quote.memo)
-    quantity = max(1, quantity)
+    if quote.fee_floor_error:
+        raise SniperError(f"Cannot authorize a deposit without live fee settings: {quote.fee_floor_error}")
+    if not quote.memo or quote.input_usdc <= 0:
+        raise SniperError("Quote is missing its memo or input amount; cannot model a deposit")
+    existing_limit, interval, quantity = memo_stream_fields(quote.memo)
+    if quantity <= 0:
+        quantity = int(quote.raw.get("max_streaming_quantity") or 0)
+    if quantity <= 0:
+        raise SniperError("Quote has no resolved streaming quantity; cannot model a deposit as one large swap")
     sub_swap_size = quote.input_usdc / quantity
 
     def trade_target_for(deposit: Decimal) -> int:
@@ -553,12 +647,17 @@ def plan_for_quote(
         [quote.input_usdc] if exact else deposit_candidates(max_amount, sub_swap_size),
         sub_swap_size,
         trade_target_for,
-        quote_fee_tier_bps(quote),
+        quote.fee_floors or quote_fee_tier_bps(quote),
         affiliate_bps,
         quote.fees_usdp.get("outbound", Decimal(0)),
         usdc_refund_fee,
         gas_usd,
-        quantity_for=(lambda _deposit: quantity) if exact else None,
+        quantity_for=(lambda _deposit: quantity) if exact else (
+            (lambda deposit: streaming_quantity_for(pools, deposit, quote.fee_floors, interval, quantity,
+                                                    quote.max_stream_length))
+            if quote.fee_floors is not None else
+            (lambda deposit: max(1, int(deposit / sub_swap_size)))
+        ),
     )
 
 
@@ -575,12 +674,17 @@ def slice_fill_rate(
     For a resting order the pool has time to be traded back between slices, so this is
     roughly the rate each slice needs when its turn comes. None if not reachable.
     """
+    if quote.fee_floor_error or not quote.memo or quote.input_usdc <= 0:
+        return None
     existing_limit, _, quantity = memo_stream_fields(quote.memo)
-    quantity = max(1, quantity)
+    if quantity <= 0:
+        quantity = int(quote.raw.get("max_streaming_quantity") or 0)
+    if quantity <= 0:
+        return None
     deposit = int(quote.input_usdc * THORCHAIN_SCALE)
     target = protected_limit(existing_limit, quote.input_usdc * target_rate, quote.input_usdc, floor_mode, buffer_bps)
     outbound = int(quote.fees_usdp.get("outbound", Decimal(0)) * THORCHAIN_SCALE)
-    tier = quote_fee_tier_bps(quote)
+    tier = quote.fee_floors or quote_fee_tier_bps(quote)
 
     def first_slice_fills(m: float) -> bool:
         # Move the USDP pool's price by m along its constant-product curve, as arbitrage would.
@@ -599,21 +703,108 @@ def slice_fill_rate(
 
 def describe_plan(plan: FillPlan) -> str:
     if plan.filled == 0:
-        return f"No deposit size covers the fixed fees at this pool state (best case {plan.net_profit:+.2f} USD)"
+        return (
+            "Price floor blocks all tested deposit sizes: modeled fill is 0 USDC; "
+            f"a no-fill refund would lose {-plan.net_profit:.2f} USD including gas. Waiting; no deposit sent."
+        )
     return (
-        f"Best deposit {plan.deposit:,.0f} USDC: fills {plan.filled:,.2f} before the limit -> "
+        f"Best tested deposit {plan.deposit:,.0f} USDC: fills {plan.filled:,.2f} before the limit -> "
         f"{plan.delivered:,.2f} USDP + {plan.refunded:,.2f} USDC refund, gas ${plan.gas_usd:.2f}, "
         f"modeled net {plan.net_profit:+.2f} USD"
     )
 
 
+def plan_clears_profit_check(plan: FillPlan, minimum: Decimal) -> bool:
+    """A refundable zero-fill plan must never authorize a live deposit."""
+    return plan.filled > 0 and plan.delivered > 0 and plan.net_profit >= minimum
+
+
+def resolve_sniper_settings(args: argparse.Namespace) -> None:
+    """Validate before connecting to RPCs and keep explicit trigger settings intact."""
+    if not args.amount.is_finite() or args.amount <= 0:
+        raise SniperError("Amount must be positive and finite")
+    if args.min_profit_bps is None:
+        args.min_profit_bps = {"1bps": Decimal(1), "1to1": Decimal(0)}.get(args.floor_mode, Decimal(2))
+    if not args.min_profit_bps.is_finite() or args.min_profit_bps < 0:
+        raise SniperError("Quote trigger buffer must be finite and non-negative")
+    if not args.min_net_profit.is_finite() or args.min_net_profit < 0:
+        raise SniperError("Minimum modeled net profit must be finite and non-negative")
+    if not math.isfinite(args.poll_interval) or args.poll_interval <= 0:
+        raise SniperError("Poll interval must be positive and finite")
+    if args.interval < 0 or args.quantity < 0 or args.floor_buffer_bps < 0:
+        raise SniperError("Streaming settings and slice floor buffer cannot be negative")
+    if not 0 <= args.slippage_bps < 10000 or not 0 <= args.affiliate_bps <= 1000:
+        raise SniperError("Invalid slippage or affiliate basis points")
+    if args.min_usdp is None:
+        args.min_usdp = (args.amount * (Decimal(10000) + args.min_profit_bps) / Decimal(10000)).quantize(Decimal("0.0001"))
+    if not args.min_usdp.is_finite() or args.min_usdp <= 0:
+        raise SniperError("Quote trigger output must be positive and finite")
+
+
 def quote_fee_tier_bps(quote: QuoteResult) -> int:
-    """Per-leg minimum slip fee implied by a quote's liquidity fee (two legs)."""
+    """Fallback average fee estimate; includes price impact, not an exact minimum."""
     liquidity = quote.fees_usdp.get("liquidity", Decimal(0))
     gross = quote.expected_usdp + liquidity + quote.fees_usdp.get("outbound", Decimal(0)) + quote.fees_usdp.get("affiliate", Decimal(0))
     if gross <= 0:
         return 0
     return int((liquidity / (2 * gross) * 10000).to_integral_value())
+
+
+def load_quote_fee_floors(client: ThorClient, quote: QuoteResult, affiliate: str, affiliate_bps: int) -> None:
+    """Resolve live L1 floors, including master switch and TOR-anchor fallback."""
+    quote.fee_floor_error = None
+    try:
+        cached_config = client.network_fee_config
+        if cached_config is None or time.monotonic() - cached_config[0] >= 60:
+            constants = client.get("constants")["int_64_values"]
+            config = {key.upper(): int(value) for key, value in constants.items()}
+            config.update({key.upper(): int(value) for key, value in client.get("mimir").items() if int(value) >= 0})
+            for key in ("L1SLIPMINBPS", "L1DYNAMICFEEENABLED", "STREAMINGSWAPMAXLENGTH"):
+                if key not in config:
+                    raise SniperError(f"Missing network fee setting {key}")
+            client.network_fee_config = (time.monotonic(), config)
+        else:
+            config = cached_config[1]
+        stable_pair = all(config.get("TORANCHOR-" + asset.replace(".", "-"), 0) > 0
+                          for asset in (USDC_ASSET, USDP_ASSET))
+        base_floor = config.get("STABLESLIPMINBPS", 0) if stable_pair else 0
+        base_floor = base_floor or config["L1SLIPMINBPS"]
+        quote.fee_floors = (base_floor, base_floor)
+        quote.max_stream_length = config["STREAMINGSWAPMAXLENGTH"]
+    except Exception as exc:
+        quote.fee_floor_error = str(exc)
+        logger.warning("Network fee settings unavailable; deposit modeling is blocked: %s", exc)
+        return
+    if (affiliate_bps <= 0 or affiliate.lower() in ("none", "direct")
+            or config["L1DYNAMICFEEENABLED"] != 1
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", affiliate)):
+        return
+    key = affiliate.lower()
+    cached = client.fee_floor_cache.get(key)
+    if cached is not None and time.monotonic() - cached[0] < 60:
+        quote.fee_floors = cached[1] if cached[1] is not None else quote.fee_floors
+        return
+    floors = None
+    try:
+        data = client.get(f"dynamic_l1_fees/{key}")
+        if str(data.get("whitelist_state")) == "1":
+            by_asset = {}
+            for row in data.get("pairs") or []:
+                pair = str(row.get("pair") or "").upper().split("|")
+                if "THOR.RUNE" in pair:
+                    value = int(row["dynamic_bps"])
+                    if 0 <= value <= 10000:
+                        for asset in pair:
+                            by_asset[asset] = value
+            if USDC_ASSET in by_asset and USDP_ASSET in by_asset:
+                floors = (by_asset[USDC_ASSET], by_asset[USDP_ASSET])
+                logger.info("Live minimum slip fees: USDC->RUNE %s bps; RUNE->USDP %s bps", *floors)
+    except Exception as exc:
+        quote.fee_floor_error = str(exc)
+        logger.warning("Dynamic fee lookup unavailable; deposit modeling is blocked: %s", exc)
+        return
+    client.fee_floor_cache[key] = (time.monotonic(), floors)
+    quote.fee_floors = floors if floors is not None else quote.fee_floors
 
 
 def execute_deposit(
@@ -749,7 +940,10 @@ def broadcast_transaction(w3: Web3, signed_tx: Any, allow_public_fallback: bool 
                 data=req_data,
                 headers={"Content-Type": "application/json", "User-Agent": "arbbot-flashbots/1.0"},
             )
-            with urlopen(req, timeout=10.0) as resp:
+            fb_kwargs = {"timeout": 10.0}
+            if SSL_CONTEXT is not None:
+                fb_kwargs["context"] = SSL_CONTEXT
+            with urlopen(req, **fb_kwargs) as resp:
                 resp_json = json.loads(resp.read().decode("utf-8"))
             if not resp_json.get("error") and str(resp_json.get("result", "")).lower() == tx_hash.lower():
                 logger.info("[Flashbots Protect] Accepted: %s", resp_json["result"])
@@ -835,29 +1029,35 @@ def monitor_outbound(
 
 
 def run_sniper(args: argparse.Namespace) -> int:
-    if args.min_usdp is None:
-        args.min_usdp = (args.amount * (Decimal(10000) + args.min_profit_bps) / Decimal(10000)).quantize(Decimal("0.0001"))
+    try:
+        resolve_sniper_settings(args)
+    except SniperError as exc:
+        logger.error("Invalid daemon settings: %s", exc)
+        return 1
     # Deposits get resized to what the pool can absorb, so keep the target as a rate.
     target_rate = args.min_usdp / args.amount
 
     if args.resting:
-        # Polls until the rate lets slices fill, places one long stream, then exits;
-        # the inspector tracks the ~24h stream, so don't block on delivery.
+        # Poll until slices can fill, place one stream, then exit after confirmation.
         args.no_monitor = True
-        args.interval = args.interval or RESTING_INTERVAL
-        args.quantity = args.quantity or RESTING_QUANTITY
 
     logger.info("================================================================")
     logger.info("           THORChain USDC -> USDP Sniper Engine                ")
     logger.info("================================================================")
     logger.info("Input Amount:       %s USDC", args.amount)
     logger.info("Min Trigger Output: %s USDP (+%.1f bps)", args.min_usdp, float((args.min_usdp - args.amount) / args.amount * 10000))
+    if args.resting:
+        logger.info("Immediate net-profit check: SKIPPED in resting mode; settlement fees, refunds and gas can leave a loss")
+    else:
+        logger.info("Minimum modeled net profit: %s USD after settlement, refund fees and wallet gas", args.min_net_profit)
+    logger.info("Slice price floor: %s (buffer %s bps); final wallet premium is not guaranteed", args.floor_mode, args.floor_buffer_bps)
+    logger.info("Pool model: advanced queue; no outside trades between slices; affiliate skim at settlement; outbound fee held at snapshot estimate")
     logger.info("Poll Interval:      %s seconds", args.poll_interval)
     logger.info("Slippage Tolerance: %s bps", args.slippage_bps)
     logger.info("Affiliate:          %s (%s bps)", args.affiliate, args.affiliate_bps)
     logger.info("Mode:               %s", "LIVE EXECUTION" if args.live else "SIMULATION / DRY-RUN")
     if args.resting:
-        logger.info("Order Type:         RESTING (1 sub-swap every %s blocks x %s)", args.interval, args.quantity)
+        logger.info("Order Type:         RESTING (1 sub-swap every %s blocks; slices: %s)", args.interval, args.quantity or "network maximum")
     logger.info("================================================================")
 
     thor_client = ThorClient(base_url=args.base_url)
@@ -897,16 +1097,17 @@ def run_sniper(args: argparse.Namespace) -> int:
             spendable = Decimal(str(usdc_bal)).to_integral_value(rounding="ROUND_FLOOR")
             # Only the capacity planner treats --amount as a ceiling; elsewhere it is the deposit.
             if args.no_capacity_check or args.resting or spendable < 1:
-                logger.error(
-                    "Insufficient USDC balance (Have %s USDC, Need %s USDC) for live execution!",
+                logger.info(
+                    "USDC balance %s is below requested %s USDC. Monitoring pool conditions while waiting for balance to reach %s USDC before live execution.",
                     usdc_bal,
                     args.amount,
+                    args.amount,
                 )
-                return 1
-            # --amount is only the largest deposit the fill-capacity check may choose.
-            logger.warning("USDC balance %s is below --amount %s; capping deposits at %s USDC.", usdc_bal, args.amount, spendable)
-            args.amount = spendable
-            args.min_usdp = args.amount * target_rate
+            else:
+                # --amount is only the largest deposit the fill-capacity check may choose.
+                logger.warning("USDC balance %s is below --amount %s; capping deposits at %s USDC.", usdc_bal, args.amount, spendable)
+                args.amount = spendable
+                args.min_usdp = args.amount * target_rate
         if eth_bal < w3.to_wei(0.003, "ether"):
             logger.warning("Low ETH balance for gas! (Current: %s ETH)", w3.from_wei(eth_bal, "ether"))
 
@@ -964,10 +1165,9 @@ def run_sniper(args: argparse.Namespace) -> int:
             gas_usd = Decimal("2")
         return refund_fee, gas_usd
 
-    # Main monitoring loop with dual spot-correlation & direct snipe engine
+    # Poll current pools for modeling, respecting the quote endpoint's cooldown.
     logger.info("Starting live rate monitoring (Amount: %s USDC, Target: %s USDP)...", args.amount, args.min_usdp)
     poll_count = 0
-    estimated_fee_spread = Decimal("9.40") * (args.amount / Decimal("10000"))
     rate_limited_until = 0.0
     last_wait_log = float("-inf")
 
@@ -977,34 +1177,17 @@ def run_sniper(args: argparse.Namespace) -> int:
 
         # Step 1: Query spot pool rate (1 USDC -> USDP via RUNE CLP pools)
         spot_info = None
-        predicted_out = None
         try:
             spot_info = fetch_pool_spot_rate(thor_client)
-            gross = args.amount * spot_info.spot_rate
-            predicted_out = gross - estimated_fee_spread
         except Exception as exc:
             logger.debug("Spot rate check error: %s", exc)
 
-        # Step 2: Rate limit check & correlation probe
+        # Step 2: A favorable spot rate must not bypass an HTTP 429 cooldown.
         is_rate_limited = (now < rate_limited_until)
-        spot_target = (args.min_usdp + estimated_fee_spread) / args.amount if spot_info else Decimal("1.0020")
 
         should_fetch_quote = not is_rate_limited
-        if is_rate_limited and predicted_out is not None:
-            # If in rate-limit cooldown, only probe direct quote when spot rate predicts target is in reach
-            if predicted_out >= (args.min_usdp - Decimal("0.5")):
-                should_fetch_quote = True
-                logger.info("🎯 Spot correlation triggered quote probe! Spot=%s, Predicted=%s USDP", spot_info.spot_rate, predicted_out)
-
-        if not should_fetch_quote and spot_info is not None:
-            diff_from_spot_target = spot_info.spot_rate - spot_target
-            logger.info(
-                "Rate-Limit Backoff | Spot: %s (Target: %s | %+.6f) | Est Output: %s USDP | Waiting...",
-                spot_info.spot_rate.quantize(Decimal("0.000001")),
-                spot_target.quantize(Decimal("0.000001")),
-                diff_from_spot_target,
-                predicted_out.quantize(Decimal("0.01")),
-            )
+        if not should_fetch_quote:
+            logger.info("Rate-limit cooldown: %.1fs remaining; waiting without requesting another quote.", rate_limited_until - now)
             time.sleep(args.poll_interval)
             continue
 
@@ -1012,21 +1195,17 @@ def run_sniper(args: argparse.Namespace) -> int:
         try:
             quote_raw = thor_client.get("quote/swap", params)
             quote = parse_quote(quote_raw, args.amount)
-
-            # Calibrate dynamic fee spread from live quote
-            if spot_info is not None and spot_info.spot_rate > 0:
-                actual_spread = (args.amount * spot_info.spot_rate) - quote.expected_usdp
-                if actual_spread > 0:
-                    estimated_fee_spread = actual_spread
+            quote.height = thor_client.response_heights.get("quote/swap")
+            load_quote_fee_floors(thor_client, quote, args.affiliate, affiliate_bps)
 
             yield_bps = (quote.expected_usdp - args.amount) / args.amount * 10000
             diff_from_target = quote.expected_usdp - args.min_usdp
 
-            spot_prefix = f"Spot: {spot_info.spot_rate:.6f} | " if spot_info else ""
+            spot_prefix = f"Spot: {spot_info.spot_rate:.6f} (pool block {spot_info.height or 'unknown'}) | " if spot_info else ""
             status_str = (
-                f"Quote #{poll_count}: {spot_prefix}{args.amount:,.2f} USDC -> {quote.expected_usdp:,.4f} USDP "
+                f"Full-fill quote #{poll_count} (estimate, not executable profit): {spot_prefix}{args.amount:,.2f} USDC -> {quote.expected_usdp:,.4f} USDP "
                 f"({yield_bps:+.1f} bps | {diff_from_target:+.2f} USDP vs target | Slip: {args.slippage_bps} bps) "
-                f"| Est Time: {quote.total_swap_seconds}s"
+                f"| Est Time: {quote.total_swap_seconds}s | Quote block: {quote.height or 'unknown'}"
             )
 
             floor_mode_val = getattr(args, "floor_mode", "2bps")
@@ -1038,6 +1217,7 @@ def run_sniper(args: argparse.Namespace) -> int:
                 # Place only while the rate lets slices fill: an order placed into a low rate
                 # can sit unfilled and still pay the outbound and refund fees.
                 _, interval, quantity = memo_stream_fields(quote.memo)
+                quantity = quantity or int(quote.raw.get("max_streaming_quantity") or 0)
                 fill_rate = None
                 if spot_info is not None:
                     fill_rate = slice_fill_rate(
@@ -1089,18 +1269,20 @@ def run_sniper(args: argparse.Namespace) -> int:
                 )
                 plan = plan_for_quote(spot_info, quote, args.amount, **plan_args)
                 logger.info("%s | %s", status_str, describe_plan(plan))
-                if plan.net_profit >= args.min_net_profit and plan.deposit != args.amount:
+                if plan_clears_profit_check(plan, args.min_net_profit) and plan.deposit != args.amount:
                     # The memo's streaming quantity, vault and expiry depend on the amount: re-quote it.
                     sized_params = dict(params, amount=int(plan.deposit * THORCHAIN_SCALE))
                     sized_quote = parse_quote(thor_client.get("quote/swap", sized_params), plan.deposit)
+                    sized_quote.height = thor_client.response_heights.get("quote/swap")
+                    load_quote_fee_floors(thor_client, sized_quote, args.affiliate, affiliate_bps)
                     plan = plan_for_quote(spot_info, sized_quote, plan.deposit, exact=True, **plan_args)
                     logger.info("Re-quoted sized deposit: %s", describe_plan(plan))
                     quote = sized_quote
-                if plan.net_profit >= args.min_net_profit:
+                if plan_clears_profit_check(plan, args.min_net_profit):
                     trade = (plan.deposit, quote, plan.deposit * target_rate)
                 else:
                     logger.info(
-                        "Not sending: modeled net %+.2f USD is below --min-net-profit %s USD.",
+                        "Waiting for profitable immediate fills: modeled net %+.2f USD; required %s USD. Full-fill quote surplus is not the decision. No deposit sent.",
                         plan.net_profit,
                         args.min_net_profit,
                     )
@@ -1118,7 +1300,8 @@ def run_sniper(args: argparse.Namespace) -> int:
                     floor_mode=floor_mode_val,
                     buffer_bps=buffer_bps_val,
                 )
-                logger.info("Floor Mode:     %s (limit buffer: +%s bps)", floor_mode_val, buffer_bps_val if floor_mode_val == "2bps" else ("0" if floor_mode_val == "1to1" else "target"))
+                effective_buf = buffer_bps_val if floor_mode_val == "2bps" else ("1" if floor_mode_val == "1bps" else ("0" if floor_mode_val == "1to1" else "target"))
+                logger.info("Floor Mode:     %s (limit buffer: +%s bps)", floor_mode_val, effective_buf)
                 logger.info("Original Memo:  %s", quote.memo)
                 logger.info("Protected Memo: %s", protected_memo)
 
@@ -1130,8 +1313,14 @@ def run_sniper(args: argparse.Namespace) -> int:
                         # The wallet can change during a long wait; a short balance reverts on-chain and wastes gas.
                         usdc_now = Decimal(usdc_contract.functions.balanceOf(operator_account.address).call()) / 10**USDC_DECIMALS
                         if usdc_now < trade_amount:
-                            logger.error("USDC balance is now %s, below the %s USDC deposit; not sending.", usdc_now, trade_amount)
-                            return 1
+                            logger.warning(
+                                "🎯 Target condition met, but USDC balance is %s USDC (need %s USDC). Waiting for balance to reach %s USDC before live deposit...",
+                                usdc_now,
+                                trade_amount,
+                                trade_amount,
+                            )
+                            time.sleep(args.poll_interval)
+                            continue
                         logger.info("Initiating live on-chain deposit execution...")
                         deposit_tx = execute_deposit(
                             w3=w3,
@@ -1196,7 +1385,7 @@ def run_sniper(args: argparse.Namespace) -> int:
         time.sleep(args.poll_interval)
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="THORChain USDC -> USDP Sniper Engine")
     parser.add_argument(
         "--amount",
@@ -1207,8 +1396,8 @@ def main() -> int:
     parser.add_argument(
         "--min-profit-bps",
         type=Decimal,
-        default=Decimal(os.getenv("THORCHAIN_SNIPER_MIN_PROFIT_BPS", "2")),
-        help="Minimum profit in basis points over input amount (default: 2 bps = +0.02%% to cover gas in & out, or THORCHAIN_SNIPER_MIN_PROFIT_BPS env)",
+        default=Decimal(os.environ["THORCHAIN_SNIPER_MIN_PROFIT_BPS"]) if os.getenv("THORCHAIN_SNIPER_MIN_PROFIT_BPS") else None,
+        help="Quote trigger buffer in bps, separate from net profit and the slice floor (default follows floor mode, or THORCHAIN_SNIPER_MIN_PROFIT_BPS env)",
     )
     parser.add_argument(
         "--min-usdp",
@@ -1238,35 +1427,36 @@ def main() -> int:
     parser.add_argument(
         "--floor-mode",
         type=str,
-        choices=["2bps", "1to1", "target"],
+        choices=["2bps", "1bps", "1to1", "target"],
         default=os.getenv("THORCHAIN_FLOOR_MODE", "2bps"),
-        help="Floor protection mode: '2bps' (at least +2 bps over input to cover gas in & out), '1to1' (exact 1:1 parity), or 'target' (strict target profit floor)",
+        help="Slice execution price floor: '2bps', '1bps', '1to1', or 'target'. Final wallet returns can be lower after fees",
     )
     parser.add_argument(
         "--floor-buffer-bps",
         type=int,
         default=int(os.getenv("THORCHAIN_FLOOR_BUFFER_BPS", "2")),
-        help="Floor buffer in basis points over input amount to cover gas costs (default: 2 bps)",
+        help="Slice price buffer in basis points; does not guarantee coverage of fixed fees or wallet gas (default: 2 bps)",
     )
-    parser.add_argument("--interval", type=int, default=0, help="Streaming swap interval (default: 0 = auto)")
-    parser.add_argument("--quantity", type=int, default=0, help="Streaming swap quantity (default: 0 = auto)")
+    parser.add_argument("--interval", type=int, default=RESTING_INTERVAL, help="Blocks between slices (default: 2; 0 requests rapid streaming)")
+    parser.add_argument("--quantity", type=int, default=RESTING_QUANTITY, help="Slice count (default: 0 requests the network maximum)")
     parser.add_argument("--destination", type=str, default=None, help="Destination Ethereum address (default: operator address)")
     parser.add_argument("--base-url", type=str, default=DEFAULT_THORNODE_BASE, help="THORNode API base URL")
     parser.add_argument("--rpc-url", type=str, default=None, help="Ethereum RPC URL (default: ETH_RPC_URL)")
     parser.add_argument("--live", action="store_true", help="Enable live on-chain execution")
     parser.add_argument("--confirm-live", type=str, default=None, help="Confirmation string required for live mode (EXECUTE_THOR_SNIPER)")
     parser.add_argument("--once", action="store_true", help="Quote once and exit")
+    parser.add_argument("--daemon", action="store_true", help="Identify a webapp-managed monitor, including a resting monitor; does not start it automatically")
     parser.add_argument(
         "--min-net-profit",
         type=Decimal,
         default=Decimal(os.getenv("THORCHAIN_SNIPER_MIN_NET_PROFIT", "1")),
-        help="Only deposit when the modeled profit after outbound fee, refund fee and gas is at least this many USD (default: 1)",
+        help="Immediate mode minimum modeled profit after outbound fee, refund fee and gas in USD (default: 1); skipped by --resting",
     )
     parser.add_argument(
         "--resting",
         action="store_true",
-        help=f"Place one resting order now: the full --amount streams one sub-swap every "
-        f"{RESTING_INTERVAL} blocks x {RESTING_QUANTITY} (~24h) under the floor, filling whenever "
+        help=f"Wait for the slice-price condition, then place one resting order: the full --amount streams one sub-swap every "
+        f"{RESTING_INTERVAL} blocks by default, using the maximum permitted slices under the floor, filling whenever "
         "the rate allows. Skips the fill-capacity trigger; exits once the deposit confirms",
     )
     parser.add_argument(
@@ -1281,8 +1471,11 @@ def main() -> int:
         help="Exit once the deposit confirms instead of waiting for USDP delivery",
     )
 
-    args = parser.parse_args()
-    return run_sniper(args)
+    return parser
+
+
+def main() -> int:
+    return run_sniper(build_parser().parse_args())
 
 
 if __name__ == "__main__":

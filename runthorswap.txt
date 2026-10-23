@@ -1,0 +1,1 @@
+.venv/bin/python3 thor_usdp_sniper.py --resting --interval 1 --quantity 14400 --amount 100000 --affiliate symbiosis --affiliate-bps 1 --floor-mode 2bps --live --confirm-live EXECUTE_THOR_SNIPER

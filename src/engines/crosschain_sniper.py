@@ -91,7 +91,7 @@ SOLANA_TOKEN_MINTS: dict[str, str] = {
     "USDG": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH",
 }
 
-EVM_QUOTER_SUPPORTED_TOKENS = {"USDC", "USDT", "PYUSD", "USDG", "USDS", "crvUSD"}
+EVM_QUOTER_SUPPORTED_TOKENS = {"USDC", "USDT", "PYUSD", "USDG", "USDS", "crvUSD", "USDP"}
 
 
 def get_chain_default_pairs(chain: str) -> tuple[str, ...]:
@@ -313,6 +313,11 @@ def route_minimum_allowed_threshold(route: Route | None = None) -> Decimal:
         return SOLANA_MINIMUM_ALLOWED_THRESHOLD
     if route and ("USDP" in (route.loan, route.intermediate) or "USDP" in route.pair):
         return USDP_MINIMUM_ALLOWED_THRESHOLD
+    if route and route.chain == "ethereum":
+        if os.getenv("ETH_ARB_MIN_PROFIT") or os.getenv("ETH_ARB_MIN_PROFIT_USD"):
+            return Decimal(os.getenv("ETH_ARB_MIN_ALLOWED_THRESHOLD", "0"))
+    if os.getenv("ETH_ARB_MIN_ALLOWED_THRESHOLD"):
+        return Decimal(os.environ["ETH_ARB_MIN_ALLOWED_THRESHOLD"])
     return MINIMUM_ALLOWED_THRESHOLD
 
 
@@ -342,7 +347,17 @@ def route_execution_floor(route: Route, base_threshold: Decimal) -> Decimal:
         else:
             effective_threshold = base_threshold
         return strict_execution_floor(effective_threshold, route)
-    if route.chain == "solana":
+    if route and route.chain == "ethereum":
+        raw_eth_thresh = (
+            os.getenv("ETH_ARB_MIN_PROFIT_USD")
+            or os.getenv("ETH_ARB_MIN_PROFIT")
+            or os.getenv("ETHEREUM_MIN_PROFIT_USD")
+        )
+        if raw_eth_thresh is not None:
+            effective_threshold = Decimal(raw_eth_thresh.strip())
+            return strict_execution_floor(effective_threshold, route)
+        return strict_execution_floor(base_threshold, route)
+    if route and route.chain == "solana":
         raw_sol_thresh = (
             os.getenv("SOL_ARB_MIN_PROFIT_USD")
             or os.getenv("SOLANA_MIN_PROFIT_USD")
@@ -774,6 +789,8 @@ def failure_category(detail: str) -> str:
     )
     if transient and "stable.com" in lowered:
         return "transient-stable"
+    if transient and ("enso" in lowered or "credit_quota" in lowered):
+        return "transient-enso"
     if transient and "okx" in lowered:
         return "transient-okx"
     if transient and "direct" in lowered:
@@ -904,6 +921,8 @@ def readable_failure(route: Route, detail: str, category: str) -> str:
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
         return f"Stable.com is temporarily unavailable{suffix}"
+    if category == "transient-enso":
+        return "Enso DEX API is temporarily unavailable (credits exhausted)"
     if category == "transient-jupiter":
         status = re.search(r"HTTP\s+(\d{3})", detail, re.IGNORECASE)
         suffix = f" (HTTP {status.group(1)})" if status else (f" ({detail})" if detail else "")
@@ -1049,6 +1068,7 @@ def outcome_label(outcome: Outcome) -> str:
         "capacity",
         "unstable-capacity",
         "transient-stable",
+        "transient-enso",
         "transient-jupiter",
         "transient-matcha",
         "transient-okx",
@@ -2742,6 +2762,7 @@ def _handle_route_outcome(
     if outcome.category.startswith("transient-"):
         dependency = {
             "transient-stable": f"stable:{route.chain}",
+            "transient-enso": f"enso:{route.chain}",
             "transient-jupiter": f"jupiter:{route.chain}",
             "transient-matcha": f"metamatcha:{route.chain}",
             "transient-okx": f"okx:{route.chain}",

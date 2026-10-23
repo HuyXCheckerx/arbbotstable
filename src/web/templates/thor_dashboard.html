@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>THORChain USDC → USDP Terminal | Real-time Sniper & Streaming Swap Dashboard</title>
-  <meta name="description" content="Institutional-grade monitoring, quoting, and execution dashboard for THORChain USDC to USDP cross-chain streaming swaps and profit sniping.">
+  <title>THOR / Swap workspace</title>
+  <meta name="description" content="Track THORChain swap progress, finalization, wallet delivery and refunds. Compare USDC, USDP and USDT quotes.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -25,8 +25,8 @@
           </svg>
         </div>
         <div>
-          <h1 class="brand-title">THOR<span class="highlight">SNIPER</span></h1>
-          <span class="brand-subtitle">USDC → USDP QUANT TERMINAL</span>
+          <h1 class="brand-title">THOR<span class="highlight"> / SWAPS</span></h1>
+          <span class="brand-subtitle">ETHEREUM · THORCHAIN</span>
         </div>
       </div>
       <div class="network-badge">
@@ -36,7 +36,8 @@
     </div>
 
     <div class="header-right">
-      <div class="operator-pill" id="operatorPill" title="Click to copy address">
+      <a href="/calculator" class="btn btn-secondary btn-sm">Arbitrage Calculator ↗</a>
+      <div class="operator-pill" id="operatorPill" title="Open wallet on Etherscan">
         <span class="operator-label">OPERATOR:</span>
         <span class="operator-address mono" id="operatorAddress">0x50dA...EC1C</span>
         <button class="icon-btn copy-btn" id="copyAddressBtn" aria-label="Copy Address">
@@ -52,19 +53,23 @@
           <svg class="spin-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
           </svg>
-          <span id="refreshTimer">Auto (3s)</span>
+          <span id="refreshTimer">Auto refresh</span>
         </button>
       </div>
     </div>
   </header>
 
   <main class="dashboard-container">
+    <section class="workspace-intro">
+      <div><p class="eyebrow">SWAP WORKSPACE</p><h2>Your swaps, clearly.</h2><p>Follow execution, track settlement, and compare your next trade.</p></div>
+      <div class="sync-status" id="syncStatus" role="status">Connecting to network…</div>
+    </section>
     <!-- Top Stats Row -->
     <section class="stats-row" aria-label="Wallet and Market Statistics">
       <div class="stat-card">
         <div class="stat-header">
           <span class="stat-title">USDC BALANCE</span>
-          <span class="stat-badge badge-cyan">INPUT ASSET</span>
+          <span class="stat-badge badge-cyan">WALLET</span>
         </div>
         <div class="stat-value mono" id="usdcBalance">--.-- <span class="unit">USDC</span></div>
         <div class="stat-footer">
@@ -76,7 +81,7 @@
       <div class="stat-card">
         <div class="stat-header">
           <span class="stat-title">USDP BALANCE</span>
-          <span class="stat-badge badge-green">TARGET ASSET</span>
+          <span class="stat-badge badge-green">WALLET</span>
         </div>
         <div class="stat-value mono" id="usdpBalance">--.-- <span class="unit">USDP</span></div>
         <div class="stat-footer">
@@ -87,14 +92,15 @@
 
       <div class="stat-card highlight-card" id="activeSwapSummaryCard">
         <div class="stat-header">
-          <span class="stat-title">ACTIVE SWAP STATUS</span>
-          <span class="stat-badge badge-pulsing" id="swapStatusBadge">STREAMING</span>
+          <span class="stat-title">SELECTED SWAP</span>
+          <span class="stat-badge badge-pulsing" id="swapStatusBadge">CONNECTING</span>
         </div>
         <div class="stat-value mono" id="swapProgressPct">--% <span class="unit" id="swapBlockRatio">(--/--)</span></div>
         <div class="stat-footer">
-          <span>Target Enforced:</span>
+          <span>Full-deposit memo target:</span>
           <span class="mono" id="swapTargetFloor">-- USDP</span>
         </div>
+        <p class="stat-floor-note">Applied to filled slices; final return can be lower after fees.</p>
       </div>
 
       <div class="stat-card">
@@ -102,7 +108,7 @@
           <span class="stat-title">POOL SPOT RATE</span>
           <span class="stat-badge badge-amber">THORCHAIN</span>
         </div>
-        <div class="stat-value mono" id="poolSpotRate">1.0000 <span class="unit">USDP/USDC</span></div>
+        <div class="stat-value mono" id="poolSpotRate">-- <span class="unit">USDP/USDC</span></div>
         <div class="stat-footer">
           <span>USDP Pool Depth:</span>
           <span class="mono" id="poolUsdpDepth">-- USDP</span>
@@ -116,27 +122,27 @@
       <section class="grid-card active-swap-section">
         <div class="card-header">
           <div class="card-title-group">
-            <h2 class="card-title">Deposit Transaction Inspector</h2>
-            <span class="card-subtitle">Inspect any deposit tx: live sub-swaps, skips, outbound delivery & refunds</span>
+            <h2 class="card-title" id="swapViewTitle">Current swap</h2>
+            <span class="card-subtitle"><span id="swapViewSubtitle">Automatically follows active deposits from your wallet.</span></span>
           </div>
           <div class="tx-input-wrapper">
-            <input type="text" id="customTxInput" placeholder="Enter Deposit Tx (0x...)" class="input-text-sm mono">
-            <button class="btn btn-primary btn-sm" id="loadTxBtn">Inspect</button>
-            <button class="btn btn-secondary btn-sm" id="clearTxBtn" title="Reset to live queue">Live</button>
+            <input type="text" id="customTxInput" placeholder="Find a transaction (0x…)" class="input-text-sm mono">
+            <button class="btn btn-primary btn-sm" id="loadTxBtn">Find</button>
+            <button class="btn btn-secondary btn-sm" id="clearTxBtn" title="Follow current wallet swaps">Current</button>
           </div>
         </div>
 
         <!-- Quick Select Chips for Transactions -->
         <div class="tx-quick-chips">
-          <span class="chips-label">Quick Inspect:</span>
-          <button type="button" class="tx-chip-btn active" id="chipLatestSwap" data-tx="0x3dfaf115a61e469fccb987a7977d32326e32edc5683f26b16775c6da826f0610">
-            <span>📌 Latest Swap (0x3dfa...0610)</span>
+          <span class="chips-label">VIEW</span>
+          <button type="button" class="tx-chip-btn" id="chipLatestSwap">
+            <span>Latest deposit</span>
           </button>
-          <button type="button" class="tx-chip-btn" id="chipPreviousSwap" data-tx="0xce98133010002812f44dd2e9239b5963c2e4e94c7d36a8590293e0dda145816e">
-            <span>⏮ Previous Swap (0xce98...816e)</span>
+          <button type="button" class="tx-chip-btn" id="chipPreviousSwap">
+            <span>Previous deposit</span>
           </button>
-          <button type="button" class="tx-chip-btn" id="chipLiveQueue" data-tx="">
-            <span>⚡ Live Queue</span>
+          <button type="button" class="tx-chip-btn active" id="chipLiveQueue" data-tx="">
+            <span>● Current swap</span>
           </button>
         </div>
 
@@ -144,75 +150,36 @@
           <!-- Monitored Deposit Banner -->
           <div class="swap-banner" id="swapBanner">
             <div class="swap-banner-left">
-              <span class="label">INSPECTED DEPOSIT TX:</span>
-              <a href="https://etherscan.io/tx/0x3dfaf115a61e469fccb987a7977d32326e32edc5683f26b16775c6da826f0610" target="_blank" rel="noopener noreferrer" class="tx-link mono" id="bannerTxLink">0x3dfa...0610 ↗</a>
+              <span class="label">DEPOSIT</span>
+              <a target="_blank" rel="noopener noreferrer" class="tx-link mono" id="bannerTxLink">Waiting for network…</a>
             </div>
             <div class="swap-banner-right">
-              <span class="badge badge-success" id="bannerStatusBadge">SETTLED & RECONCILED</span>
+              <span class="badge badge-success" id="bannerStatusBadge">CONNECTING</span>
             </div>
           </div>
 
-          <!-- Settlement Summary Card (Populated for Completed / Refunded Swaps) -->
-          <div class="settlement-card" id="settlementCard">
-            <div class="settlement-header">
-              <span class="settlement-title">Execution & Settlement Ledger</span>
-              <span class="badge badge-cyan" id="settlementTypeBadge">Partially Filled + Refund</span>
-            </div>
-
-            <div class="settlement-grid">
-              <div class="settlement-item inbound-item">
-                <span class="item-label">Inbound Deposit</span>
-                <span class="item-val mono highlight-cyan" id="settlementInbound">10,000.00 USDC</span>
-                <span class="item-sub">Ethereum L1 → THORChain Vault</span>
-              </div>
-              <div class="settlement-item delivery-item">
-                <span class="item-label">Delivered USDP Output</span>
-                <span class="item-val mono highlight-green" id="settlementDelivered">64.8680 USDP</span>
-                <span class="item-sub">
-                  Tx: <a href="#" target="_blank" rel="noopener noreferrer" class="link-mono" id="outboundTxLink">0x396d...2304 ↗</a>
-                </span>
-              </div>
-              <div class="settlement-item refund-item">
-                <span class="item-label">Returned USDC Refund</span>
-                <span class="item-val mono highlight-amber" id="settlementRefund">9,932.5543 USDC</span>
-                <span class="item-sub">
-                  Tx: <a href="#" target="_blank" rel="noopener noreferrer" class="link-mono" id="refundTxLink">0x8ca2...eaa4 ↗</a>
-                </span>
-              </div>
-              <div class="settlement-item affiliate-item">
-                <span class="item-label">Affiliate Fee (salactite)</span>
-                <span class="item-val mono highlight-purple" id="settlementAffiliate">0.01028 RUNE</span>
-                <span class="item-sub" id="settlementCollector">Accrued to owner</span>
-              </div>
-            </div>
-
-            <div class="settlement-reconciliation-bar">
-              <div class="recon-col">
-                <span class="recon-label">Actual USDC Swapped:</span>
-                <span class="recon-val mono" id="reconSwapped">67.4457 USDC</span>
-              </div>
-              <div class="recon-col">
-                <span class="recon-label">Effective Execution Rate:</span>
-                <span class="recon-val mono" id="reconRate">0.961781 USDP/USDC</span>
-              </div>
-              <div class="recon-col">
-                <span class="recon-label">Net Returned Capital:</span>
-                <span class="recon-val mono highlight-green" id="reconTotalBack">9,997.42 Total Value</span>
-              </div>
-            </div>
+          <div class="swap-message" id="swapMessage" role="status">Looking for current wallet swaps…</div>
+          <aside class="floor-notice" id="swapSyncWarning" role="status" hidden></aside>
+          <aside class="floor-notice" id="swapFloorNotice" hidden>
+            <strong>Slice price floor · final return can be lower</strong>
+            <p>The +2 bps setting sets the memo price target. Each slice is checked against the remaining target after prior fills. It does not guarantee +2 bps after settlement fees. If only a small portion fills, the full outbound fee still applies. Refund fees and wallet gas can leave the final return below your deposit.</p>
+          </aside>
+          <div class="timing-grid" id="swapTiming">
+            <div class="timing-primary"><span class="metric-title">TIME LEFT TO FINALIZE</span><strong class="mono" id="swapTimeLeft">—</strong><span class="metric-sub" id="swapTimeNote">Waiting for swap data</span></div>
+            <div><span class="metric-title" id="finalizeTimeLabel">EST. FINALIZATION</span><strong id="swapFinalizeAt">—</strong><span class="metric-sub" id="swapStartAt">Times shown in your local timezone</span></div>
+            <div><span class="metric-title">WALLET DELIVERY</span><strong id="swapDeliveryAt">—</strong><span class="metric-sub">Output and any refund settle separately</span></div>
           </div>
-
           <!-- Progress Bar Component -->
           <div class="progress-container" id="streamProgressContainer">
             <div class="progress-labels">
               <span class="progress-label-text" id="streamProgressLabel">Streaming Progress</span>
-              <span class="progress-percent mono" id="streamPercentText">100.0%</span>
+              <span class="progress-percent mono" id="streamPercentText">—</span>
             </div>
             <div class="progress-track">
-              <div class="progress-bar" id="streamProgressBar" style="width: 100%;"></div>
+              <div class="progress-bar" id="streamProgressBar" style="width: 0%;"></div>
             </div>
             <div class="progress-subtext">
-              <span id="blocksProcessed">1,637</span> of <span id="totalBlocks">1,637</span> blocks processed
+              <span id="blocksProcessed">—</span> of <span id="totalBlocks">—</span> slice attempts processed
             </div>
           </div>
 
@@ -220,65 +187,120 @@
           <div class="metrics-grid" id="streamMetricsGrid">
             <div class="metric-box">
               <span class="metric-title">Successful Fills</span>
-              <span class="metric-val mono highlight-green" id="subswapsSuccess">1</span>
+              <span class="metric-val mono highlight-green" id="subswapsSuccess">—</span>
               <span class="metric-sub" id="subswapsSuccessSub">Executed above limit</span>
             </div>
             <div class="metric-box">
               <span class="metric-title">Price-Floor Skips</span>
-              <span class="metric-val mono highlight-amber" id="subswapsSkipped">0</span>
+              <span class="metric-val mono highlight-amber" id="subswapsSkipped">—</span>
               <span class="metric-sub" id="subswapsSkippedSub">Preserved capital</span>
             </div>
             <div class="metric-box">
               <span class="metric-title">Swapped Capital</span>
-              <span class="metric-val mono" id="swappedCapital">67.45 USDC</span>
-              <span class="metric-sub" id="remainingCapital">9,932.55 USDC refunded</span>
+              <span class="metric-val mono" id="swappedCapital">—</span>
+              <span class="metric-sub" id="remainingCapital">—</span>
             </div>
             <div class="metric-box">
               <span class="metric-title">Outbound USDP</span>
-              <span class="metric-val mono highlight-cyan" id="outboundAccumulated">64.87 USDP</span>
-              <span class="metric-sub" id="effectiveRateText">Delivered to wallet</span>
+              <span class="metric-val mono highlight-cyan" id="outboundAccumulated">—</span>
+              <span class="metric-sub" id="effectiveRateText">Awaiting data</span>
             </div>
           </div>
 
           <!-- Consensus Stages Flow -->
           <div class="stages-flow">
-            <h3 class="stages-heading">Consensus Stage Pipeline</h3>
+            <h3 class="stages-heading">Swap journey</h3>
             <div class="stages-timeline">
-              <div class="stage-step completed" id="stageInboundObserved">
-                <div class="stage-circle">✓</div>
+              <div class="stage-step" id="stageInboundObserved">
+                <div class="stage-circle">·</div>
                 <div class="stage-label">Inbound Observed</div>
-                <div class="stage-detail" id="stageObservedDetail">111 / 111 validators</div>
+                <div class="stage-detail" id="stageObservedDetail">Awaiting observation</div>
               </div>
-              <div class="stage-step completed" id="stageInboundCounted">
-                <div class="stage-circle">✓</div>
-                <div class="stage-label">Conf Counted</div>
-                <div class="stage-detail">0s delay</div>
+              <div class="stage-step" id="stageInboundCounted">
+                <div class="stage-circle">·</div>
+                <div class="stage-label">Confirmations</div>
+                <div class="stage-detail">Ethereum confirmation</div>
               </div>
-              <div class="stage-step completed" id="stageInboundFinalised">
-                <div class="stage-circle">✓</div>
+              <div class="stage-step" id="stageInboundFinalised">
+                <div class="stage-circle">·</div>
                 <div class="stage-label">Inbound Finalised</div>
                 <div class="stage-detail">Deposit locked</div>
               </div>
-              <div class="stage-step completed" id="stageSwapStatus">
-                <div class="stage-circle">✓</div>
+              <div class="stage-step" id="stageSwapStatus">
+                <div class="stage-circle">·</div>
                 <div class="stage-label">Streaming Swap</div>
-                <div class="stage-detail" id="stageStreamingDetail">Stream ended</div>
+                <div class="stage-detail" id="stageStreamingDetail">Awaiting execution</div>
               </div>
-              <div class="stage-step completed" id="stageSwapFinalised">
-                <div class="stage-circle">✓</div>
+              <div class="stage-step" id="stageSwapFinalised">
+                <div class="stage-circle">·</div>
                 <div class="stage-label">Outbound Signed</div>
-                <div class="stage-detail" id="stageOutboundDetail">Delivered</div>
+                <div class="stage-detail" id="stageOutboundDetail">Awaiting delivery</div>
               </div>
+            </div>
+          </div>
+
+          <!-- Settlement Summary Card (Populated for Completed / Refunded Swaps) -->
+          <div class="settlement-card" id="settlementCard">
+            <div class="settlement-header">
+              <span class="settlement-title">Wallet settlement</span>
+              <span class="badge badge-cyan" id="settlementTypeBadge">Awaiting data</span>
+            </div>
+
+            <div class="settlement-grid">
+              <div class="settlement-item inbound-item">
+                <span class="item-label">Inbound Deposit</span>
+                <span class="item-val mono highlight-cyan" id="settlementInbound">—</span>
+                <span class="item-sub">Ethereum L1 → THORChain Vault</span>
+              </div>
+              <div class="settlement-item delivery-item">
+                <span class="item-label">USDP delivered</span>
+                <span class="item-val mono highlight-green" id="settlementDelivered">—</span>
+                <span class="item-sub">
+                  Tx: <a href="#" target="_blank" rel="noopener noreferrer" class="link-mono" id="outboundTxLink">—</a>
+                </span>
+              </div>
+              <div class="settlement-item refund-item">
+                <span class="item-label">USDC refunded</span>
+                <span class="item-val mono highlight-amber" id="settlementRefund">—</span>
+                <span class="item-sub">
+                  Tx: <a href="#" target="_blank" rel="noopener noreferrer" class="link-mono" id="refundTxLink">—</a>
+                </span>
+              </div>
+              <div class="settlement-item affiliate-item">
+                <span class="item-label">Affiliate fee</span>
+                <span class="item-val mono highlight-purple" id="settlementAffiliate">—</span>
+                <span class="item-sub" id="settlementCollector">Awaiting data</span>
+              </div>
+            </div>
+
+            <div class="settlement-reconciliation-bar">
+              <div class="recon-col">
+                <span class="recon-label" id="reconSwappedLabel">USDC swapped:</span>
+                <span class="recon-val mono" id="reconSwapped">—</span>
+              </div>
+              <div class="recon-col">
+                <span class="recon-label" id="reconRateLabel">Delivered rate after settlement fees:</span>
+                <span class="recon-val mono" id="reconRate">—</span>
+              </div>
+              <div class="recon-col">
+                <span class="recon-label">Returned tokens (at $1 parity):</span>
+                <span class="recon-val mono" id="reconTotalBack">—</span>
+              </div>
+            </div>
+            <div class="settlement-result" id="settlementResult" hidden>
+              <span class="item-label">Realized token difference · at $1 parity</span>
+              <strong class="mono" id="settlementTokenDifference">—</strong>
+              <span class="item-sub">Delivered USDP + refunded USDC − deposit. Settlement and refund fees are included; Ethereum wallet gas is excluded.</span>
             </div>
           </div>
 
           <!-- Live Sub-swap Telemetry Reason Box -->
           <div class="telemetry-box">
             <div class="telemetry-header">
-              <span class="telemetry-title">Consensus Audit Telemetry:</span>
-              <span class="badge badge-subtle" id="telemetryStatus">SETTLED</span>
+              <span class="telemetry-title">Network details</span>
+              <span class="badge badge-subtle" id="telemetryStatus">WAITING</span>
             </div>
-            <p class="telemetry-text mono" id="latestReasonText">Delivered 64.8680 USDP, refunded 9932.5543 USDC back to operator wallet.</p>
+            <p class="telemetry-text mono" id="latestReasonText">Waiting for network data.</p>
             <div class="memo-inspect-row">
               <span class="memo-inspect-label">Deposit Memo:</span>
               <code class="memo-inspect-text mono" id="inspectedMemoText">--</code>
@@ -291,15 +313,18 @@
       <section class="grid-card controls-section">
         <div class="card-header">
           <div class="tab-nav" role="tablist">
-            <button class="tab-btn active" data-tab="quoterTab" role="tab" aria-selected="true">Instant Quoter & Swap</button>
-            <button class="tab-btn" data-tab="sniperTab" role="tab" aria-selected="false">Autonomous Sniper Bot</button>
-            <button class="tab-btn" data-tab="limitTab" role="tab" aria-selected="false">Limit Orders</button>
+            <button class="tab-btn active" data-tab="quoterTab" role="tab" aria-selected="true">Quote &amp; swap</button>
+            <button class="tab-btn" data-tab="usdtQuoterTab" id="otherQuoteTabBtn" role="tab" aria-selected="false">USDP → USDC</button>
+            <button class="tab-btn" data-tab="sniperTab" role="tab" aria-selected="false">Automation</button>
+            <button class="tab-btn" data-tab="limitTab" role="tab" aria-selected="false">Protection</button>
           </div>
         </div>
 
         <div class="card-body">
           <!-- TAB 1: Instant Quoter & Live Swap -->
           <div class="tab-pane active" id="quoterTab">
+            <p class="panel-kicker">USDC <span>→</span> USDP <small>Ethereum</small></p>
+            <p class="panel-note">Preview a quote, then review a live swap before sending.</p>
             <form id="quoteForm" onsubmit="return false;">
               <div class="form-group">
                 <label for="quoteAmount" class="form-label">
@@ -319,7 +344,7 @@
 
               <div class="form-row">
                 <div class="form-group half">
-                  <label for="quoteSlippage" class="form-label">Slippage Tolerance</label>
+                  <label for="quoteSlippage" class="form-label">Target buffer</label>
                   <div class="input-suffix-group">
                     <input type="number" id="quoteSlippage" class="input-text" value="1" min="1" max="100">
                     <span class="suffix">bps (0.01%)</span>
@@ -336,31 +361,35 @@
 
               <div class="form-group">
                 <label for="quoteFloorMode" class="form-label">
-                  <span>Floor Protection Mode</span>
-                  <span class="form-label-right highlight-green">Recommended: +2 bps Gas Floor</span>
+                  <span>Slice execution price floor</span>
+                  <span class="form-label-right highlight-amber">Final premium is not guaranteed</span>
                 </label>
-                <select id="quoteFloorMode" class="input-select">
-                  <option value="2bps" selected>+2 bps Gas-Protected Floor (Limit = Input + 2 bps | Covers In/Out Gas)</option>
-                  <option value="1to1">1:1 Parity Floor (Limit = Input | Zero False Skips when Rate &ge; 1.0000)</option>
-                  <option value="target">Strict Profit Target Floor (Limit = Target Min Output)</option>
+                <select id="quoteFloorMode" class="input-select" aria-describedby="quoteFloorNotice">
+                  <option value="2bps" selected>+2 bps slice price · before settlement costs</option>
+                  <option value="1to1">1:1 slice price · before settlement costs</option>
+                  <option value="target">Target slice price · uses target buffer</option>
                 </select>
+                <aside class="floor-notice" id="quoteFloorNotice">
+                  <strong>+2 bps on fills is not +2 bps in your wallet</strong>
+                  <p>The +2 bps setting sets the memo price target. Each slice is checked against the remaining target after prior fills. It does not guarantee +2 bps after settlement fees. If only a small portion fills, the full outbound fee still applies. Refund fees and wallet gas can leave the final return below your deposit.</p>
+                </aside>
               </div>
 
               <div class="form-group">
                 <label for="quoteExecMode" class="form-label">
                   <span>Execution Mode</span>
-                  <span class="form-label-right">Resting fills over ~24h</span>
+                  <span class="form-label-right">Max slices · every 2 blocks</span>
                 </label>
                 <select id="quoteExecMode" class="input-select">
                   <option value="instant" selected>Instant: send now only if the fill-capacity check shows profit</option>
-                  <option value="resting">Resting order: 720 slices, one every 20 blocks (~24h), each under the floor</option>
+                  <option value="resting">Resting order: maximum permitted slices, one every 2 blocks, checked against the memo target</option>
                 </select>
               </div>
 
               <div class="form-group">
                 <label for="quoteAffiliateName" class="form-label">
                   <span>Affiliate Tag (THORName)</span>
-                  <span class="form-label-right highlight-green" id="affiliateLookupStatus">Whitelisted Tier-1: symbiosis (9 bps fees)</span>
+                  <span class="form-label-right highlight-green" id="affiliateLookupStatus">Verify current THORName settings</span>
                 </label>
                 <div class="input-suffix-group">
                   <input type="text" id="quoteAffiliateName" class="input-text mono" value="symbiosis" placeholder="Enter your THORName">
@@ -372,16 +401,17 @@
                 <button type="button" class="btn btn-secondary flex-1" id="getQuoteBtn">
                   <span>Get Live Quote</span>
                 </button>
-                <button type="button" class="btn btn-primary flex-1 glow-btn" id="openSwapModalBtn">
-                  <span>Execute Live Swap</span>
+                <button type="button" class="btn btn-primary flex-1 glow-btn" id="openSwapModalBtn" disabled>
+                  <span>Review swap</span>
                 </button>
               </div>
             </form>
 
+            <p class="panel-note" id="quoteMessage" role="status">Requesting a live quote…</p>
             <!-- Quote Result Card -->
-            <div class="quote-result-card" id="quoteResultCard">
+            <div class="quote-result-card" id="quoteResultCard" hidden>
               <div class="quote-result-header">
-                <span class="quote-result-title">Live THORChain Quote</span>
+                <span class="quote-result-title">Market estimate · assumes full fill</span>
                 <span class="profit-badge badge-neutral" id="quoteProfitBadge">-- bps</span>
               </div>
 
@@ -391,7 +421,7 @@
                   <span class="val mono highlight-cyan" id="quoteExpectedUsdp">--.--</span>
                 </div>
                 <div class="quote-stat">
-                  <span class="label">Net Profit / Loss:</span>
+                  <span class="label">Token difference if fully filled (before wallet gas):</span>
                   <span class="val mono" id="quoteNetProfit">--.--</span>
                 </div>
                 <div class="quote-stat">
@@ -433,6 +463,119 @@
             </div>
           </div>
 
+          <!-- Return-route quotes: USDP -> USDC and USDT -> USDP -->
+          <div class="tab-pane" id="usdtQuoterTab">
+            <div class="form-group"><label class="form-label" for="otherQuotePair">Quote pair</label><select class="input-select" id="otherQuotePair"><option value="usdp" selected>USDP → USDC</option><option value="usdt">USDT → USDP</option></select></div>
+            <p class="panel-note">Compare a return route. These pairs are quote-only.</p>
+            <form id="usdtQuoteForm" onsubmit="return false;">
+              <div class="form-group">
+                <label for="usdtQuoteAmount" class="form-label">
+                  <span id="otherQuoteInputLabel">Input amount (USDP)</span>
+                  <span class="form-label-right">Quote only: the sniper deposits USDC</span>
+                </label>
+                <div class="input-with-chips">
+                  <input type="number" id="usdtQuoteAmount" class="input-text" value="10000" min="10" step="1" required>
+                  <div class="chips-row">
+                    <button type="button" class="chip-btn" data-val="1000">$1k</button>
+                    <button type="button" class="chip-btn" data-val="5000">$5k</button>
+                    <button type="button" class="chip-btn active" data-val="10000">$10k</button>
+                    <button type="button" class="chip-btn" data-val="25000">$25k</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group half">
+                  <label for="usdtQuoteAffiliateName" class="form-label">Affiliate Tag (THORName)</label>
+                  <input type="text" id="usdtQuoteAffiliateName" class="input-text mono" value="symbiosis">
+                </div>
+                <div class="form-group half">
+                  <label for="usdtQuoteAffiliateBps" class="form-label">Affiliate Fee</label>
+                  <div class="input-suffix-group">
+                    <input type="number" id="usdtQuoteAffiliateBps" class="input-text" value="1" min="0" max="100">
+                    <span class="suffix">bps</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="usdtQuoteFloorMode" class="form-label">Minimum / slice execution price floor</label>
+                <select id="usdtQuoteFloorMode" class="input-select" aria-describedby="otherQuoteFloorNotice">
+                  <option value="market" selected>Market quote · slippage from estimated output</option>
+                  <option value="2bps">+2 bps slice price · final premium not guaranteed</option>
+                  <option value="1to1">1:1 slice price · final return can be lower</option>
+                </select>
+                <aside class="floor-notice" id="otherQuoteFloorNotice" hidden>
+                  <strong>Slice price floor · final return can be lower</strong>
+                  <p>The +2 bps setting sets the memo price target. Each slice is checked against the remaining target after prior fills. It does not guarantee +2 bps after settlement fees. If only a small portion fills, the full outbound fee still applies. Refund fees and wallet gas can leave the final return below your deposit.</p>
+                </aside>
+              </div>
+
+              <div class="form-group" id="otherQuoteSlippageGroup">
+                <label for="otherQuoteSlippage" class="form-label">Slippage tolerance (bps)</label>
+                <input type="number" id="otherQuoteSlippage" class="input-text" value="50" min="0" max="1000" step="1">
+                <p class="panel-note">50 bps = 0.5% below the estimated output, after quoted fees. Wallet gas is separate.</p>
+              </div>
+              <div class="button-row">
+                <button type="button" class="btn btn-primary flex-1" id="getUsdtQuoteBtn">
+                  <span>Get USDP → USDC quote</span>
+                </button>
+              </div>
+            </form>
+
+            <p class="panel-note" id="otherQuoteMessage" role="status">Select a pair and request a quote.</p>
+            <div class="quote-result-card" id="usdtQuoteResultCard" hidden>
+              <div class="quote-result-header">
+                <span class="quote-result-title" id="otherQuoteTitle">USDP → USDC quote</span>
+                <span class="profit-badge badge-neutral" id="usdtQuoteProfitBadge">-- bps</span>
+              </div>
+
+              <div class="quote-metrics-row">
+                <div class="quote-stat">
+                  <span class="label" id="otherQuoteOutputLabel">Market estimate (USDC):</span>
+                  <span class="val mono highlight-cyan" id="usdtQuoteExpected">--.--</span>
+                </div>
+                <div class="quote-stat">
+                  <span class="label">Token difference:</span>
+                  <span class="val mono" id="usdtQuoteNet">--.--</span>
+                </div>
+                <div class="quote-stat">
+                  <span class="label">Stream:</span>
+                  <span class="val mono" id="usdtQuoteStream">--</span>
+                </div>
+              </div>
+
+              <p class="panel-note" id="otherQuoteFloorStatus" role="status"></p>
+              <div class="fees-breakdown">
+                <div class="fee-item">
+                  <span>Minimum in memo:</span>
+                  <span class="mono" id="otherQuoteMinimum">—</span>
+                </div>
+                <div class="fee-item">
+                  <span>Pool Rate (before fees):</span>
+                  <span class="mono" id="usdtPoolRate">-- USDP/USDT</span>
+                </div>
+                <div class="fee-item">
+                  <span>Outbound Gas Fee:</span>
+                  <span class="mono" id="usdtFeeOutbound">-- USDP</span>
+                </div>
+                <div class="fee-item">
+                  <span>Liquidity Pool Fee:</span>
+                  <span class="mono" id="usdtFeeLiquidity">-- USDP</span>
+                </div>
+                <div class="fee-item">
+                  <span>Affiliate Fee:</span>
+                  <span class="mono" id="usdtFeeAffiliate">-- USDP</span>
+                </div>
+              </div>
+
+              <div class="memo-preview-box">
+                <span class="memo-label">Protected Swap Memo Preview:</span>
+                <code class="memo-code mono" id="usdtMemoText">--</code>
+              </div>
+            </div>
+          </div>
+
           <!-- TAB 2: Autonomous Sniper Bot -->
           <div class="tab-pane" id="sniperTab">
             <div class="sniper-status-banner">
@@ -447,25 +590,37 @@
 
             <div class="sniper-controls-form">
               <div class="form-group">
+                <label for="sniperExecutionMode" class="form-label">Daemon execution mode</label>
+                <select id="sniperExecutionMode" class="input-select" aria-describedby="sniperModeDescription">
+                  <option value="instant" selected>Immediate · require modeled net profit</option>
+                  <option value="resting">Resting stream · one deposit, then exit</option>
+                </select>
+                <p class="panel-note" id="sniperModeDescription">Immediate mode waits for profitable fills using the current pool snapshot.</p>
+              </div>
+              <div class="form-group">
                 <label for="sniperAmount" class="form-label">Sniper Input Amount (USDC)</label>
                 <input type="number" id="sniperAmount" class="input-text" value="10000">
               </div>
 
               <div class="form-group">
                 <label for="sniperFloorMode" class="form-label">
-                  <span>Floor Protection Mode</span>
-                  <span class="form-label-right highlight-green">Covers In/Out Gas</span>
+                  <span>Slice execution price floor</span>
+                  <span class="form-label-right highlight-amber">Final premium is not guaranteed</span>
                 </label>
-                <select id="sniperFloorMode" class="input-select">
-                  <option value="2bps" selected>+2 bps Gas-Protected Floor (Limit = Input + 2 bps)</option>
-                  <option value="1to1">1:1 Parity Floor (Execute sub-swaps whenever rate &ge; 1.0000)</option>
-                  <option value="target">Strict Profit Target Floor (min-profit-bps)</option>
+                <select id="sniperFloorMode" class="input-select" aria-describedby="sniperFloorNotice">
+                  <option value="2bps" selected>+2 bps slice price · before settlement costs</option>
+                  <option value="1to1">1:1 slice price · before settlement costs</option>
+                  <option value="target">Target slice price · uses trigger buffer</option>
                 </select>
+                <aside class="floor-notice" id="sniperFloorNotice">
+                  <strong>+2 bps on fills is not +2 bps in your wallet</strong>
+                  <p>The +2 bps setting sets the memo price target. Each slice is checked against the remaining target after prior fills. It does not guarantee +2 bps after settlement fees. If only a small portion fills, the full outbound fee still applies. Refund fees and wallet gas can leave the final return below your deposit.</p>
+                </aside>
               </div>
 
               <div class="form-row">
                 <div class="form-group half">
-                  <label for="sniperProfitBps" class="form-label">Trigger Profit Floor</label>
+                  <label for="sniperProfitBps" class="form-label">Quote trigger buffer</label>
                   <div class="input-suffix-group">
                     <input type="number" id="sniperProfitBps" class="input-text" value="2">
                     <span class="suffix">bps (+0.02%)</span>
@@ -480,6 +635,11 @@
                 </div>
               </div>
 
+              <div class="form-group" id="sniperMinNetProfitGroup">
+                <label for="sniperMinNetProfit" class="form-label">Minimum modeled net profit (USD at $1 parity)</label>
+                <input type="number" id="sniperMinNetProfit" class="input-text" value="1" min="0" step="0.01">
+                <p class="panel-note">After modeled settlement fees, refund fees and wallet gas. The immediate model assumes no external trades restore pool prices between slices.</p>
+              </div>
               <div class="form-row">
                 <div class="form-group half">
                   <label for="sniperAffiliateName" class="form-label">Affiliate Tag</label>
@@ -506,7 +666,7 @@
               <div class="info-alert">
                 <div class="alert-icon">ℹ</div>
                 <div class="alert-content">
-                  <strong>Zero-Capital Lock Monitoring</strong>: The sniper keeps your USDC safely in your wallet. It does not deposit into a vault until the exact block where THORChain pool yields $\ge$ your trigger profit.
+                  <strong>Funds stay in your wallet while waiting.</strong> Immediate mode checks modeled net profit; resting mode checks slice price and then locks the full deposit in a stream. Pool conditions can change before execution. Stop cannot cancel a stream already submitted on-chain.
                 </div>
               </div>
             </div>
@@ -514,10 +674,10 @@
 
           <!-- TAB 3: Limit Orders Explainer & Comparison -->
           <div class="tab-pane" id="limitTab">
-            <div class="limit-explainer">
-              <h3 class="explainer-heading">How THORChain Streaming Limit Orders Work</h3>
+            <div class="limit-explainer"><p class="explainer-text">The +2 bps setting sets the memo price target. Each slice is checked against the remaining target after prior fills. It does not guarantee +2 bps after settlement fees. If only a small portion fills, the full outbound fee still applies. Refund fees and wallet gas can leave the final return below your deposit. Quoted token differences assume $1 parity.</p>
+              <h3 class="explainer-heading">How price protection works</h3>
               <p class="explainer-text">
-                THORChain allows you to submit a <strong>Streaming Limit Swap</strong> directly to the Ethereum router with a hard price limit in the transaction memo:
+                THORChain allows you to submit a <strong>price-protected streaming swap</strong> directly to the Ethereum router with a hard price limit in the transaction memo:
               </p>
               <div class="memo-formula mono">
                 =:ETH.USDP:&lt;DEST&gt;:&lt;LIMIT&gt;/&lt;INTERVAL&gt;/&lt;QUANTITY&gt;:symbiosis:1
@@ -527,7 +687,7 @@
                 <div class="table-row table-head">
                   <span>Feature</span>
                   <span>Autonomous Sniper</span>
-                  <span>Streaming Limit Order</span>
+                  <span>Resting stream</span>
                 </div>
                 <div class="table-row">
                   <span class="feat-name">Funds Location</span>
@@ -546,8 +706,8 @@
                 </div>
                 <div class="table-row">
                   <span class="feat-name">Price Protection</span>
-                  <span class="highlight-green">100% floor enforced</span>
-                  <span class="highlight-green">100% floor enforced</span>
+                  <span class="highlight-green">Per-slice output limit</span>
+                  <span class="highlight-green">Per-slice output limit</span>
                 </div>
               </div>
             </div>
@@ -596,6 +756,10 @@
           </div>
         </div>
 
+        <aside class="floor-notice modal-floor-notice" id="modalFloorNotice">
+          <strong>Final +2 bps return is not guaranteed</strong>
+          <p>The memo floor applies to filled slices. A small partial fill still pays the full outbound fee, and refund fees and wallet gas can reduce your final return below the deposit.</p>
+        </aside>
         <div class="modal-summary-list">
           <div class="summary-item">
             <span>Order Type:</span>
@@ -603,14 +767,14 @@
           </div>
           <div class="summary-item">
             <span>Input Asset:</span>
-            <span class="mono highlight-cyan" id="modalInputAmount">10,000.00 USDC</span>
+            <span class="mono highlight-cyan" id="modalInputAmount">—</span>
           </div>
           <div class="summary-item">
-            <span>Minimum Output (Floor):</span>
-            <span class="mono highlight-green" id="modalMinOutput">-- USDP</span>
+            <span>Full-deposit memo target (scaled to fills):</span>
+            <span class="mono" id="modalMinOutput">-- USDP</span>
           </div>
           <div class="summary-item">
-            <span>Slippage Limit:</span>
+            <span>Target buffer:</span>
             <span class="mono" id="modalSlippage">5 bps (0.05%)</span>
           </div>
           <div class="summary-item">
@@ -636,6 +800,6 @@
     </div>
   </dialog>
 
-  <script src="/static/thor_dashboard.js"></script>
+  <script src="/static/thor_dashboard.js?v=20261023-swap-status"></script>
 </body>
 </html>

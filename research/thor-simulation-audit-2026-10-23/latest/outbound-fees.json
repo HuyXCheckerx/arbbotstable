@@ -1,0 +1,360 @@
+{
+  "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/outbound_fees?height=28361962",
+  "fetched_at": "2026-10-23T07:33:16.830356+00:00",
+  "headers": {
+    "Server": "fasthttp",
+    "Date": "Fri, 23 Oct 2026 07:33:16 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "10812",
+    "Grpc-Metadata-Content-Type": "application/grpc+cosmos-sdk-grpc-codec",
+    "Grpc-Metadata-X-Cosmos-Block-Height": "28361962",
+    "X-Server-Time": "1792740796",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, solana-client, x-client-id, grpc-metadata-x-cosmos-block-height, x-server-time, Origin, X-Requested-With, Accept, X-Node-Type",
+    "Access-Control-Expose-Headers": "grpc-metadata-x-cosmos-block-height, x-server-time",
+    "Connection": "close"
+  },
+  "data": [
+    {
+      "asset": "THOR.RUNE",
+      "outbound_fee": "0"
+    },
+    {
+      "asset": "AVAX.AVAX",
+      "outbound_fee": "2678820",
+      "fee_withheld_rune": "1602335760551",
+      "fee_spent_rune": "112572785905",
+      "surplus_rune": "1489762974646",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "AVAX.SOL-0XFE6B19286885A4F7F55ADAD09C3CD1F906D2478F",
+      "outbound_fee": "193326",
+      "fee_withheld_rune": "682286358343",
+      "fee_spent_rune": "9593964385",
+      "surplus_rune": "672692393958",
+      "dynamic_multiplier_basis_points": "9886"
+    },
+    {
+      "asset": "AVAX.USDC-0XB97EF9EF8734C71904D8002F8B6BC66DD9C48A6E",
+      "outbound_fee": "24996200",
+      "fee_withheld_rune": "857125403348",
+      "fee_spent_rune": "95474945137",
+      "surplus_rune": "761650458211",
+      "dynamic_multiplier_basis_points": "7227"
+    },
+    {
+      "asset": "AVAX.USDT-0X9702230A8EA53601F5CD2DC00FDBC13D4DF4A8C7",
+      "outbound_fee": "25006700",
+      "fee_withheld_rune": "773957423618",
+      "fee_spent_rune": "53582875289",
+      "surplus_rune": "720374548329",
+      "dynamic_multiplier_basis_points": "8461"
+    },
+    {
+      "asset": "BASE.ETH",
+      "outbound_fee": "10401",
+      "fee_withheld_rune": "1049474665983",
+      "fee_spent_rune": "198854355295",
+      "surplus_rune": "850620310688",
+      "dynamic_multiplier_basis_points": "4566"
+    },
+    {
+      "asset": "BASE.USDC-0X833589FCD6EDB6E08F4C7C32D4F71B54BDA02913",
+      "outbound_fee": "24989300",
+      "fee_withheld_rune": "1148104577831",
+      "fee_spent_rune": "201286857589",
+      "surplus_rune": "946817720242",
+      "dynamic_multiplier_basis_points": "1690"
+    },
+    {
+      "asset": "BASE.VVV-0XACFE6019ED1A7DC6F7B508C02D1B04EC88CC21BF",
+      "outbound_fee": "953980",
+      "fee_withheld_rune": "33127899884",
+      "fee_spent_rune": "25743972906",
+      "surplus_rune": "7383926978",
+      "dynamic_multiplier_basis_points": "29779"
+    },
+    {
+      "asset": "BCH.BCH",
+      "outbound_fee": "87377",
+      "fee_withheld_rune": "977998593951",
+      "fee_spent_rune": "47247111743",
+      "surplus_rune": "930751482208",
+      "dynamic_multiplier_basis_points": "2171"
+    },
+    {
+      "asset": "BSC.BNB",
+      "outbound_fee": "33564",
+      "fee_withheld_rune": "9041526747729",
+      "fee_spent_rune": "2535468727015",
+      "surplus_rune": "6506058020714",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "BSC.BTCB-0X7130D2A12B9BCBFAE4F2634D864A1EE1CE3EAD9C",
+      "outbound_fee": "306",
+      "fee_withheld_rune": "716794187079",
+      "fee_spent_rune": "20869177795",
+      "surplus_rune": "695925009284",
+      "dynamic_multiplier_basis_points": "9192"
+    },
+    {
+      "asset": "BSC.BUSD-0XE9E7CEA3DEDCA5984780BAFC599BD69ADD087D56",
+      "outbound_fee": "25109119",
+      "fee_withheld_rune": "702250386685",
+      "fee_spent_rune": "19972313778",
+      "surplus_rune": "682278072907",
+      "dynamic_multiplier_basis_points": "9600"
+    },
+    {
+      "asset": "BSC.ETH-0X2170ED0880AC9A755FD29B2688956BD959F933F8",
+      "outbound_fee": "10401",
+      "fee_withheld_rune": "728130839774",
+      "fee_spent_rune": "27002263737",
+      "surplus_rune": "701128576037",
+      "dynamic_multiplier_basis_points": "9036"
+    },
+    {
+      "asset": "BSC.TWT-0X4B0F1812E5DF2A09796481FF14017E6005508003",
+      "outbound_fee": "40156020",
+      "fee_withheld_rune": "950780552882",
+      "fee_spent_rune": "102352284809",
+      "surplus_rune": "848428268073",
+      "dynamic_multiplier_basis_points": "4632"
+    },
+    {
+      "asset": "BSC.USDC-0X8AC76A51CC950D9822D68B83FE1AD97B32CD580D",
+      "outbound_fee": "25000341",
+      "fee_withheld_rune": "1079639928684",
+      "fee_spent_rune": "306481033371",
+      "surplus_rune": "773158895313",
+      "dynamic_multiplier_basis_points": "6883"
+    },
+    {
+      "asset": "BSC.USDT-0X55D398326F99059FF775485246999027B3197955",
+      "outbound_fee": "25001631",
+      "fee_withheld_rune": "6967142054610",
+      "fee_spent_rune": "2320703551135",
+      "surplus_rune": "4646438503475",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "BTC.BTC",
+      "outbound_fee": "1099",
+      "fee_withheld_rune": "57376195119344",
+      "fee_spent_rune": "56556599702029",
+      "surplus_rune": "819595417315",
+      "dynamic_multiplier_basis_points": "5494"
+    },
+    {
+      "asset": "DOGE.DOGE",
+      "outbound_fee": "312781277",
+      "fee_withheld_rune": "4338472728948",
+      "fee_spent_rune": "2415361304248",
+      "surplus_rune": "1923111424700",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "ETH.AAVE-0X7FC66500C84A76AD7E9C93437BFC5AC33E2DDAE9",
+      "outbound_fee": "1344785",
+      "fee_withheld_rune": "923831612751",
+      "fee_spent_rune": "198763193672",
+      "surplus_rune": "725068419079",
+      "dynamic_multiplier_basis_points": "8320"
+    },
+    {
+      "asset": "ETH.DAI-0X6B175474E89094C44DA98B954EEDEAC495271D0F",
+      "outbound_fee": "34348316",
+      "fee_withheld_rune": "1558327201334",
+      "fee_spent_rune": "602693277909",
+      "surplus_rune": "955633923425",
+      "dynamic_multiplier_basis_points": "1427"
+    },
+    {
+      "asset": "ETH.DPI-0X1494CA1F11D487C2BBE4543E90080AEBA4BA3C2B",
+      "outbound_fee": "6410632",
+      "fee_withheld_rune": "814872402526",
+      "fee_spent_rune": "166692919726",
+      "surplus_rune": "648179482800",
+      "dynamic_multiplier_basis_points": "10619"
+    },
+    {
+      "asset": "ETH.ETH",
+      "outbound_fee": "10386",
+      "fee_withheld_rune": "27550397603227",
+      "fee_spent_rune": "21180668497053",
+      "surplus_rune": "6369729106174",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "ETH.FOX-0XC770EEFAD204B5180DF6A14EE197D99D808EE52D",
+      "outbound_fee": "24914890445",
+      "fee_withheld_rune": "880444877747",
+      "fee_spent_rune": "191113467661",
+      "surplus_rune": "689331410086",
+      "dynamic_multiplier_basis_points": "9389"
+    },
+    {
+      "asset": "ETH.GUSD-0X056FD409E1D7A124BD7017459DFEA2F387B6D5CD",
+      "outbound_fee": "275000000",
+      "fee_withheld_rune": "785430508567",
+      "fee_spent_rune": "164072813118",
+      "surplus_rune": "621357695449",
+      "dynamic_multiplier_basis_points": "11421"
+    },
+    {
+      "asset": "ETH.LINK-0X514910771AF9CA656AF840DFF83E8264ECF986CA",
+      "outbound_fee": "8249910",
+      "fee_withheld_rune": "1139634510154",
+      "fee_spent_rune": "282926745027",
+      "surplus_rune": "856707765127",
+      "dynamic_multiplier_basis_points": "4384"
+    },
+    {
+      "asset": "ETH.LUSD-0X5F98805A4E8BE255A32880FDEC7F6728C6568BA0",
+      "outbound_fee": "237909836",
+      "fee_withheld_rune": "843960978223",
+      "fee_spent_rune": "170148143984",
+      "surplus_rune": "673812834239",
+      "dynamic_multiplier_basis_points": "9853"
+    },
+    {
+      "asset": "ETH.SNX-0XC011A73EE8576FB46F5E1C5751CA3B9FE0AF2A6F",
+      "outbound_fee": "1133283233",
+      "fee_withheld_rune": "104932145398",
+      "fee_spent_rune": "164670453173",
+      "surplus_rune": "0",
+      "dynamic_multiplier_basis_points": "30000"
+    },
+    {
+      "asset": "ETH.TGT-0X108A850856DB3F85D0269A2693D896B394C80325",
+      "outbound_fee": "28017444744",
+      "fee_withheld_rune": "923865606722",
+      "fee_spent_rune": "224005985969",
+      "surplus_rune": "699859620753",
+      "dynamic_multiplier_basis_points": "9074"
+    },
+    {
+      "asset": "ETH.THOR-0XA5F2211B9B8170F694421F2046281775E8468044",
+      "outbound_fee": "635663983",
+      "fee_withheld_rune": "2051855504709",
+      "fee_spent_rune": "673905255865",
+      "surplus_rune": "1377950248844",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48",
+      "outbound_fee": "24973400",
+      "fee_withheld_rune": "10503247935526",
+      "fee_spent_rune": "7754634064304",
+      "surplus_rune": "2748613871222",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+      "outbound_fee": "238254751",
+      "fee_withheld_rune": "863318635949",
+      "fee_spent_rune": "190019585408",
+      "surplus_rune": "673299050541",
+      "dynamic_multiplier_basis_points": "9868"
+    },
+    {
+      "asset": "ETH.USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7",
+      "outbound_fee": "25003500",
+      "fee_withheld_rune": "15107896321242",
+      "fee_spent_rune": "12550638554028",
+      "surplus_rune": "2557257767214",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "ETH.VTHOR-0X815C23ECA83261B6EC689B60CC4A58B54BC24D8D",
+      "outbound_fee": "1213502090",
+      "fee_withheld_rune": "1023961096359",
+      "fee_spent_rune": "327473095327",
+      "surplus_rune": "696488001032",
+      "dynamic_multiplier_basis_points": "9175"
+    },
+    {
+      "asset": "ETH.WBTC-0X2260FAC5E5542A773AA44FBCFEDF7C193BC2C599",
+      "outbound_fee": "306",
+      "fee_withheld_rune": "3191695929151",
+      "fee_spent_rune": "951048211211",
+      "surplus_rune": "2240647717940",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "ETH.XRUNE-0X69FA0FEE221AD11012BAB0FDB45D444D3D2CE71C",
+      "outbound_fee": "676372138683",
+      "fee_withheld_rune": "847756108811",
+      "fee_spent_rune": "180566311645",
+      "surplus_rune": "667189797166",
+      "dynamic_multiplier_basis_points": "10051"
+    },
+    {
+      "asset": "ETH.YFI-0X0BC529C00C6401AEF6D220BE8C6EA1667F6AD93E",
+      "outbound_fee": "247655",
+      "fee_withheld_rune": "154481559785",
+      "fee_spent_rune": "153053536719",
+      "surplus_rune": "1428023066",
+      "dynamic_multiplier_basis_points": "29957"
+    },
+    {
+      "asset": "GAIA.ATOM",
+      "outbound_fee": "14462400",
+      "fee_withheld_rune": "1388908881043",
+      "fee_spent_rune": "41820399818",
+      "surplus_rune": "1347088481225",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "LTC.LTC",
+      "outbound_fee": "420238",
+      "fee_withheld_rune": "3960649993732",
+      "fee_spent_rune": "135900428697",
+      "surplus_rune": "3824749565035",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "SOL.SOL",
+      "outbound_fee": "195931",
+      "fee_withheld_rune": "749424394978",
+      "fee_spent_rune": "231009380",
+      "surplus_rune": "749193385598",
+      "dynamic_multiplier_basis_points": "7599"
+    },
+    {
+      "asset": "TRON.TRX",
+      "outbound_fee": "142510100",
+      "fee_withheld_rune": "4860795153747",
+      "fee_spent_rune": "3885614101805",
+      "surplus_rune": "975181051942",
+      "dynamic_multiplier_basis_points": "842"
+    },
+    {
+      "asset": "TRON.USDT-TR7NHQJEKQXGTCI8Q8ZY4PL8OTSZGJLJ6T",
+      "outbound_fee": "329710500",
+      "fee_withheld_rune": "8884443814484",
+      "fee_spent_rune": "8078792605008",
+      "surplus_rune": "805651209476",
+      "dynamic_multiplier_basis_points": "5911"
+    },
+    {
+      "asset": "XRP.XRP",
+      "outbound_fee": "18855400",
+      "fee_withheld_rune": "2387558530979",
+      "fee_spent_rune": "13295242246",
+      "surplus_rune": "2374263288733",
+      "dynamic_multiplier_basis_points": "100"
+    },
+    {
+      "asset": "ZEC.ZEC",
+      "outbound_fee": "44632",
+      "fee_withheld_rune": "676989271298",
+      "fee_spent_rune": "5335846404",
+      "surplus_rune": "671653424894",
+      "dynamic_multiplier_basis_points": "9918"
+    }
+  ]
+}

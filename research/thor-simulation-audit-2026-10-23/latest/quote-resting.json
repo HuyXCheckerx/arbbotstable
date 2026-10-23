@@ -1,0 +1,48 @@
+{
+  "url": "https://gateway.liquify.com/chain/thorchain_api/thorchain/quote/swap?from_asset=ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48&to_asset=ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1&amount=9996400000000&destination=0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C&affiliate=symbiosis&affiliate_bps=1&liquidity_tolerance_bps=1&height=28361962&streaming_interval=20&streaming_quantity=720",
+  "fetched_at": "2026-10-23T07:33:18.891572+00:00",
+  "headers": {
+    "Server": "fasthttp",
+    "Date": "Fri, 23 Oct 2026 07:33:18 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "1452",
+    "Grpc-Metadata-Content-Type": "application/grpc+cosmos-sdk-grpc-codec",
+    "Grpc-Metadata-X-Cosmos-Block-Height": "28361962",
+    "X-Server-Time": "1792740798",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, solana-client, x-client-id, grpc-metadata-x-cosmos-block-height, x-server-time, Origin, X-Requested-With, Accept, X-Node-Type",
+    "Access-Control-Expose-Headers": "grpc-metadata-x-cosmos-block-height, x-server-time",
+    "Connection": "close"
+  },
+  "data": {
+    "inbound_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+    "inbound_confirmation_blocks": 14,
+    "inbound_confirmation_seconds": 168,
+    "outbound_delay_blocks": 155,
+    "outbound_delay_seconds": 930,
+    "fees": {
+      "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+      "affiliate": "998902845",
+      "outbound": "237168192",
+      "liquidity": "25020637200",
+      "total": "26256708237",
+      "slippage_bps": 24,
+      "total_bps": 26
+    },
+    "router": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+    "expiry": 1792741688,
+    "warning": "Do not cache this response. Do not send funds after the expiry.",
+    "notes": "Base Asset: Send the inbound_address the asset with the memo encoded in hex in the data field. Tokens: First approve router to spend tokens from user: asset.approve(router, amount). Then call router.depositWithExpiry(inbound_address, asset, amount, memo, expiry). Asset is the token contract address. Amount should be in native asset decimals (eg 1e18 for most tokens). Do not swap to smart contract addresses.",
+    "dust_threshold": "1000",
+    "recommended_min_amount_in": "711911184",
+    "recommended_gas_rate": "15",
+    "gas_rate_units": "gwei",
+    "memo": "=:ETH.USDP:0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C:9986892934861/20/720:symbiosis:1",
+    "expected_amount_out": "9987891724034",
+    "max_streaming_quantity": 720,
+    "streaming_swap_blocks": 14380,
+    "streaming_swap_seconds": 86280,
+    "total_swap_seconds": 86448
+  }
+}

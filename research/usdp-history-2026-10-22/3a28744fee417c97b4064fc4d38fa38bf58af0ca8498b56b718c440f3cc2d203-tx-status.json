@@ -1,0 +1,134 @@
+{
+  "tx": {
+    "id": "3A28744FEE417C97B4064FC4D38FA38BF58AF0CA8498B56B718C440F3CC2D203",
+    "chain": "ETH",
+    "from_address": "0x50da32e628b45abb1335924086ca0013b9d4ec1c",
+    "to_address": "0x718f6C9df785BC4e323086De024CA822efbE8aB9",
+    "coins": [
+      {
+        "asset": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48",
+        "amount": "10000000000000",
+        "decimals": 6
+      }
+    ],
+    "gas": [
+      {
+        "asset": "ETH.ETH",
+        "amount": "17776"
+      }
+    ],
+    "memo": "=:ETH.USDP:0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C:10002000000000/0/1655:salactite:1"
+  },
+  "planned_out_txs": [
+    {
+      "chain": "ETH",
+      "to_address": "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C",
+      "coin": {
+        "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+        "amount": "42096431161"
+      },
+      "refund": false
+    },
+    {
+      "chain": "ETH",
+      "to_address": "0x50da32e628b45abb1335924086ca0013b9d4ec1c",
+      "coin": {
+        "asset": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48",
+        "amount": "9957653367200"
+      },
+      "refund": true
+    },
+    {
+      "chain": "THOR",
+      "to_address": "thor1dl7ujlyywmkp8r7mfe5sxd42j0n97tlqzx96sl",
+      "coin": {
+        "asset": "THOR.RUNE",
+        "amount": "6595183"
+      },
+      "refund": false
+    }
+  ],
+  "out_txs": [
+    {
+      "id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "chain": "THOR",
+      "from_address": "thor1g98cy3n9mmjrpn0sxmn63lztelera37n8n67c0",
+      "to_address": "thor1dl7ujlyywmkp8r7mfe5sxd42j0n97tlqzx96sl",
+      "coins": [
+        {
+          "asset": "THOR.RUNE",
+          "amount": "6595183"
+        }
+      ],
+      "gas": [
+        {
+          "asset": "THOR.RUNE",
+          "amount": "2000000"
+        }
+      ],
+      "memo": "OUT:3A28744FEE417C97B4064FC4D38FA38BF58AF0CA8498B56B718C440F3CC2D203"
+    },
+    {
+      "id": "2F3495E05417F749B05ACDD1D3D6B04BE26CA0FBDCA404305AEE562EB160C950",
+      "chain": "ETH",
+      "from_address": "0x718f6c9df785bc4e323086de024ca822efbe8ab9",
+      "to_address": "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C",
+      "coins": [
+        {
+          "asset": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48",
+          "amount": "9957653367200",
+          "decimals": 6
+        }
+      ],
+      "gas": [
+        {
+          "asset": "ETH.ETH",
+          "amount": "13369"
+        }
+      ],
+      "memo": "REFUND:3A28744FEE417C97B4064FC4D38FA38BF58AF0CA8498B56B718C440F3CC2D203"
+    },
+    {
+      "id": "CDF63548D4FF8AB0964CAED4B2874BF4E3571E320AC11DE3D47AF2DF0B66EDEC",
+      "chain": "ETH",
+      "from_address": "0x46f3fb8c14006268d153b18000495c8ee858e94b",
+      "to_address": "0x50dA32E628b45AbB1335924086Ca0013b9d4eC1C",
+      "coins": [
+        {
+          "asset": "ETH.USDP-0X8E870D67F660D95D5BE530380D0EC0BD388289E1",
+          "amount": "42096431161"
+        }
+      ],
+      "gas": [
+        {
+          "asset": "ETH.ETH",
+          "amount": "14096"
+        }
+      ],
+      "memo": "OUT:3A28744FEE417C97B4064FC4D38FA38BF58AF0CA8498B56B718C440F3CC2D203"
+    }
+  ],
+  "stages": {
+    "inbound_observed": {
+      "pre_confirmation_count": 111,
+      "final_count": 111,
+      "completed": true
+    },
+    "inbound_confirmation_counted": {
+      "remaining_confirmation_seconds": 0,
+      "completed": true
+    },
+    "inbound_finalised": {
+      "completed": true
+    },
+    "swap_status": {
+      "pending": false
+    },
+    "swap_finalised": {
+      "completed": true
+    },
+    "outbound_signed": {
+      "completed": true
+    }
+  }
+}

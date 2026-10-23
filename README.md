@@ -1,5 +1,72 @@
 # Stablecoin Arbitrage Bot
 
+## USDP arbitrage web calculator
+
+Run `.venv/bin/python3 thor_calculator.py` and open
+[the calculator](http://127.0.0.1:8081/calculator). Enter a USDC amount to fetch live
+direct and enrolled-affiliate THORChain quotes. Conversion ratios, final selling
+rates, profit targets, and cost budgets recalculate without fetching new quotes.
+The page includes embedded fees, sender gas, break-even rates, full-cycle cash
+flows, partial-refund scenarios, a pool-snapshot capacity model, and JSON export.
+
+The calculator is also available at `/calculator` in `thor_webapp.py` after that
+server is restarted. The standalone server can run beside an existing dashboard.
+It provides only quote/calculation routes and never submits a transaction.
+
+Only acquisition quotes and gas prices are live. Stable.com conversion and the
+final exit are editable assumptions. Sender gas defaults to a 150,000-unit deposit
+plus a conservative 50,000-unit approval budget; an override is available. Partial
+fills and pool capacity are scenarios, not execution guarantees. A separate
+THORSwap frontend fee is excluded unless entered in the extra service cost budget.
+
+## THORChain swap workspace
+
+Run `.venv/bin/python3 thor_webapp.py --no-open --port 8080` and open
+`http://127.0.0.1:8080`. The **Current swap** view follows wallet activity from
+THORChain queues, recent deposits, and CLI broadcast logs. **Latest deposit** and
+**Previous deposit** explicitly inspect history; **Current** returns to automatic tracking.
+
+The tracker separates streaming, inbound confirmation, pending outbounds, completed
+swaps, and refunds. It shows a countdown and estimated finalization for scheduled
+streams; rapid streams use their observed pace when enough data is available.
+Completed swaps show the network block's finalization timestamp. Delivery follows
+finalization, and network delays can change estimates.
+
+The **USDP → USDC** quote tab also supports USDT → USDP through its pair selector. The reverse API is
+`/api/quote?source=usdp&amount=10000`; it returns USDC output and USDC-denominated
+fees. Return quotes default to a market minimum based on expected output after
+quoted fees, with configurable slippage (50 bps by default). Selecting a +2 bps or
+1:1 floor preserves that minimum and explicitly flags when the market estimate is
+below it. Quotes expire and require a fresh request. These pairs are quote-only;
+live execution remains USDC → USDP.
+
+The **Automation** tab offers two execution modes. **Immediate** requires the
+selected minimum modeled net profit after settlement fees, refund fees and wallet
+gas (default $1). Its current-pool model assumes no outside trades restore pool
+balances between slices; a favorable full-fill quote alone does not trigger it.
+**Resting stream** waits for the slice-price condition, deposits the full selected
+amount into one stream (maximum permitted slices, one attempt every 2 blocks),
+then exits after deposit confirmation. It skips the immediate net-profit check.
+Funds stay locked until settlement, partial fills and refunds are possible, and
+fees can leave a loss even when filled slices satisfy a +2 bps price floor.
+Stopping the daemon does not cancel a stream already submitted on-chain.
+
+Streaming quotes and new swaps default to `--interval 2 --quantity 0`. Quantity
+zero requests THORChain's maximum allowed slices for the deposit and current pool
+conditions; the network duration cap also applies. Completion time depends on the
+resolved slice count rather than a fixed 24-hour schedule.
+
+Both modes are launched only through an explicit Start action. For foreground CLI
+use, `thor_usdp_sniper.py --resting` selects the same one-stream behavior; live
+execution still requires `--live --confirm-live EXECUTE_THOR_SNIPER`.
+
+The [23 October pool simulation audit](research/thor-simulation-audit-2026-10-23/AUDIT.md)
+includes pinned public snapshots, an independent Go reference, maximum-fill
+searches and a reproduced inconsistency in THORNode's streaming quote fee fields.
+
+Dashboard checks: `.venv/bin/python3 -m unittest tests.test_thor_dashboard` and
+`node --test tests/thor_dashboard.test.js`.
+
 ## THORChain USDC to USDP quotes
 
 `scripts/quote_thorchain_usdp.py` is a standalone, read-only Python quoter with

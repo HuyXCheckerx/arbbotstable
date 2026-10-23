@@ -1202,7 +1202,7 @@ test("parseCli supports --dex-provider dflow, metamatcha, and jupiter", () => {
 
   assert.throws(
     () => parseCli(["--dex-provider", "unknown"]),
-    /--dex-provider must be metamatcha, dflow, or jupiter/,
+    /--dex-provider must be metamatcha, dflow, jupiter, or local/,
   );
 });
 

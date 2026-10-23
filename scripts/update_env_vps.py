@@ -9,14 +9,30 @@ with open(path, "r", encoding="utf-8") as f:
     text = f.read()
 
 import re
-text = re.sub(r"ETH_ARB_QUOTE_PROVIDER=.*", "ETH_ARB_QUOTE_PROVIDER=direct", text)
-text = re.sub(r"ETH_ARB_DIRECT_AGGREGATORS=.*", "ETH_ARB_DIRECT_AGGREGATORS=velora", text)
-text = re.sub(r"ETH_MIN_PRIORITY_FEE_GWEI=.*", "ETH_MIN_PRIORITY_FEE_GWEI=0.1", text)
+if "ETH_ARB_MIN_PROFIT=" in text:
+    text = re.sub(r"ETH_ARB_MIN_PROFIT=.*", "ETH_ARB_MIN_PROFIT=2", text)
+else:
+    text += "\nETH_ARB_MIN_PROFIT=2\n"
+
+if "ETH_ARB_MIN_PROFIT_USD=" in text:
+    text = re.sub(r"ETH_ARB_MIN_PROFIT_USD=.*", "ETH_ARB_MIN_PROFIT_USD=2", text)
+else:
+    text += "ETH_ARB_MIN_PROFIT_USD=2\n"
+
+if "ETH_ARB_DIRECT_AGGREGATORS=" in text:
+    text = re.sub(r"ETH_ARB_DIRECT_AGGREGATORS=.*", "ETH_ARB_DIRECT_AGGREGATORS=okx,velora", text)
+else:
+    text += "ETH_ARB_DIRECT_AGGREGATORS=okx,velora\n"
+
+if "ETH_GAS_PRICE_GWEI=" in text:
+    text = re.sub(r"ETH_GAS_PRICE_GWEI=.*", "ETH_GAS_PRICE_GWEI=0.25", text)
+else:
+    text += "ETH_GAS_PRICE_GWEI=0.25\n"
 
 with open(path, "w", encoding="utf-8") as f:
     f.write(text)
 
-print("SUCCESS")
+print("SUCCESS: Set ETH_ARB_DIRECT_AGGREGATORS=okx,velora")
 '@
 
 Set-Content -Path "C:\Users\Administrator\arbbotstable\patch_env.py" -Value $code

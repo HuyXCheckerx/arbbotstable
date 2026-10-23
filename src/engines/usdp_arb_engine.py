@@ -655,7 +655,16 @@ class USDPTestEngine:
         if agg in ("matcha", "meta.matcha", "metamatcha"):
             return self.quote_dex_matcha(usdc_amount, slippage_bps)
         if agg == "enso":
-            return self.quote_dex_enso(usdc_amount, slippage_bps)
+            try:
+                return self.quote_dex_enso(usdc_amount, slippage_bps)
+            except Exception as e:
+                # Fallback to OKX then Velora if Enso is out of credits or down
+                for fn in (self.quote_dex_okx, self.quote_dex_velora):
+                    try:
+                        return fn(usdc_amount, slippage_bps)
+                    except Exception:
+                        continue
+                raise
         if agg == "okx":
             return self.quote_dex_okx(usdc_amount, slippage_bps)
         if agg == "velora":

@@ -1,0 +1,74 @@
+{
+  "tx": {
+    "id": "3D398E3A07C0589189B36A33B52B2807622183AC91402235BC39EEC69381A840",
+    "chain": "ETH",
+    "from_address": "0x50da32e628b45abb1335924086ca0013b9d4ec1c",
+    "to_address": "0x46F3FB8c14006268d153B18000495C8eE858E94b",
+    "coins": [
+      {
+        "asset": "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48",
+        "amount": "2000000000",
+        "decimals": 6
+      }
+    ],
+    "gas": [
+      {
+        "asset": "ETH.ETH",
+        "amount": "7705"
+      }
+    ],
+    "memo": "=:r:thor1dl7ujlyywmkp8r7mfe5sxd42j0n97tlqzx96sl:3055562578:sto:0"
+  },
+  "planned_out_txs": [
+    {
+      "chain": "THOR",
+      "to_address": "thor1dl7ujlyywmkp8r7mfe5sxd42j0n97tlqzx96sl",
+      "coin": {
+        "asset": "THOR.RUNE",
+        "amount": "3058748900"
+      },
+      "refund": false
+    }
+  ],
+  "out_txs": [
+    {
+      "id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "chain": "THOR",
+      "from_address": "thor1g98cy3n9mmjrpn0sxmn63lztelera37n8n67c0",
+      "to_address": "thor1dl7ujlyywmkp8r7mfe5sxd42j0n97tlqzx96sl",
+      "coins": [
+        {
+          "asset": "THOR.RUNE",
+          "amount": "3058748900"
+        }
+      ],
+      "gas": [
+        {
+          "asset": "THOR.RUNE",
+          "amount": "2000000"
+        }
+      ],
+      "memo": "OUT:3D398E3A07C0589189B36A33B52B2807622183AC91402235BC39EEC69381A840"
+    }
+  ],
+  "stages": {
+    "inbound_observed": {
+      "pre_confirmation_count": 111,
+      "final_count": 111,
+      "completed": true
+    },
+    "inbound_confirmation_counted": {
+      "remaining_confirmation_seconds": 0,
+      "completed": true
+    },
+    "inbound_finalised": {
+      "completed": true
+    },
+    "swap_status": {
+      "pending": false
+    },
+    "swap_finalised": {
+      "completed": true
+    }
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "pools": {
+    "spot_rate": "1.002341566272936556978057869",
+    "usdc_depth": "2320636.47963774",
+    "usdp_depth": "60798.00776242",
+    "usdc_rune": 360079374667876,
+    "usdc_asset": 232063647963774,
+    "usdp_rune": 9411627687988,
+    "usdp_asset": 6079800776242,
+    "eth_usd": "2401.697641096352629245689011",
+    "usdc_decimals": 6,
+    "usdp_decimals": 0
+  },
+  "fee_floors": [
+    2,
+    5
+  ],
+  "refund_fee": "0.249752",
+  "gas_assumption_usd": ".38",
+  "amount_usdc": "99964",
+  "modes": {
+    "rapid": {
+      "height": "28361755",
+      "fetched_at": "2026-10-23T07:15:54.179255+00:00",
+      "quote_expected_usdp": "100065.25711566",
+      "quantity": 3296,
+      "outbound_fee_usdp": "2.37317259",
+      "requested_deposit_plan": {
+        "deposit": "99964",
+        "quantity": 3296,
+        "filled": "30.3288835",
+        "delivered": "27.98684893",
+        "refunded": "99933.4213645",
+        "gas_usd": "0.38",
+        "net_profit": "-2.97178657"
+      },
+      "best_tested_deposit": {
+        "deposit": "4875",
+        "quantity": 160,
+        "filled": "30.46875",
+        "delivered": "28.12671700",
+        "refunded": "4844.281498",
+        "gas_usd": "0.38",
+        "net_profit": "-2.97178500"
+      },
+      "maximum_fill_across_allowed_quantities": {
+        "quantity": 1743,
+        "filled_usdc": "57.35169249",
+        "delivered_usdp": "54.98565253",
+        "net_profit_usd": "-2.99579196"
+      },
+      "best_net_quantity": {
+        "quantity": 3279,
+        "filled_usdc": "30.48612382",
+        "delivered_usdp": "28.14409099",
+        "net_profit_usd": "-2.97178483"
+      },
+      "first_slice_required_spot": "1.001436967336621857403148198"
+    },
+    "resting": {
+      "height": "28361755",
+      "fetched_at": "2026-10-23T07:15:54.898468+00:00",
+      "quote_expected_usdp": "99703.80299461",
+      "quantity": 720,
+      "outbound_fee_usdp": "2.36473444",
+      "requested_deposit_plan": {
+        "deposit": "99964",
+        "quantity": 720,
+        "filled": "0",
+        "delivered": "0",
+        "refunded": "99963.750248",
+        "gas_usd": "0.38",
+        "net_profit": "-0.629752"
+      },
+      "best_tested_deposit": {
+        "deposit": "3151",
+        "quantity": 103,
+        "filled": "30.59223301",
+        "delivered": "28.25863820",
+        "refunded": "3120.15801499",
+        "gas_usd": "0.38",
+        "net_profit": "-2.96334681"
+      },
+      "maximum_fill_across_allowed_quantities": {
+        "quantity": 1,
+        "filled_usdc": "0",
+        "delivered_usdp": "0",
+        "net_profit_usd": "-0.629752"
+      },
+      "best_net_quantity": null,
+      "first_slice_required_spot": "1.005074021044001514125007441"
+    }
+  }
+}

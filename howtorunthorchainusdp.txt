@@ -21,6 +21,9 @@ The WebApp provides a full real-time institutional dashboard:
   fills, skips, delivered USDP tx link, refunded USDC tx link, and net P&L
 - Quick Inspect Chips: One-click inspect "📌 Latest Swap" or "⚡ Live Queue"
 - Live Quoter with instant +2 bps memo builder (symbiosis whitelisted fee tier)
+- USDT -> USDP Quoter tab: THORChain quote, fees, pool rate and memo for ETH.USDT
+  (quote only; the sniper and Execute buttons deposit USDC)
+  API: curl "http://127.0.0.1:8080/api/quote?source=usdt&amount=10000&affiliate=symbiosis&affiliate_bps=1"
 - Autonomous Sniper Bot: Start/Stop live background daemon directly from the UI
 - One-Click Live Swap Execution with dual-confirmation modal
 - Real-time consensus audit terminal logs
@@ -109,9 +112,11 @@ PART 2: RUNNING THE SNIPER ENGINE VIA CLI
 
 
 5. RESTING ORDER (ONE DEPOSIT THAT WAITS ~24H FOR THE RATE):
-   Sends the full amount now as a stream of 720 slices, one every 20 blocks (~24h).
+   Waits until the pool rate reaches the slice fill rate (checked every poll, logged
+   once a minute), then sends the full amount as 720 slices, one every 20 blocks (~24h).
    Each slice swaps only if the rate clears the +2 bps floor; the rest is refunded at
-   the end. Skips the fill-capacity trigger, keeps the balance and affiliate checks.
+   the end. Skips the fill-capacity trigger, keeps the balance and affiliate checks
+   (the balance is re-checked right before sending). Add --once to check one time.
    (Native THORChain limit orders expire after 10 blocks, so they cannot rest.)
 
    python3 thor_usdp_sniper.py \
@@ -123,7 +128,8 @@ PART 2: RUNNING THE SNIPER ENGINE VIA CLI
      --live \
      --confirm-live EXECUTE_THOR_SNIPER
 
-   In the WebApp: set Execution Mode to "Resting order" before Execute Live Swap.
+   In the WebApp: set Execution Mode to "Resting order" before Execute Live Swap. While it
+   waits, the Sniper tab shows "RESTING ORDER WAITING" and Stop cancels it (nothing sent).
 
 
 --------------------------------------------------------------------------------

@@ -2441,6 +2441,9 @@ async function getLocalQuote(
   if (!result || !result.outAmount) {
     throw new Error(`Local Solana quote returned invalid response: ${JSON.stringify(result)}`);
   }
+  if (!result.otherAmountThreshold && result.outAmount) {
+    result.otherAmountThreshold = String(result.outAmount);
+  }
   return {
     ...result,
     provider: "Local",
@@ -3441,18 +3444,55 @@ function simulationFailure(error: unknown, logs?: string[] | null): Error {
   );
 }
 
+interface SimulationSafetyCheck {
+  userLoanAta?: PublicKey;
+  initialBalanceRaw?: bigint;
+  loanSymbol?: string;
+}
+
 async function simulate(
   connection: Connection,
   transaction: VersionedTransaction,
+  safetyCheck?: SimulationSafetyCheck,
 ): Promise<number> {
+  const accountsConfig = safetyCheck?.userLoanAta
+    ? {
+        encoding: "base64" as const,
+        addresses: [safetyCheck.userLoanAta.toBase58()],
+      }
+    : undefined;
+
   const result = await connection.simulateTransaction(transaction, {
     commitment: "processed",
     sigVerify: true,
+    ...(accountsConfig ? { accounts: accountsConfig } : {}),
   });
   if (result.value.err) throw simulationFailure(result.value.err, result.value.logs);
   if (!result.value.unitsConsumed) {
     throw new Error("Atomic simulation succeeded but did not report unitsConsumed");
   }
+
+  if (
+    safetyCheck?.userLoanAta &&
+    safetyCheck.initialBalanceRaw !== undefined &&
+    result.value.accounts &&
+    result.value.accounts[0]
+  ) {
+    const rawData = result.value.accounts[0].data;
+    if (rawData && rawData[0]) {
+      const buf = Buffer.from(rawData[0], "base64");
+      if (buf.length >= 72) {
+        const postBalanceRaw = buf.readBigUInt64LE(64);
+        if (postBalanceRaw < safetyCheck.initialBalanceRaw) {
+          const deficit = safetyCheck.initialBalanceRaw - postBalanceRaw;
+          throw new Error(
+            `FLASH LOAN SAFETY FAILURE: Post-simulation balance of ${safetyCheck.loanSymbol ?? "loan token"} (${postBalanceRaw}) is less than initial balance (${safetyCheck.initialBalanceRaw}). Transaction would drain ${deficit} raw units from wallet balance! Aborting.`,
+          );
+        }
+      }
+    }
+  }
+
   return result.value.unitsConsumed;
 }
 
@@ -4756,6 +4796,30 @@ async function main(): Promise<void> {
   }
   const latest = await connection.getLatestBlockhash(config.commitment);
 
+  const reserveInfo = getKaminoReserveInfo(config.loanMint);
+  const userLoanAta = getAssociatedTokenAddressSync(
+    config.loanMint,
+    config.keypair.publicKey,
+    false,
+    reserveInfo.tokenProgram,
+  );
+  let initialBalanceRaw: bigint = 0n;
+  try {
+    const acc = await connection.getAccountInfo(userLoanAta, "processed");
+    if (acc && acc.data && acc.data.length >= 72) {
+      initialBalanceRaw = acc.data.readBigUInt64LE(64);
+    }
+  } catch {
+    initialBalanceRaw = 0n;
+  }
+  const safetyCheck: SimulationSafetyCheck = {
+    userLoanAta,
+    initialBalanceRaw,
+    loanSymbol: config.loanSymbol,
+  };
+  const simulateWithSafety = (conn: Connection, tx: VersionedTransaction) =>
+    simulate(conn, tx, safetyCheck);
+
   if (isTwoHop && secondJupiterQuote) {
     const [firstSwap1, firstSwap2, stableLegResult] = await Promise.all([
       getSwapLeg(config, firstQuote, walletAddress, 1, connection),
@@ -4812,7 +4876,7 @@ async function main(): Promise<void> {
       );
     }
     try {
-      probeUnits = await simulate(connection, probe);
+      probeUnits = await simulateWithSafety(connection, probe);
     } catch (err) {
       if (
         !isWalletFunded &&
@@ -4838,7 +4902,7 @@ async function main(): Promise<void> {
           0,
           additionalSigners,
         );
-        probeUnits = await simulate(connection, probe);
+        probeUnits = await simulateWithSafety(connection, probe);
       } else {
         throw err;
       }
@@ -4858,7 +4922,7 @@ async function main(): Promise<void> {
       client?.addressLookupTables ?? [],
       customLookupTables,
       latest.blockhash,
-      simulate,
+      simulateWithSafety,
       undefined,
       activeProvider,
       estimateStableOutputRaw,
@@ -4916,7 +4980,7 @@ async function main(): Promise<void> {
   }
   let finalUnits: number;
   try {
-    finalUnits = await simulate(connection, transaction);
+    finalUnits = await simulateWithSafety(connection, transaction);
   } catch (err) {
     if (
       !isWalletFunded &&
@@ -4942,7 +5006,7 @@ async function main(): Promise<void> {
         config.computeUnitPriceMicroLamports,
         additionalSigners,
       );
-      finalUnits = await simulate(connection, transaction);
+      finalUnits = await simulateWithSafety(connection, transaction);
     } else {
       throw err;
     }
