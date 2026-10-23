@@ -77,9 +77,10 @@ const rediscoverMs = integer(env.QUOTE_REDISCOVER_MINUTES ?? "15", "QUOTE_REDISC
 
 const config = loadConfig({ SOLANA_RPC_URL: env.SOLANA_RPC_URL, HELIUS_RPC_URL: env.HELIUS_RPC_URL, SOLANA_WS_URL: env.SOLANA_WS_URL,
   PAIRS: pairSymbols.map(pair => pair.join("/")).join(",") });
-const connection = connect(config);
+// Replaced when a stalled market is rebuilt (see build).
+let connection = connect(config);
 // The clock gets its own websocket so account notifications cannot delay it (see Mirror).
-const clockConnection = connect(config);
+let clockConnection = connect(config);
 const scan = config.heliusUrl ? connect({ ...config, rpcUrl: config.heliusUrl }) : connection;
 const symbols = [...new Set([...pairSymbols.flat(), ...viaSymbols])];
 const loaded = new Map(await Promise.all(symbols.map(async (symbol): Promise<[string, TokenInfo]> => [symbol, symbol === "SOL"
@@ -106,7 +107,10 @@ async function discover() {
   return { pools: [...pools.values()], warnings };
 }
 
-async function build(): Promise<{ market: LiveQuoteMarket; warnings: string[] }> {
+/** `fresh` opens new websockets first: after a sleep or a network change the old ones can stay open without delivering
+ * notifications, and a market rebuilt on them stalls again. */
+async function build(fresh = false): Promise<{ market: LiveQuoteMarket; warnings: string[] }> {
+  if (fresh) { connection = connect(config); clockConnection = connect(config); }
   const market = new LiveQuoteMarket(connection, input, output, programCache, via, { clockConnection, pollMs, pairs: pairs.slice(1) });
   try {
     const found = await discover();
@@ -307,7 +311,7 @@ const maintenance = setInterval(async () => {
       const changed = !found || found.pools.length !== current.size || found.pools.some(p => !current.has(String(p.address)));
       if (changed) {
         started = performance.now();
-        const next = await build(), previous = market;
+        const next = await build(stuck), previous = market;
         ({ market, warnings } = next);
         previous.close();
         rebuilds++;

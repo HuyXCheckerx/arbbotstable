@@ -1,7 +1,16 @@
+import os
+
 import winrm
+
+# The VPS login comes from the environment (VPS_WINRM_HOST, VPS_WINRM_USER, VPS_WINRM_PASSWORD):
+# this repository is public.
 import base64
 
-s = winrm.Session('http://103.77.208.166:5985/wsman', auth=('administrator', 'etvQ#5xU?dZN5JU'), transport='ntlm')
+s = winrm.Session(
+    os.environ["VPS_WINRM_HOST"],
+    auth=(os.environ["VPS_WINRM_USER"], os.environ["VPS_WINRM_PASSWORD"]),
+    transport="ntlm",
+)
 
 code = """
 import os, time

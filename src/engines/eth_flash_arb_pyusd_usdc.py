@@ -88,6 +88,7 @@ LOAN_TOKENS = {
     "USDT": USDT,
 }
 QUOTE_PROVIDER_LABELS = {
+    "local": "Local",
     "direct": "Direct",
     "okx": "OKX",
     "defillama": "DefiLlama",
@@ -95,6 +96,11 @@ QUOTE_PROVIDER_LABELS = {
     "local": "Local",
     "auto": "Auto",
 }
+# Local EVM quoter (quoters/evm, `evm-quoter serve --chain eth`): simulates the deployed pools against mirrored
+# state. It prices the DEX leg only; the transaction's calldata still comes from ETH_ARB_LOCAL_EXECUTION_PROVIDER.
+LOCAL_AGGREGATOR = "Local"
+LOCAL_EVM_QUOTE_URL = "http://127.0.0.1:8795"
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 BALANCER_V2_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
 FLASH_PROVIDER_IDS = {"morpho": 0, "uniswap-v4": 1, "aave-v3": 2, "balancer-v2": 3}
 FLASH_PROVIDER_ADDRESSES = {
@@ -545,6 +551,8 @@ class MatchaQuote:
     buy_amount: int
     gas: int | None = None
     gas_price: int | None = None
+    # Local quotes only: the pools the local quoter priced, so a mispriced leg can be traced to its pool.
+    route: str | None = None
 
     def contract_tuple(self) -> tuple[str, str, int, int, bytes]:
         return (
@@ -1303,6 +1311,27 @@ def fetch_live_gas_price(rpc_url: str | None = None) -> int | None:
     return None
 
 
+def local_execution_provider() -> str:
+    """The aggregator that supplies calldata for a local quote (and quotes while the local quoter cannot)."""
+    provider = os.getenv("ETH_ARB_LOCAL_EXECUTION_PROVIDER", "direct").strip().lower()
+    if provider not in ("matcha", "auto", "direct", "okx", "defillama"):
+        raise ArbError(f"ETH_ARB_LOCAL_EXECUTION_PROVIDER must name an aggregator provider, not {provider!r}")
+    return provider
+
+
+def local_route_summary(payload: dict[str, Any]) -> str:
+    """Hops of a local quote in order, split legs joined by '+', with the block it was priced at."""
+    hops: dict[int, list[str]] = {}
+    for leg in payload.get("legs") or []:
+        if isinstance(leg, dict):
+            share = Decimal(int(leg.get("share_bps", 10_000))) / 100
+            hops.setdefault(int(leg.get("hop", 1)), []).append(
+                f"{leg.get('label', '?')} [{str(leg.get('pool', '?'))[:10]}] {share:g}%"
+            )
+    route = " > ".join(" + ".join(legs) for _, legs in sorted(hops.items())) or "no legs reported"
+    return f"{route} @ block {payload.get('block', '?')}"
+
+
 class MatchaClient:
     def __init__(
         self,
@@ -1550,53 +1579,74 @@ class MatchaClient:
         buy_token_address: str,
         aggregators: Iterable[str] | None = None,
     ) -> list[tuple[str, Any]]:
-        """Local revm quoter service (127.0.0.1:8795) with direct aggregator execution."""
-        quoter_url = os.getenv("EVM_LOCAL_QUOTER_URL", "http://127.0.0.1:8795").rstrip("/")
-        addr_to_symbol = {v.lower(): k for k, v in LOAN_TOKENS.items()}
-        sell_sym = addr_to_symbol.get(sell_token_address.lower())
-        buy_sym = addr_to_symbol.get(buy_token_address.lower())
-
-        sell_amount_dec = Decimal(sell_amount) / Decimal(10**DECIMALS)
-
-        if sell_sym and buy_sym:
-            try:
-                import urllib.request
-                url = f"{quoter_url}/quote?input={sell_sym}&output={buy_sym}&amount={sell_amount_dec}"
-                req = urllib.request.Request(url, headers={"User-Agent": "eth-flash-arb-local"})
-                with urllib.request.urlopen(req, timeout=2.0) as resp:
-                    if resp.status == 200:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        out_atomic = int(data.get("out_atomic", "0"))
-                        net_out = data.get("net_out")
-                        logger.info(
-                            "[LocalQuoter] Verified in-memory revm quote for %s -> %s: in=%s, out_atomic=%s, net_out=%s",
-                            sell_sym, buy_sym, sell_amount, out_atomic, net_out
-                        )
-            except Exception as exc:
-                logger.warning("[LocalQuoter] Local EVM quoter unavailable (%s); falling back to direct/MetaMatcha...", exc)
-
+        """Price from the local EVM quoter. The quote carries no calldata (target and data are empty): a route that
+        clears the profit floor fetches it from ETH_ARB_LOCAL_EXECUTION_PROVIDER. While the local quoter cannot
+        price the leg, that provider quotes it instead, unless ETH_ARB_LOCAL_FALLBACK=false."""
         try:
-            direct_quotes = self._direct_quotes(
+            return self._local_price(sell_amount, sell_token_address, buy_token_address)
+        except ArbError as exc:
+            if os.getenv("ETH_ARB_LOCAL_FALLBACK", "true").strip().lower() not in ("true", "1", "yes"):
+                raise
+            provider = local_execution_provider()
+            logger.warning(
+                "[LocalQuoter] %s; quoting through %s for this check", exc, QUOTE_PROVIDER_LABELS.get(provider, provider)
+            )
+            fallback = MatchaClient(
+                self.http, self.base_url, quote_provider=provider, rpc_url=self.rpc_url, operator=self.operator
+            )
+            return fallback.quotes(
                 executor,
                 sell_amount,
                 slippage_bps,
-                sell_token_address,
-                buy_token_address,
-                aggregators=aggregators,
+                aggregators if aggregators is not None else MATCHA_AGGREGATORS,
+                sell_token_address=sell_token_address,
+                buy_token_address=buy_token_address,
             )
-            if direct_quotes:
-                return direct_quotes
-        except Exception as direct_exc:
-            logger.warning("[LocalQuoter] Direct aggregator fallback failed: %s", direct_exc)
 
-        return self._matcha_quotes(
-            executor,
-            sell_amount,
-            slippage_bps,
-            aggregators or MATCHA_AGGREGATORS,
-            sell_token_address,
-            buy_token_address,
+    def _local_price(
+        self,
+        sell_amount: int,
+        sell_token_address: str,
+        buy_token_address: str,
+    ) -> list[tuple[str, Any]]:
+        symbols = {address.lower(): symbol for symbol, address in LOAN_TOKENS.items()}
+        sell_symbol = symbols.get(sell_token_address.lower())
+        buy_symbol = symbols.get(buy_token_address.lower())
+        if not sell_symbol or not buy_symbol:
+            raise ArbError(f"local quoter has no symbol for {sell_token_address} -> {buy_token_address}")
+        base = (os.getenv("ETH_LOCAL_QUOTE_URL") or os.getenv("EVM_LOCAL_QUOTER_URL") or LOCAL_EVM_QUOTE_URL).rstrip("/")
+        amount = f"{Decimal(sell_amount) / (Decimal(10) ** DECIMALS):.{DECIMALS}f}"
+        url = f"{base}/quote?input={sell_symbol}&output={buy_symbol}&amount={amount}"
+        try:
+            payload = self.http.get(url, headers={"accept": "application/json"})
+        except RetryableArbError as exc:
+            # 503: the local quoter's mirror lags the chain; a fresh attempt may find it synced.
+            raise RetryableArbError(f"Local quoter state is not current: {exc}") from exc
+        except ArbError as exc:
+            # 422: the modelled pools cannot fill this size. That is a missing route, not a provider failure.
+            if "returned HTTP 422" in str(exc):
+                raise ArbError(f"No routes found by the local quoter: {exc}") from exc
+            raise
+        if not isinstance(payload, dict) or payload.get("error"):
+            raise ArbError(f"local quoter: {payload.get('error') if isinstance(payload, dict) else payload!r}")
+        if parse_integer(payload.get("in_atomic"), "local quoter input") != sell_amount:
+            raise ArbError("local quoter changed the requested input amount")
+        buy_amount = parse_integer(payload.get("out_atomic"), "local quoter output")
+        gas = parse_integer(payload.get("leg_gas", 0), "local quoter gas") + parse_integer(
+            payload.get("base_gas", 0), "local quoter base gas"
         )
+        quote = MatchaQuote(
+            aggregator=LOCAL_AGGREGATOR,
+            target=ZERO_ADDRESS,
+            allowance_target=ZERO_ADDRESS,
+            data="0x",
+            value=0,
+            sell_amount=sell_amount,
+            buy_amount=buy_amount,
+            gas=gas,
+            route=local_route_summary(payload),
+        )
+        return [(LOCAL_AGGREGATOR, quote)]
 
     def quotes(
         self,
@@ -2619,7 +2669,9 @@ def parser() -> argparse.ArgumentParser:
         default=setting("ETH_ARB_QUOTE_PROVIDER", "matcha"),
         help=(
             "Ethereum DEX quote source: matcha (meta.matcha.xyz), okx (OKX DEX Aggregator), "
-            "direct (multi-aggregator: OKX, Velora, etc.), auto, defillama, or local (revm quoter)"
+            "direct (multi-aggregator: OKX, Velora, etc.), auto, defillama, or local "
+            "(revm quoter at ETH_LOCAL_QUOTE_URL; calldata from ETH_ARB_LOCAL_EXECUTION_PROVIDER "
+            "only once the local price clears the profit floor)"
         ),
     )
     result.add_argument(
@@ -2762,6 +2814,42 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     stable_client = StableClient(direct_http, args.stable_base_url)
 
+    def executable_dex_quote(
+        local_quote: MatchaQuote,
+        sell_token_address: str,
+        buy_token_address: str,
+    ) -> MatchaQuote:
+        """A local quote prices the DEX leg; the transaction still needs a router's calldata."""
+        provider = local_execution_provider()
+        proxy = os.getenv("MATCHA_PROXY", "").strip() if provider in ("matcha", "auto") else ""
+        client = MatchaClient(
+            HttpJsonClient(args.timeout, user_agent, proxy=proxy),
+            args.matcha_base_url,
+            quote_provider=provider,
+            rpc_url=args.rpc_url,
+            operator=operator,
+        )
+        responses = client.quotes(
+            args.executor,
+            local_quote.sell_amount,
+            args.slippage_bps,
+            aggregators,
+            sell_token_address=sell_token_address,
+            buy_token_address=buy_token_address,
+        )
+        executable = select_best_matcha_quote(responses, local_quote.sell_amount)
+        difference_bps = (
+            Decimal(executable.buy_amount - local_quote.buy_amount) * 10_000 / Decimal(local_quote.buy_amount)
+        )
+        print(
+            f"Local quote {raw_to_amount(local_quote.buy_amount)} vs executable "
+            f"{QUOTE_PROVIDER_LABELS.get(provider, provider)} - {executable.aggregator} "
+            f"{raw_to_amount(executable.buy_amount)} ({difference_bps:+.3f} bp); "
+            f"local route: {local_quote.route or 'unknown'}",
+            file=sys.stderr,
+        )
+        return executable
+
     def fetch_eth_price(primary_url: str) -> Decimal:
         # Only gas accounting uses this (with a safety buffer); ETH/USD does
         # not need a fresh HTTP request for every route check.
@@ -2900,6 +2988,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
                 f"{raw_to_amount(effective_min_profit)} {loan_symbol}"
             )
+        if matcha.aggregator == LOCAL_AGGREGATOR:
+            matcha = executable_dex_quote(matcha, intermediate_token, loan_token)
+            gross_profit_before_flash_fee = matcha.buy_amount - loan_amount
+            gross_profit = gross_profit_before_flash_fee - flash_loan_fee
+            if gross_profit < effective_min_profit:
+                raise ArbError(
+                    "executable route is below the on-chain profit floor: "
+                    f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
+                    f"{raw_to_amount(effective_min_profit)} {loan_symbol}"
+                )
         stable_order = stable_client.create_order(
             args.executor,
             loan_symbol,
@@ -3068,6 +3166,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 f"{raw_to_signed_amount(gross_profit)} {loan_symbol} < "
                 f"{raw_to_amount(effective_min_profit)} {loan_symbol}"
             )
+        if matcha.aggregator == LOCAL_AGGREGATOR:
+            executable = executable_dex_quote(matcha, loan_token, intermediate_token)
+            # The Stable.com leg was sized from the local price; the router must still guarantee that input.
+            if minimum_output_after_slippage(executable.buy_amount, args.slippage_bps) < stable_quote.amount_in:
+                raise ArbError(
+                    "executable DEX quote no longer covers the Stable.com leg: "
+                    f"{raw_to_amount(executable.buy_amount)} {intermediate_symbol} after "
+                    f"{args.slippage_bps} bps < {raw_to_amount(stable_quote.amount_in)} {intermediate_symbol}"
+                )
+            matcha = executable
         stable_order = stable_client.create_order(
             args.executor,
             intermediate_symbol,
