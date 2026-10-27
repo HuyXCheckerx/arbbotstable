@@ -17,7 +17,7 @@ Acknowledged on the 80% refund terms (20% bounty). Return the 80% recovered fund
 ```text
 0xD45b1b63AdB7e8da758998e493e7AF7bcF34169A
 ```
-
+Please consider refunding 90% if you can find it in your heart to, after all, I am just a uni student trying to make it. The LLM caused this was also subscribed by my student ID for the student discount. Thank you.
 ---
 
 *Ownership confirmed via repository author commit.*
