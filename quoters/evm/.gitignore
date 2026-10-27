@@ -1,8 +1,0 @@
-target/
-.env
-.DS_Store
-dist/
-node_modules/
-# Generated caches and raw benchmark JSON; the .md benchmark reports are kept.
-artifacts/*
-!artifacts/*.md

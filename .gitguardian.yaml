@@ -1,9 +1,0 @@
-version: 2
-secret:
-  # Solana program and account addresses are public base58 keys, not secrets, but GitGuardian's
-  # "Generic High Entropy Secret" detector flags them. The quoter tests are lists of on-chain addresses.
-  ignored_paths:
-    - quoters/solana/test/**
-  ignored_matches:
-    - name: Solana Associated Token Program id (public, quoters/solana/src/market/mirror.ts)
-      match: ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
